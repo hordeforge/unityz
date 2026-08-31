@@ -331,13 +331,6 @@ fn asArray(v: value.Value) ?[]const value.Value {
     };
 }
 
-fn asString(v: value.Value) ?[]const u8 {
-    return switch (v) {
-        .string => |s| s,
-        else => null,
-    };
-}
-
 // ---------------------------------------------------------------------------
 // Skinning detection
 // ---------------------------------------------------------------------------

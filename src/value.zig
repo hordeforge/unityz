@@ -134,11 +134,11 @@ test "value json" {
         .{ .name = "count", .value = .{ .int = 7 } },
     } };
     var buf: [512]u8 = undefined;
-    var bw = BufWriter{ .buf = &buf };
+    var bw = std.Io.Writer.fixed(&buf);
     try jsonWrite(v, &bw);
     try std.testing.expectEqualStrings(
         "{\"m_Enabled\":true,\"m_Script\":{\"m_FileID\":0,\"m_PathID\":123},\"m_Name\":\"Player\\\"X\",\"count\":7}",
-        buf[0..bw.len],
+        bw.buffered(),
     );
 }
 
@@ -149,34 +149,13 @@ test "value json escapes control characters" {
         .{ .name = "m_Del", .value = .{ .string = "c\x7f" } },
     } };
     var buf: [512]u8 = undefined;
-    var bw = BufWriter{ .buf = &buf };
+    var bw = std.Io.Writer.fixed(&buf);
     try jsonWrite(v, &bw);
     try std.testing.expectEqualStrings(
         "{\"m_ClassName\":\"MyGame\\u0000\",\"m_Tab\":\"a\\u0001b\",\"m_Del\":\"c\\u007f\"}",
-        buf[0..bw.len],
+        bw.buffered(),
     );
 }
-
-/// Minimal append-only writer implementing the interface jsonWrite needs.
-const BufWriter = struct {
-    buf: []u8,
-    len: usize = 0,
-
-    pub fn writeByte(self: *BufWriter, b: u8) !void {
-        self.buf[self.len] = b;
-        self.len += 1;
-    }
-
-    pub fn writeAll(self: *BufWriter, bytes: []const u8) !void {
-        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
-        self.len += bytes.len;
-    }
-
-    pub fn print(self: *BufWriter, comptime fmt: []const u8, args: anytype) !void {
-        const s = try std.fmt.bufPrint(self.buf[self.len..], fmt, args);
-        self.len += s.len;
-    }
-};
 
 test "value accessors" {
     try std.testing.expectEqual(@as(?i64, 5), (Value{ .int = 5 }).asInt());

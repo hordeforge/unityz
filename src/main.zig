@@ -2008,33 +2008,6 @@ fn shaderObjectValue(arena: std.mem.Allocator, sf: *const unityz.serialized.Seri
 /// A minimal append-only writer exposing the interface `value.jsonWrite`
 /// needs, backed by an arena ArrayList, so the merged base JSON can be
 /// captured and extended with a derived field.
-const JsonBuf = struct {
-    arena: std.mem.Allocator,
-    buf: std.ArrayList(u8),
-
-    pub fn init(a: std.mem.Allocator) JsonBuf {
-        return .{ .arena = a, .buf = .empty };
-    }
-
-    pub fn writeByte(self: *JsonBuf, b: u8) !void {
-        try self.buf.append(self.arena, b);
-    }
-
-    pub fn writeAll(self: *JsonBuf, s: []const u8) !void {
-        try self.buf.appendSlice(self.arena, s);
-    }
-
-    pub fn print(self: *JsonBuf, comptime fmt: []const u8, args: anytype) !void {
-        const s = try std.fmt.allocPrint(self.arena, fmt, args);
-        defer self.arena.free(s);
-        try self.buf.appendSlice(self.arena, s);
-    }
-
-    pub fn toSlice(self: *const JsonBuf) []const u8 {
-        return self.buf.items;
-    }
-};
-
 /// The shader stage a d3d11 `ShaderGpuProgramType` names.
 fn shaderStageName(gpu_type: u32) []const u8 {
     return switch (gpu_type) {
@@ -3084,9 +3057,10 @@ fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64
         if (o.class_id == 48) {
             if (try unityz.shader.decodeShader(arena, v)) |sb| {
                 // Merge the decoded sub-program blob into the Shader JSON.
-                var jb = JsonBuf.init(arena);
-                try unityz.value.jsonWrite(v, &jb);
-                const base = jb.toSlice();
+                var buf: std.ArrayList(u8) = .empty;
+                var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+                try unityz.value.jsonWrite(v, &aw.writer);
+                const base = aw.toArrayList().items;
                 if (base.len > 0 and base[base.len - 1] == '}') {
                     try stdout.writeAll(base[0 .. base.len - 1]);
                     try stdout.writeAll(",\"shaderBlob\":");

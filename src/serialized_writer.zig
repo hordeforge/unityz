@@ -461,23 +461,11 @@ fn buildV17Fixture(a: std.mem.Allocator) ![]u8 {
 
 fn writeMonoTree(w: *streams.Writer, a: std.mem.Allocator) !void {
     // blob typetree with one int field "m_Value" (local string buffer)
-    const type_str = "MonoBehaviour";
-    const name_str = "Base<MonoBehaviour>";
-    const field_str = "int";
-    const field_name = "m_Value";
-    const s1 = type_str.len + 1;
-    const s2 = s1 + name_str.len + 1;
-    const s3 = s2 + field_str.len + 1;
-    const buf_len = s3 + field_name.len + 1;
-    const buf = try a.alloc(u8, buf_len);
-    @memcpy(buf[0..type_str.len], type_str);
-    buf[type_str.len] = 0;
-    @memcpy(buf[s1 .. s1 + name_str.len], name_str);
-    buf[s1 + name_str.len] = 0;
-    @memcpy(buf[s2 .. s2 + field_str.len], field_str);
-    buf[s2 + field_str.len] = 0;
-    @memcpy(buf[s3 .. s3 + field_name.len], field_name);
-    buf[s3 + field_name.len] = 0;
+    const buf = try a.dupe(u8, "MonoBehaviour\x00Base<MonoBehaviour>\x00int\x00m_Value\x00");
+    const buf_len = buf.len;
+    const s1 = "MonoBehaviour\x00".len;
+    const s2 = s1 + "Base<MonoBehaviour>\x00".len;
+    const s3 = s2 + "int\x00".len;
 
     try w.writeInt(i32, 3); // node count
     try w.writeInt(i32, @intCast(buf_len));
@@ -593,23 +581,11 @@ fn buildV22Fixture(a: std.mem.Allocator) ![]u8 {
 
 fn writeV22MonoTree(w: *streams.Writer, a: std.mem.Allocator) !void {
     // blob_with_hash typetree with one int field "m_Value"
-    const type_str = "MonoBehaviour";
-    const name_str = "Base<MonoBehaviour>";
-    const field_str = "int";
-    const field_name = "m_Value";
-    const s1 = type_str.len + 1;
-    const s2 = s1 + name_str.len + 1;
-    const s3 = s2 + field_str.len + 1;
-    const buf_len = s3 + field_name.len + 1;
-    const buf = try a.alloc(u8, buf_len);
-    @memcpy(buf[0..type_str.len], type_str);
-    buf[type_str.len] = 0;
-    @memcpy(buf[s1 .. s1 + name_str.len], name_str);
-    buf[s1 + name_str.len] = 0;
-    @memcpy(buf[s2 .. s2 + field_str.len], field_str);
-    buf[s2 + field_str.len] = 0;
-    @memcpy(buf[s3 .. s3 + field_name.len], field_name);
-    buf[s3 + field_name.len] = 0;
+    const buf = try a.dupe(u8, "MonoBehaviour\x00Base<MonoBehaviour>\x00int\x00m_Value\x00");
+    const buf_len = buf.len;
+    const s1 = "MonoBehaviour\x00".len;
+    const s2 = s1 + "Base<MonoBehaviour>\x00".len;
+    const s3 = s2 + "int\x00".len;
 
     try w.writeInt(i32, 2); // node count
     try w.writeInt(i32, @intCast(buf_len));
