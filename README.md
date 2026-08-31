@@ -94,7 +94,8 @@ ids in different nodes can be targeted individually.
 `--json` mode for scripting:
 
 - `info --json` - summarizes a file or container (adding `--objects`
-  includes the per-object table, tagged with its container node; serialized
+  includes the per-object table, tagged with its container node and
+  each object's name; serialized
   files list their sidecar `externals_list`; each shader gets a `skins`
   verdict and its bind-channel / bone-matrix evidence)
 - `stats --json` - per-class sizes and duplicates

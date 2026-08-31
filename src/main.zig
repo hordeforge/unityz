@@ -2001,6 +2001,20 @@ fn printSerialized(path: []const u8, bytes: []const u8, dump: bool, objects: boo
 
 /// Prints the object table (path id, class, byte start, size) of a
 /// serialized file.
+/// Best-effort `m_Name` of an object, read through its type tree. Empty
+/// when the object has no usable tree, no name, or fails to read.
+fn objectName(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, o: *const unityz.serialized.ObjectInfo) []const u8 {
+    const type_index = o.type_index orelse return "";
+    if (type_index >= sf.types.len) return "";
+    const tree = sf.types[type_index].type_tree;
+    if (tree.roots.len == 0) return "";
+    const data = sf.objectData(o) orelse return "";
+    var r = unityz.streams.Reader.init(data);
+    r.endian = sf.endian;
+    const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return "";
+    return unityz.classes.stringField(v, "m_Name") orelse "";
+}
+
 fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
@@ -2009,7 +2023,10 @@ fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writ
     try stdout.print("objects by id:\n", .{});
     for (sf.objects) |*o| {
         const name = className(o.class_id) orelse "Class";
-        try stdout.print("  {d}  {s} (class {d})  start {d}  size {d}\n", .{ o.path_id, name, o.class_id, o.byte_start, o.byte_size });
+        try stdout.print("  {d}  {s} (class {d})  start {d}  size {d}", .{ o.path_id, name, o.class_id, o.byte_start, o.byte_size });
+        const nm = objectName(arena, &sf, o);
+        if (nm.len != 0) try stdout.print("  \"{s}\"", .{nm});
+        try stdout.writeByte('\n');
     }
 }
 
@@ -2026,6 +2043,11 @@ fn dumpObjectTableJson(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
             try stdout.writeByte(',');
         }
         try stdout.print("\"path_id\":{d},\"class\":{d},\"offset\":{d},\"size\":{d}", .{ o.path_id, o.class_id, o.byte_start, o.byte_size });
+        const nm = objectName(arena, &sf, o);
+        if (nm.len != 0) {
+            try stdout.writeAll(",\"name\":");
+            try writeJsonString(stdout, std.mem.trimEnd(u8, nm, "\x00"));
+        }
         try stdout.writeByte('}');
     }
 }
