@@ -9,12 +9,19 @@ Nothing in flight.
 
 ## Planned
 
-- Parsing the managed .NET object graph inside `m_Script` payloads. Shared
-  with UnityPy itself (it needs external .NET assemblies); unityz exposes
-  the raw payload, which is at/beyond parity.
+Nothing open that blocks use. Remaining items need external samples or
+tools not available here (see the plan's completion notes).
 
 ## Done
 
+- Beyond-parity CLI work: `diff --pixels`/`--audio`/`--fields` compare
+  matched objects' decoded pixels, audio streams, and exact field paths
+  (text and `--json`); `extract` gains TGA/BMP/raw RGBA output formats,
+  `--name` filtering, SpriteAtlas/AssetBundle/AnimationClip/Material/
+  Shader structured JSON exports; FSB5 audio decodes to WAV in pure Zig
+  (PCM8/16/24/32/FLOAT, IMA ADPCM); `find --any` searches every string
+  field; `info --objects` shows names; a `hierarchy` command prints the
+  GameObject/Transform tree with bones marked.
 - Multi-stream mesh export: a Mesh whose vertex channels spread over
   `m_Streams_0_..3_` exports an OBJ instead of silently nothing; the
   per-stream stride/offset is derived as UnityPy's MeshHandler does, and
@@ -28,6 +35,10 @@ Nothing in flight.
   which routes both to its ETC1 decoder) and ETC2_RGBA1 (46) decodes its
   punch-through alpha, validated pixel-identical to UnityPy's
   texture2ddecoder over a 96-block corpus.
+- Managed-reference registries decode through their type trees,
+  MonoBehaviours export the decoded managed .NET object graph as a
+  `.json` sidecar (resolves the earlier m_Script limitation; UnityPy
+  needs external .NET assemblies for the raw graph).
 - Clean-room UnityPy rewrite in Zig - format parsers, object reader,
   reserialize/edit, and extraction. See
   [the plan](plans/2026-08-30-clean-room-unitypy-rewrite-format-parsers.md),
