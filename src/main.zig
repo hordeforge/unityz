@@ -38,7 +38,10 @@ const usage =
     \\                  --json for a machine-readable array)
     \\  show <path> <id> Print one object as JSON
     \\                 (--raw for a hex dump of its serialized bytes;
-    \\                  <id> may be node:path-id to target a container entry)
+    \\                  <id> may be node:path-id to target a container entry;
+    \\                  a Shader object also carries a decoded "shaderBlob")
+    \\  shader <path> <id>  Print a Shader's decoded sub-program blob table
+    \\                 (same as `show` on a Shader; <id> may be node:path-id)
     \\  diff <a> <b>     Compare two files' objects by content hash;
     \\                 directories compare the two trees file-by-file
     \\                 (--json for a machine-readable diff;
@@ -177,7 +180,7 @@ pub fn main(init: std.process.Init) !void {
     if (verify_failed_flag) std.process.exit(1);
 }
 
-const Command = enum { info, extract, edit, verify, stats, find, show, diff, hash, skin };
+const Command = enum { info, extract, edit, verify, stats, find, show, diff, hash, skin, shader };
 
 fn parseCommand(arg: []const u8) ?Command {
     inline for (std.meta.fields(Command)) |field| {
@@ -211,7 +214,8 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
         .verify => return cmdVerify(path, rest, bytes, stdout),
         .stats => return cmdStats(path, rest, bytes, stdout),
         .find => return cmdFind(path, rest, bytes, stdout),
-        .show => return cmdShow(path, rest, bytes, stdout),
+        .show => return cmdShow(path, rest, bytes, stdout, false),
+        .shader => return cmdShow(path, rest, bytes, stdout, true),
         .diff => return cmdDiff(path, rest, bytes, stdout),
         .hash => return cmdHash(path, rest, bytes, stdout),
         .skin => return cmdSkin(path, rest, bytes, stdout),
@@ -1926,6 +1930,18 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
                 report.failed += 1;
             }
             failed += 1;
+        } else if (o.class_id == 48) {
+            // Extra Shader check: the sub-program blob must decode and
+            // re-encode byte for byte (parameter records round-trip exactly).
+            if (!(try unityz.shader.verifyBlob(arena, v))) {
+                if (json) {
+                    try recordFailure(report, arena, node, o.path_id, "shader sub-program blob does not round-trip", .{});
+                } else {
+                    try stdout.print("  object {d}: shader sub-program blob does not round-trip\n", .{o.path_id});
+                    report.failed += 1;
+                }
+                failed += 1;
+            }
         }
     }
     if (!json) try stdout.print("  {d} object(s) checked, {d} failed\n", .{ checked, failed });
@@ -1988,6 +2004,178 @@ fn shaderObjectValue(arena: std.mem.Allocator, sf: *const unityz.serialized.Seri
     var r = unityz.streams.Reader.init(od);
     r.endian = sf.endian;
     return unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch null;
+}
+
+/// A minimal append-only writer exposing the interface `value.jsonWrite`
+/// needs, backed by an arena ArrayList, so the merged base JSON can be
+/// captured and extended with a derived field.
+const JsonBuf = struct {
+    arena: std.mem.Allocator,
+    buf: std.ArrayList(u8),
+
+    pub fn init(a: std.mem.Allocator) JsonBuf {
+        return .{ .arena = a, .buf = .empty };
+    }
+
+    pub fn writeByte(self: *JsonBuf, b: u8) !void {
+        try self.buf.append(self.arena, b);
+    }
+
+    pub fn writeAll(self: *JsonBuf, s: []const u8) !void {
+        try self.buf.appendSlice(self.arena, s);
+    }
+
+    pub fn print(self: *JsonBuf, comptime fmt: []const u8, args: anytype) !void {
+        const s = try std.fmt.allocPrint(self.arena, fmt, args);
+        defer self.arena.free(s);
+        try self.buf.appendSlice(self.arena, s);
+    }
+
+    pub fn toSlice(self: *const JsonBuf) []const u8 {
+        return self.buf.items;
+    }
+};
+
+/// The shader stage a d3d11 `ShaderGpuProgramType` names.
+fn shaderStageName(gpu_type: u32) []const u8 {
+    return switch (gpu_type) {
+        13 => "vertex",
+        14 => "fragment",
+        15 => "vertex",
+        16 => "vertex",
+        17 => "fragment",
+        18 => "fragment",
+        19 => "geometry",
+        20 => "geometry",
+        21 => "hull",
+        22 => "domain",
+        else => "other",
+    };
+}
+
+/// Writes one decoded shader record as a JSON object.
+fn writeShaderRecordJson(rec: unityz.shader.DecodedRecord, stdout: *Io.Writer) !void {
+    try stdout.print("{{\"index\":{d},\"offset\":{d},\"length\":{d},\"segment\":{d},\"kind\":", .{ rec.index, rec.offset, rec.length, rec.segment });
+    switch (rec.kind) {
+        .code => try stdout.writeAll("\"code\""),
+        .param => try stdout.writeAll("\"param\""),
+        .unknown => try stdout.writeAll("\"unknown\""),
+    }
+    if (rec.kind == .code) {
+        try stdout.print(",\"programType\":{d},\"stage\":", .{rec.program_type});
+        try writeJsonString(stdout, shaderStageName(rec.program_type));
+        try stdout.print(",\"dataBytes\":{d}", .{rec.size});
+        if (rec.header.len >= 6) {
+            try stdout.print(",\"header\":{{\"version\":{d},\"srv\":{d},\"cbuffer\":{d},\"sampler\":{d},\"uav\":{d},\"gsPrimitive\":{d}}}", .{ rec.header[0], rec.header[1], rec.header[2], rec.header[3], rec.header[4], rec.header[5] });
+        }
+        if (rec.dxbc) |dx| {
+            try stdout.writeAll(",\"dxbc\":{\"chunks\":[");
+            for (dx.chunks, 0..) |c, i| {
+                if (i != 0) try stdout.writeAll(",");
+                try writeJsonString(stdout, c);
+            }
+            try stdout.print("],\"srv\":{d},\"cbuffer\":{d},\"sampler\":{d},\"uav\":{d},\"temp\":{d},\"gsPrimitive\":{d},\"isgn\":[", .{ dx.srv, dx.cbuffer, dx.sampler, dx.uav, dx.temp_registers, dx.gs_primitive });
+            for (dx.isgn, 0..) |s, i| {
+                if (i != 0) try stdout.writeAll(",");
+                try stdout.print("{{\"name\":", .{});
+                try writeJsonString(stdout, s.name);
+                try stdout.print(",\"index\":{d}}}", .{s.index});
+            }
+            try stdout.writeAll("],\"rdef\":[");
+            for (dx.rdef, 0..) |b, i| {
+                if (i != 0) try stdout.writeAll(",");
+                try stdout.print("{{\"name\":", .{});
+                try writeJsonString(stdout, b.name);
+                try stdout.writeAll(",\"members\":[");
+                for (b.members, 0..) |m, j| {
+                    if (j != 0) try stdout.writeAll(",");
+                    try stdout.print("{{\"name\":", .{});
+                    try writeJsonString(stdout, m.name);
+                    try stdout.print(",\"offset\":{d}}}", .{m.offset});
+                }
+                try stdout.writeAll("]}");
+            }
+            try stdout.writeAll("]}");
+        }
+        if (rec.bind_channels) |bc| {
+            try stdout.print(",\"bindChannels\":{{\"sourceMap\":{d},\"channels\":[", .{bc.source_map});
+            for (bc.channels, 0..) |ch, i| {
+                if (i != 0) try stdout.writeAll(",");
+                try stdout.print("[{d},{d}]", .{ ch[0], ch[1] });
+            }
+            try stdout.writeAll("]}");
+        }
+    } else if (rec.kind == .param) {
+        if (rec.param) |pb| {
+            try stdout.print(",\"param\":{{\"version\":{d},\"buffers\":[", .{pb.version});
+            for (pb.buffers, 0..) |bp, i| {
+                if (i != 0) try stdout.writeAll(",");
+                try stdout.print("{{\"name\":", .{});
+                try writeJsonString(stdout, bp.name);
+                try stdout.print(",\"usedSize\":{d},\"members\":[", .{bp.used_size});
+                for (bp.params, 0..) |p, j| {
+                    if (j != 0) try stdout.writeAll(",");
+                    try stdout.print("{{\"name\":", .{});
+                    try writeJsonString(stdout, p.name);
+                    try stdout.print(",\"type\":{d},\"rows\":{d},\"columns\":{d},\"isMatrix\":{d},\"arraySize\":{d},\"index\":{d}}}", .{ p.type, p.rows, p.columns, p.is_matrix, p.array_size, p.index });
+                }
+                try stdout.writeAll("],\"structs\":[");
+                for (bp.structs, 0..) |s, j| {
+                    if (j != 0) try stdout.writeAll(",");
+                    try stdout.print("{{\"name\":", .{});
+                    try writeJsonString(stdout, s.name);
+                    try stdout.print(",\"index\":{d},\"arraySize\":{d},\"size\":{d},\"members\":[", .{ s.index, s.array_size, s.size });
+                    for (s.params, 0..) |m, k| {
+                        if (k != 0) try stdout.writeAll(",");
+                        try stdout.print("{{\"name\":", .{});
+                        try writeJsonString(stdout, m.name);
+                        try stdout.print(",\"type\":{d},\"rows\":{d},\"columns\":{d},\"isMatrix\":{d},\"arraySize\":{d},\"index\":{d}}}", .{ m.type, m.rows, m.columns, m.is_matrix, m.array_size, m.index });
+                    }
+                    try stdout.writeAll("]}");
+                }
+                try stdout.writeAll("]}");
+            }
+            try stdout.writeAll("],\"entries\":[");
+            for (pb.entries, 0..) |e, i| {
+                if (i != 0) try stdout.writeAll(",");
+                try stdout.print("{{\"name\":", .{});
+                try writeJsonString(stdout, e.name);
+                try stdout.print(",\"kind\":{d}", .{e.kind});
+                switch (e.kind) {
+                    0 => try stdout.print(",\"index\":{d},\"samplerIndex\":{d},\"extra\":{d}", .{ e.index, e.sampler_index, e.extra }),
+                    1, 2 => try stdout.print(",\"index\":{d},\"arraySize\":{d}", .{ e.index, e.array_size }),
+                    3 => try stdout.print(",\"index\":{d},\"originalIndex\":{d}", .{ e.index, e.original_index }),
+                    4 => try stdout.print(",\"bindPoint\":{d},\"sampler\":{d}", .{ e.bind_point, e.sampler }),
+                    else => {},
+                }
+                try stdout.writeAll("}");
+            }
+            try stdout.writeAll("]}");
+        }
+    }
+    try stdout.writeAll("}");
+}
+
+/// Writes the decoded sub-program blob of a Shader as a JSON object.
+fn writeShaderBlobJson(sb: unityz.shader.ShaderBlob, stdout: *Io.Writer) !void {
+    try stdout.print("{{\"name\":", .{});
+    try writeJsonString(stdout, sb.name);
+    try stdout.print(",\"platform\":{d},\"records\":[", .{sb.platform});
+    for (sb.records, 0..) |rec, i| {
+        if (i != 0) try stdout.writeAll(",");
+        try writeShaderRecordJson(rec, stdout);
+    }
+    try stdout.writeAll("],\"codeIndices\":[");
+    for (sb.code_indices, 0..) |c, i| {
+        if (i != 0) try stdout.writeAll(",");
+        try stdout.print("{d}", .{c});
+    }
+    try stdout.writeAll("],\"paramIndices\":[");
+    for (sb.param_indices, 0..) |c, i| {
+        if (i != 0) try stdout.writeAll(",");
+        try stdout.print("{d}", .{c});
+    }
+    try stdout.writeAll("]}");
 }
 
 /// Collects skinning summaries for every Shader of `bytes`, and records a
@@ -2808,7 +2996,7 @@ fn parseSelector(text: []const u8) !Selector {
 /// without a type tree). Complementing `find` and `edit`; recurses into
 /// bundle/webfile nodes. `<path-id>` may be `node:path-id` to target a
 /// specific container entry.
-fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer, shader_only: bool) !void {
     if (rest.len < 1) {
         try stdout.print("unityz: show needs: <path-id>\n", .{});
         return;
@@ -2843,7 +3031,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                 if (sel.node) |sn| {
                     if (!std.mem.eql(u8, n.path, sn)) continue;
                 }
-                if (try showSerializedBytes(arena, n.data, sel.path_id, raw, stdout)) found = true;
+                if (try showSerializedBytes(arena, n.data, sel.path_id, raw, shader_only, stdout)) found = true;
             }
         },
         .webfile => {
@@ -2856,7 +3044,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                 if (sel.node) |sn| {
                     if (!std.mem.eql(u8, e.path, sn)) continue;
                 }
-                if (try showSerializedBytes(arena, e.data, sel.path_id, raw, stdout)) found = true;
+                if (try showSerializedBytes(arena, e.data, sel.path_id, raw, shader_only, stdout)) found = true;
             }
         },
         .serialized => {
@@ -2864,7 +3052,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                 try stdout.print("unityz: node selector not valid for a serialized file\n", .{});
                 return;
             }
-            found = try showSerializedBytes(arena, bytes, sel.path_id, raw, stdout);
+            found = try showSerializedBytes(arena, bytes, sel.path_id, raw, shader_only, stdout);
         },
         else => {
             try stdout.print("{s}: show requires a serialized file, bundle, or webfile\n", .{path});
@@ -2874,8 +3062,10 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
 }
 
 /// Prints the object with the given path id as JSON, or as a hex dump
-/// with `raw`; true when found.
-fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, raw: bool, stdout: *Io.Writer) !bool {
+/// with `raw`; true when found. A Shader (class 48) object additionally
+/// carries a decoded `shaderBlob` field describing its sub-program records;
+/// with `shader_only`, non-Shader objects are reported as not found.
+fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, raw: bool, shader_only: bool, stdout: *Io.Writer) !bool {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
         return false;
@@ -2888,6 +3078,7 @@ fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64
             try dumpHex(data, stdout);
             return true;
         }
+        if (shader_only and o.class_id != 48) return false;
         const type_index = o.type_index orelse return false;
         if (type_index >= sf.types.len) return false;
         const tree = sf.types[type_index].type_tree;
@@ -2899,6 +3090,24 @@ fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64
             try stdout.print("object {d}: read failed: {s}\n", .{ o.path_id, @errorName(err) });
             return true;
         };
+        if (o.class_id == 48) {
+            if (try unityz.shader.decodeShader(arena, v)) |sb| {
+                // Merge the decoded sub-program blob into the Shader JSON.
+                var jb = JsonBuf.init(arena);
+                try unityz.value.jsonWrite(v, &jb);
+                const base = jb.toSlice();
+                if (base.len > 0 and base[base.len - 1] == '}') {
+                    try stdout.writeAll(base[0 .. base.len - 1]);
+                    try stdout.writeAll(",\"shaderBlob\":");
+                    try writeShaderBlobJson(sb, stdout);
+                    try stdout.writeAll("}\n");
+                } else {
+                    try stdout.writeAll(base);
+                    try stdout.print("\n", .{});
+                }
+                return true;
+            }
+        }
         try unityz.value.jsonWrite(v, stdout);
         try stdout.print("\n", .{});
         return true;

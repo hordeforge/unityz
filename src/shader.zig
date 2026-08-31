@@ -719,3 +719,764 @@ test "parameter blob parses a bone-matrix member" {
     try std.testing.expectEqualStrings("myBones", pb.cbuffer_names[0]);
     try std.testing.expect(isBoneMatrixName(pb.members[0].name));
 }
+
+/// Writes a blob-convention string (u32 byte length, bytes, zero padding to 4).
+fn putBlobString(w: *streams.Writer, s: []const u8) !void {
+    try w.writeInt(i32, @intCast(s.len));
+    try w.writeBytes(s);
+    const pad = (4 - ((s.len + 4) % 4)) % 4;
+    if (pad != 0) {
+        const zeros = [_]u8{0} ** 4;
+        try w.writeBytes(zeros[0..pad]);
+    }
+}
+
+test "parameter blob parses a buffer with a nameless base and re-encodes byte for byte" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // version, 1 nameless buffer (usedSize 0, no members/structs), then 1
+    // entry: a texture "MainTex" (kind 0) with the "own sampler" sentinel.
+    var w = streams.Writer.init(std.testing.allocator);
+    defer w.deinit();
+    try w.writeInt(i32, @as(i32, @intCast(blob_version)));
+    try w.writeInt(i32, 1); // bufferCount
+    try putBlobString(&w, ""); // nameless base buffer
+    try w.writeInt(i32, 0); // usedSize
+    try w.writeInt(i32, 0); // memberCount
+    try w.writeInt(i32, 0); // structCount
+    try w.writeInt(i32, 1); // entryCount
+    try putBlobString(&w, "MainTex");
+    try w.writeInt(i32, 0); // kind texture
+    try w.writeInt(i32, 0); // index
+    try w.writeInt(i32, -1); // samplerIndex 0xffffffff
+    try w.writeInt(u32, 4); // extra: dimension(2)<<1
+
+    const raw = w.getWritten();
+    const pb = try parseParameterBlobFull(a, raw, 0);
+    try std.testing.expectEqual(@as(usize, 1), pb.buffers.len);
+    try std.testing.expectEqual(@as(usize, 0), pb.buffers[0].name.len);
+    try std.testing.expectEqual(@as(usize, 1), pb.entries.len);
+    try std.testing.expectEqualStrings("MainTex", pb.entries[0].name);
+    try std.testing.expectEqual(@as(i32, 0), pb.entries[0].kind);
+    try std.testing.expectEqual(@as(i32, -1), pb.entries[0].sampler_index);
+
+    var out = streams.Writer.init(std.testing.allocator);
+    defer out.deinit();
+    try writeParameterBlob(&out, pb);
+    try std.testing.expectEqualSlices(u8, raw, out.getWritten());
+}
+
+test "verifies a synthetic shader blob round-trips" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const blob = try buildSyntheticBlob(a, true);
+    const shader = buildShaderValue(blob);
+    try std.testing.expect(try verifyBlob(a, shader));
+}
+
+// ---------------------------------------------------------------------------
+// Full sub-program blob decoder
+// ---------------------------------------------------------------------------
+
+/// A member of a constant buffer (ShaderParams), at Unity's chosen offset.
+pub const ParamMember = struct {
+    name: []const u8,
+    type: i32,
+    rows: i32,
+    columns: i32,
+    is_matrix: i32,
+    array_size: i32,
+    index: i32,
+};
+
+/// A struct parameter nested inside a constant buffer.
+pub const StructParam = struct {
+    name: []const u8,
+    index: i32,
+    array_size: i32,
+    size: i32,
+    params: []const ParamMember,
+};
+
+/// A constant buffer (ShaderParams).
+pub const ConstantBuffer = struct {
+    name: []const u8,
+    used_size: i32,
+    params: []const ParamMember,
+    structs: []const StructParam,
+};
+
+/// A top-level parameter-blob entry. Kind-specific fields are only meaningful
+/// for the matching `kind` (0 texture, 1 cbuffer binding, 2 buffer,
+/// 3 UAV, 4 sampler).
+pub const ParamEntry = struct {
+    name: []const u8,
+    kind: i32,
+    index: i32,
+    sampler_index: i32,
+    extra: u32,
+    array_size: i32,
+    original_index: i32,
+    bind_point: i32,
+    sampler: u32,
+};
+
+/// The full decoded parameter blob (binding table), preserving every field so
+/// it re-encodes byte for byte.
+pub const ParameterBlobFull = struct {
+    version: u32,
+    buffers: []const ConstantBuffer,
+    entries: []const ParamEntry,
+};
+
+/// Port of the writer's `ParameterBlob` read path: the constant-buffer list
+/// then the top-level binding entries, keeping every field the writer emits.
+pub fn parseParameterBlobFull(arena: std.mem.Allocator, data: []const u8, offset: usize) !ParameterBlobFull {
+    var r = streams.Reader.init(data);
+    r.pos = offset;
+    const version_i = try r.readInt(i32);
+    if (version_i != @as(i32, @intCast(blob_version))) return error.BadVersion;
+    const version: u32 = @intCast(version_i);
+
+    const buffer_count = try r.readInt(i32);
+    if (buffer_count < 0 or @as(usize, @intCast(buffer_count)) > data.len) return error.Truncated;
+    const buffers = try arena.alloc(ConstantBuffer, @intCast(buffer_count));
+    for (buffers) |*buf| {
+        buf.name = trimNul(try r.readAlignedStringBorrow());
+        buf.used_size = try r.readInt(i32);
+        const pcount = try r.readInt(i32);
+        if (pcount < 0 or @as(usize, @intCast(pcount)) > data.len) return error.Truncated;
+        const params = try arena.alloc(ParamMember, @intCast(pcount));
+        for (params) |*p| {
+            p.name = trimNul(try r.readAlignedStringBorrow());
+            p.type = try r.readInt(i32);
+            p.rows = try r.readInt(i32);
+            p.columns = try r.readInt(i32);
+            p.is_matrix = try r.readInt(i32);
+            p.array_size = try r.readInt(i32);
+            p.index = try r.readInt(i32);
+        }
+        buf.params = params;
+        const scount = try r.readInt(i32);
+        if (scount < 0 or @as(usize, @intCast(scount)) > data.len) return error.Truncated;
+        const structs = try arena.alloc(StructParam, @intCast(scount));
+        for (structs) |*s| {
+            s.name = trimNul(try r.readAlignedStringBorrow());
+            s.index = try r.readInt(i32);
+            s.array_size = try r.readInt(i32);
+            s.size = try r.readInt(i32);
+            const spcount = try r.readInt(i32);
+            if (spcount < 0 or @as(usize, @intCast(spcount)) > data.len) return error.Truncated;
+            const sp = try arena.alloc(ParamMember, @intCast(spcount));
+            for (sp) |*m| {
+                m.name = trimNul(try r.readAlignedStringBorrow());
+                m.type = try r.readInt(i32);
+                m.rows = try r.readInt(i32);
+                m.columns = try r.readInt(i32);
+                m.is_matrix = try r.readInt(i32);
+                m.array_size = try r.readInt(i32);
+                m.index = try r.readInt(i32);
+            }
+            s.params = sp;
+        }
+        buf.structs = structs;
+    }
+
+    const entry_count = try r.readInt(i32);
+    if (entry_count < 0 or @as(usize, @intCast(entry_count)) > data.len) return error.Truncated;
+    const entries = try arena.alloc(ParamEntry, @intCast(entry_count));
+    for (entries) |*e| {
+        e.name = trimNul(try r.readAlignedStringBorrow());
+        e.kind = try r.readInt(i32);
+        e.index = 0;
+        e.sampler_index = 0;
+        e.extra = 0;
+        e.array_size = 0;
+        e.original_index = 0;
+        e.bind_point = 0;
+        e.sampler = 0;
+        switch (e.kind) {
+            0 => {
+                e.index = try r.readInt(i32);
+                e.sampler_index = try r.readInt(i32);
+                e.extra = try r.readInt(u32);
+            },
+            1, 2 => {
+                e.index = try r.readInt(i32);
+                e.array_size = try r.readInt(i32);
+            },
+            3 => {
+                e.index = try r.readInt(i32);
+                e.original_index = try r.readInt(i32);
+            },
+            4 => {
+                e.bind_point = try r.readInt(i32);
+                e.sampler = try r.readInt(u32);
+            },
+            else => return error.BadKind,
+        }
+    }
+
+    return .{ .version = version, .buffers = buffers, .entries = entries };
+}
+
+/// Writes a 4-byte-aligned string in the blob's own convention: u32 byte
+/// length (not counting a terminator), the bytes, then zero padding to 4.
+/// This matches how `readAlignedStringBorrow` reads and how the reference
+/// writer emits strings, so a re-encoded parameter blob round-trips.
+fn writeBlobString(w: *streams.Writer, s: []const u8) !void {
+    try w.writeInt(i32, @intCast(s.len));
+    try w.writeBytes(s);
+    const total = s.len + 4;
+    const pad = (4 - (total % 4)) % 4;
+    if (pad != 0) {
+        const zeros = [_]u8{0} ** 3;
+        try w.writeBytes(zeros[0..pad]);
+    }
+}
+
+/// Re-emits a decoded parameter blob, byte for byte (port of the writer's
+/// `ParameterBlob.to_bytes` + the nameless base buffer it always opens with).
+pub fn writeParameterBlob(w: *streams.Writer, pb: ParameterBlobFull) !void {
+    try w.writeInt(i32, @intCast(pb.version));
+    try w.writeInt(i32, @intCast(pb.buffers.len));
+    for (pb.buffers) |bp| {
+        try writeBlobString(w, bp.name);
+        try w.writeInt(i32, bp.used_size);
+        try w.writeInt(i32, @intCast(bp.params.len));
+        for (bp.params) |p| {
+            try writeBlobString(w, p.name);
+            try w.writeInt(i32, p.type);
+            try w.writeInt(i32, p.rows);
+            try w.writeInt(i32, p.columns);
+            try w.writeInt(i32, p.is_matrix);
+            try w.writeInt(i32, p.array_size);
+            try w.writeInt(i32, p.index);
+        }
+        try w.writeInt(i32, @intCast(bp.structs.len));
+        for (bp.structs) |s| {
+            try writeBlobString(w, s.name);
+            try w.writeInt(i32, s.index);
+            try w.writeInt(i32, s.array_size);
+            try w.writeInt(i32, s.size);
+            try w.writeInt(i32, @intCast(s.params.len));
+            for (s.params) |m| {
+                try writeBlobString(w, m.name);
+                try w.writeInt(i32, m.type);
+                try w.writeInt(i32, m.rows);
+                try w.writeInt(i32, m.columns);
+                try w.writeInt(i32, m.is_matrix);
+                try w.writeInt(i32, m.array_size);
+                try w.writeInt(i32, m.index);
+            }
+        }
+    }
+    try w.writeInt(i32, @intCast(pb.entries.len));
+    for (pb.entries) |e| {
+        try writeBlobString(w, e.name);
+        try w.writeInt(i32, e.kind);
+        switch (e.kind) {
+            0 => {
+                try w.writeInt(i32, e.index);
+                try w.writeInt(i32, e.sampler_index);
+                try w.writeInt(u32, e.extra);
+            },
+            1, 2 => {
+                try w.writeInt(i32, e.index);
+                try w.writeInt(i32, e.array_size);
+            },
+            3 => {
+                try w.writeInt(i32, e.index);
+                try w.writeInt(i32, e.original_index);
+            },
+            4 => {
+                try w.writeInt(i32, e.bind_point);
+                try w.writeInt(u32, e.sampler);
+            },
+            else => return error.BadKind,
+        }
+    }
+}
+
+// --- DXBC container analysis ---
+
+/// A DXBC input-signature semantic.
+pub const Semantic = struct { name: []const u8, index: u32, };
+
+/// A constant buffer member offset from a DXBC `RDEF` chunk.
+pub const RdefMember = struct { name: []const u8, offset: u32, };
+
+/// A constant buffer from a DXBC `RDEF` chunk: name and member offsets.
+pub const RdefBuffer = struct { name: []const u8, members: []const RdefMember, };
+
+/// The analysis of a DXBC program container: chunk set, declaration counts,
+/// the temp-register and geometry-primitive values the program-data header
+/// mirrors, and the ISGN / RDEF details.
+pub const DxbcInfo = struct {
+    /// Distinct chunk fourccs, in first-seen order.
+    chunks: []const []const u8,
+    srv: u32,
+    cbuffer: u32,
+    sampler: u32,
+    uav: u32,
+    temp_registers: u32,
+    gs_primitive: u8,
+    has_isgn: bool,
+    isgn: []const Semantic,
+    has_rdef: bool,
+    rdef: []const RdefBuffer,
+};
+
+const DXBC_OP_CUSTOMDATA = 53;
+const DXBC_OP_DCL_RESOURCE = 88;
+const DXBC_OP_DCL_CONSTANT_BUFFER = 89;
+const DXBC_OP_DCL_SAMPLER = 90;
+const DXBC_OP_DCL_TEMPS = 104;
+const DXBC_OP_DCL_UAV = 156;
+const DXBC_OP_DCL_RESOURCE_RAW = 161;
+const DXBC_OP_DCL_RESOURCE_STRUCTURED = 162;
+
+/// ASCII `name` from a length-prefixed offset inside a chunk (NUL-terminated).
+fn cstr(data: []const u8, offset: usize) ![]const u8 {
+    if (offset >= data.len) return error.Truncated;
+    const end = std.mem.indexOfScalarPos(u8, data, offset, 0) orelse data.len;
+    return data[offset..end];
+}
+
+/// Reads the (fourcc, payload) list out of a DXBC container, `data` being the
+/// bytes starting at the `DXBC` fourcc. Returns the distinct fourccs and the
+/// payloads the program-data header mirrors (SHDR/SHEX) or that carry extra
+/// detail (ISGN, RDEF).
+fn dxbcAnalyze(arena: std.mem.Allocator, data: []const u8) !DxbcInfo {
+    if (data.len < 0x24) return error.Truncated;
+    const count = std.mem.readInt(u32, data[0x1c..0x20], .little);
+    if (@as(usize, count) * 4 + 0x20 > data.len) return error.Truncated;
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(arena);
+    var code_payload: ?[]const u8 = null;
+    var isgn_payload: ?[]const u8 = null;
+    var rdef_payload: ?[]const u8 = null;
+
+    for (0..count) |i| {
+        const off: usize = @as(usize, std.mem.readInt(u32, data[0x20 + i * 4 ..][0..4], .little));
+        if (off + 8 > data.len) return error.Truncated;
+        const fourcc = data[off .. off + 4];
+        const size: usize = std.mem.readInt(u32, data[off + 4 ..][0..4], .little);
+        if (off + 8 + size > data.len) return error.Truncated;
+        const payload = data[off + 8 .. off + 8 + size];
+        // record fourcc once
+        var seen = false;
+        for (names.items) |n| {
+            if (std.mem.eql(u8, n, fourcc)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) try names.append(arena, arena.dupe(u8, fourcc) catch return error.OutOfMemory);
+        if (std.mem.eql(u8, fourcc, "SHDR") or std.mem.eql(u8, fourcc, "SHEX")) {
+            if (code_payload == null) code_payload = payload;
+        } else if (std.mem.eql(u8, fourcc, "ISGN")) {
+            isgn_payload = payload;
+        } else if (std.mem.eql(u8, fourcc, "RDEF")) {
+            rdef_payload = payload;
+        }
+    }
+
+    // Declared counts and temp count from the SHDR/SHEX token stream.
+    var srv: u32 = 0;
+    var cbuffer: u32 = 0;
+    var sampler: u32 = 0;
+    var uav: u32 = 0;
+    var temp_registers: u32 = 0;
+    if (code_payload) |chunk| {
+        const decl = dxbcU32(chunk, 4) orelse return error.Truncated;
+        const word_count = @min(@as(usize, decl), chunk.len / 4);
+        var i: usize = 2;
+        while (i < word_count) {
+            const token = std.mem.readInt(u32, chunk[i * 4 ..][0..4], .little);
+            const opcode = token & 0x7ff;
+            var length = (token >> 24) & 0x7f;
+            if (opcode == DXBC_OP_CUSTOMDATA) {
+                if (i + 1 >= word_count) break;
+                length = std.mem.readInt(u32, chunk[(i + 1) * 4 ..][0..4], .little);
+            }
+            if (length == 0) break; // corrupt; stop rather than loop forever
+            if (opcode == DXBC_OP_DCL_RESOURCE or opcode == DXBC_OP_DCL_RESOURCE_RAW or opcode == DXBC_OP_DCL_RESOURCE_STRUCTURED) {
+                srv += 1;
+            } else if (opcode == DXBC_OP_DCL_CONSTANT_BUFFER) {
+                cbuffer += 1;
+            } else if (opcode == DXBC_OP_DCL_SAMPLER) {
+                sampler += 1;
+            } else if (opcode == DXBC_OP_DCL_UAV) {
+                uav += 1;
+            } else if (opcode == DXBC_OP_DCL_TEMPS) {
+                // operand dword holds the register count
+                temp_registers = if (i + 1 < word_count) std.mem.readInt(u32, chunk[(i + 1) * 4 ..][0..4], .little) else 0;
+            }
+            i += @as(usize, length);
+        }
+    }
+
+    // ISGN input signature.
+    var isgn: []const Semantic = &.{};
+    if (isgn_payload) |isg| {
+        const sig_count = dxbcU32(isg, 0) orelse isgn.len;
+        const sem = try arena.alloc(Semantic, @min(@as(usize, sig_count), (isg.len -| 8) / 24));
+        var sem_len: usize = 0;
+        for (0..sem.len) |k| {
+            if (8 + k * 24 + 8 > isg.len) break;
+            const name_off = std.mem.readInt(u32, isg[8 + k * 24 ..][0..4], .little);
+            const index = std.mem.readInt(u32, isg[12 + k * 24 ..][0..4], .little);
+            const nm = cstr(isg, name_off) catch break;
+            sem[sem_len] = .{ .name = nm, .index = index };
+            sem_len += 1;
+        }
+        isgn = sem[0..sem_len];
+    }
+
+    // RDEF constant-buffer member offsets.
+    var rdef: []const RdefBuffer = &.{};
+    if (rdef_payload) |rdf| {
+        const ccount = dxbcU32(rdf, 0) orelse 0;
+        const table = dxbcU32(rdf, 4) orelse 0;
+        var bufs: std.ArrayList(RdefBuffer) = .empty;
+        defer bufs.deinit(arena);
+        for (0..ccount) |k| {
+            const entry = @as(usize, table) + k * 24;
+            if (entry + 24 > rdf.len) break;
+            const name_at = std.mem.readInt(u32, rdf[entry..][0..4], .little);
+            const members = std.mem.readInt(u32, rdf[entry + 4 ..][0..4], .little);
+            const member_table = std.mem.readInt(u32, rdf[entry + 8 ..][0..4], .little);
+            const bname = cstr(rdf, name_at) catch continue;
+            var mems: std.ArrayList(RdefMember) = .empty;
+            defer mems.deinit(arena);
+            for (0..members) |m| {
+                const mo = @as(usize, member_table) + m * 24;
+                if (mo + 24 > rdf.len) break;
+                const mat = std.mem.readInt(u32, rdf[mo..][0..4], .little);
+                const off = std.mem.readInt(u32, rdf[mo + 4 ..][0..4], .little);
+                const mn = cstr(rdf, mat) catch continue;
+                try mems.append(arena, .{ .name = mn, .offset = off });
+            }
+            try bufs.append(arena, .{ .name = bname, .members = try mems.toOwnedSlice(arena) });
+        }
+        rdef = try bufs.toOwnedSlice(arena);
+    }
+
+    return .{
+        .chunks = try names.toOwnedSlice(arena),
+        .srv = srv,
+        .cbuffer = cbuffer,
+        .sampler = sampler,
+        .uav = uav,
+        .temp_registers = temp_registers,
+        .gs_primitive = 0,
+        .has_isgn = isgn_payload != null,
+        .isgn = isgn,
+        .has_rdef = rdef_payload != null,
+        .rdef = rdef,
+    };
+}
+
+fn dxbcU32(data: []const u8, off: usize) ?u32 {
+    if (off + 4 > data.len) return null;
+    return std.mem.readInt(u32, data[off..][0..4], .little);
+}
+
+// --- top-level shader blob decode ---
+
+pub const RecordKind = enum { code, param, unknown };
+
+/// One decoded record of a platform blob.
+pub const DecodedRecord = struct {
+    index: u32,
+    offset: u32,
+    length: u32,
+    segment: u32,
+    kind: RecordKind,
+    /// Code-record details (valid when kind == .code).
+    program_type: u32,
+    data_offset: usize,
+    size: u32,
+    /// The program data (38-byte header + container) as stored.
+    data: []const u8,
+    /// The program-data header fields (valid when kind == .code and data.len>=38).
+    header: []const u8,
+    is_dxbc: bool,
+    dxbc: ?DxbcInfo,
+    bind_channels: ?BindChannels,
+    /// Parameter-blob details (valid when kind == .param).
+    param: ?ParameterBlobFull,
+};
+
+/// The decoded sub-program blob of one Shader.
+pub const ShaderBlob = struct {
+    name: []const u8,
+    platform: u32,
+    records: []const DecodedRecord,
+    /// Blob indices for d3d11 sub-programs (from the parsed form).
+    code_indices: []const u32,
+    /// Blob indices for parameter blobs (from the parsed form).
+    param_indices: []const u32,
+};
+
+/// The decompressed d3d11 platform blob plus its record table.
+pub const D3d11Blob = struct {
+    data: []const u8,
+    records: []const Record,
+};
+
+/// Resolves and decompresses the d3d11 platform blob for a Shader value tree.
+/// Returns null when there is no single-tier d3d11 platform or the blob is too
+/// short to hold a record table.
+pub fn openD3d11Blob(arena: std.mem.Allocator, v: value.Value) !?D3d11Blob {
+    const platforms = asArray((fieldOf(v, "platforms") orelse fieldOf(v, "m_Platforms")) orelse return null) orelse return null;
+    var plat_index: ?usize = null;
+    for (platforms, 0..) |p, i| {
+        if (p.asInt()) |pi| {
+            if (pi == platform_d3d11) {
+                plat_index = i;
+                break;
+            }
+        }
+    }
+    const idx = plat_index orelse return null;
+    const offsets = asArray((fieldOf(v, "offsets") orelse fieldOf(v, "m_Offsets")) orelse return null) orelse return null;
+    const comp_lens = asArray((fieldOf(v, "compressedLengths") orelse fieldOf(v, "m_CompressedLengths")) orelse return null) orelse return null;
+    const decomp_lens = asArray((fieldOf(v, "decompressedLengths") orelse fieldOf(v, "m_DecompressedLengths")) orelse return null) orelse return null;
+    const blob = switch ((fieldOf(v, "compressedBlob") orelse fieldOf(v, "m_CompressedBlob") orelse fieldOf(v, "m_Script")) orelse return null) {
+        .bytes => |b| b,
+        else => return null,
+    };
+    if (idx >= offsets.len or idx >= comp_lens.len or idx >= decomp_lens.len) return null;
+    const off_tiers = asArray(offsets[idx]) orelse return null;
+    const comp_tiers = asArray(comp_lens[idx]) orelse return null;
+    const decomp_tiers = asArray(decomp_lens[idx]) orelse return null;
+    if (off_tiers.len != 1 or comp_tiers.len != 1 or decomp_tiers.len != 1) return null;
+    const off0 = off_tiers[0].asInt() orelse return null;
+    const comp0 = comp_tiers[0].asInt() orelse return null;
+    const decomp0 = decomp_tiers[0].asInt() orelse return null;
+    if (off0 < 0 or comp0 < 0 or decomp0 < 0) return null;
+    const start: usize = @intCast(off0);
+    const comp_len: usize = @intCast(comp0);
+    if (start + comp_len > blob.len) return null;
+    const needs_lz4 = comp_len != @as(usize, @intCast(decomp0));
+    const data = if (needs_lz4)
+        try lz4.decompress(arena, blob[start .. start + comp_len], @intCast(decomp0))
+    else
+        blob[start .. start + comp_len];
+    const records = try parseRecords(arena, data);
+    return .{ .data = data, .records = records };
+}
+
+/// Collects every d3d11 sub-program blob index (all stages) and its parameter
+/// blob indices from `m_ParsedForm`.
+fn collectCodeParams(arena: std.mem.Allocator, pf: value.Value, codes: *std.ArrayList(u32), code_types: *std.ArrayList(u32), params: *std.ArrayList(u32)) !void {
+    const sub_shaders = asArray(fieldOf(pf, "m_SubShaders") orelse return) orelse return;
+    for (sub_shaders) |sub| {
+        const passes = asArray(fieldOf(sub, "m_Passes") orelse continue) orelse continue;
+        for (passes) |pass| {
+            if (pass != .obj) continue;
+            for (pass.obj) |f| {
+                if (f.value != .obj) continue;
+                const prog = f.value;
+                if (fieldOf(prog, "m_PlayerSubPrograms") == null) continue;
+                const groups = asArray(fieldOf(prog, "m_PlayerSubPrograms").?) orelse continue;
+                const pgroups = if (fieldOf(prog, "m_ParameterBlobIndices")) |pi| (asArray(pi) orelse &.{}) else &.{};
+                for (groups, 0..) |group, gi| {
+                    const subs = asArray(group) orelse continue;
+                    const parr = if (gi < pgroups.len) (asArray(pgroups[gi]) orelse &.{}) else &.{};
+                    for (subs, 0..) |sub_obj, k| {
+                        const gpu = intField(sub_obj, "m_GpuProgramType") orelse continue;
+                        const gpu_u: u32 = @intCast(gpu);
+                        if (!isD3d11Type(gpu_u)) continue;
+                        if (intField(sub_obj, "m_BlobIndex")) |bi| {
+                            try codes.append(arena, @intCast(bi));
+                            try code_types.append(arena, gpu_u);
+                        }
+                        if (k < parr.len) {
+                            if (parr[k].asInt()) |pi| {
+                                try params.append(arena, @intCast(pi));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Decodes one code-blob record referenced by `index`. Returns null when the
+/// record does not hold a parseable sub-program.
+pub fn decodeCodeRecord(arena: std.mem.Allocator, data: []const u8, rec: Record, index: u32, program_type: u32) !?DecodedRecord {
+    const off: usize = rec.offset;
+    if (off + 32 > data.len) return null;
+    const sp = parseSubProgram(data, off) catch return null;
+    const rec_end: usize = off + @as(usize, rec.length);
+    const data_end = (sp.data_offset + sp.size + 3) & ~@as(usize, 3);
+    // trailing ParserBindChannels
+    var bind: ?BindChannels = null;
+    if (rec_end > data_end and data_end >= 8 and data_end <= data.len and rec_end <= data.len) {
+        if (data_end + 8 <= rec_end) {
+            bind = parseBindChannels(arena, data[data_end..rec_end]) catch null;
+        }
+    }
+    var header: []const u8 = &.{};
+    var is_dxbc = false;
+    var dxbc: ?DxbcInfo = null;
+    if (sp.data.len >= 38) {
+        header = sp.data[0..38];
+        if (sp.data.len >= 42 and std.mem.eql(u8, sp.data[38..42], "DXBC")) {
+            is_dxbc = true;
+            dxbc = try dxbcAnalyze(arena, sp.data[38..]);
+            if (dxbc) |*d| d.gs_primitive = header[5];
+        }
+    }
+    return .{
+        .index = index,
+        .offset = rec.offset,
+        .length = rec.length,
+        .segment = rec.segment,
+        .kind = .code,
+        .program_type = if (program_type != 0) program_type else sp.program_type,
+        .data_offset = sp.data_offset,
+        .size = sp.size,
+        .data = sp.data,
+        .header = header,
+        .is_dxbc = is_dxbc,
+        .dxbc = dxbc,
+        .bind_channels = bind,
+        .param = null,
+    };
+}
+
+/// Decodes one parameter-blob record referenced by `index`. Returns null when
+/// the record is not a parameter blob.
+pub fn decodeParamRecord(arena: std.mem.Allocator, data: []const u8, rec: Record, index: u32) !?DecodedRecord {
+    const off: usize = rec.offset;
+    if (off + 8 > data.len) return null;
+    const pb = parseParameterBlobFull(arena, data, off) catch return null;
+    return .{
+        .index = index,
+        .offset = rec.offset,
+        .length = rec.length,
+        .segment = rec.segment,
+        .kind = .param,
+        .program_type = 0,
+        .data_offset = off,
+        .size = rec.length,
+        .data = &.{},
+        .header = &.{},
+        .is_dxbc = false,
+        .dxbc = null,
+        .bind_channels = null,
+        .param = pb,
+    };
+}
+
+/// Decodes the whole d3d11 sub-program blob of a Shader value tree, listing
+/// every record referenced by the parsed form (code and parameter) plus any
+/// unreferenced record that still parses as one of the two kinds.
+pub fn decodeShader(arena: std.mem.Allocator, v: value.Value) !?ShaderBlob {
+    const blob = (try openD3d11Blob(arena, v)) orelse return null;
+    const pf = fieldOf(v, "m_ParsedForm") orelse return null;
+    const name = trimNul(stringField(pf, "m_Name") orelse "");
+
+    var codes: std.ArrayList(u32) = .empty;
+    defer codes.deinit(arena);
+    var code_types: std.ArrayList(u32) = .empty;
+    defer code_types.deinit(arena);
+    var params: std.ArrayList(u32) = .empty;
+    defer params.deinit(arena);
+    try collectCodeParams(arena, pf, &codes, &code_types, &params);
+
+    const n = blob.records.len;
+    const records = try arena.alloc(DecodedRecord, n);
+    var count: usize = 0;
+    for (0..n) |i| {
+        const rec = blob.records[i];
+        // referenced as code?
+        var code_idx: ?usize = null;
+        for (codes.items, 0..) |c, j| {
+            if (c == i) {
+                code_idx = j;
+                break;
+            }
+        }
+        // referenced as param?
+        var param_ref = false;
+        for (params.items) |p| {
+            if (p == i) {
+                param_ref = true;
+                break;
+            }
+        }
+        const gpu_type: u32 = if (code_idx) |j| code_types.items[j] else 0;
+        if (code_idx != null) {
+            if (try decodeCodeRecord(arena, blob.data, rec, @intCast(i), gpu_type)) |dr| {
+                records[count] = dr;
+                count += 1;
+            }
+        } else if (param_ref) {
+            if (try decodeParamRecord(arena, blob.data, rec, @intCast(i))) |dr| {
+                records[count] = dr;
+                count += 1;
+            }
+        } else {
+            // unreferenced: best-effort classify
+            if (try decodeCodeRecord(arena, blob.data, rec, @intCast(i), 0)) |dr| {
+                records[count] = dr;
+                count += 1;
+            } else if (try decodeParamRecord(arena, blob.data, rec, @intCast(i))) |dr| {
+                records[count] = dr;
+                count += 1;
+            }
+            // else: leave out (unknown records are not part of the table)
+        }
+    }
+
+    return .{
+        .name = name,
+        .platform = platform_d3d11,
+        .records = try arena.dupe(DecodedRecord, records[0..count]),
+        .code_indices = try arena.dupe(u32, codes.items),
+        .param_indices = try arena.dupe(u32, params.items),
+    };
+}
+
+fn stringField(v: value.Value, name: []const u8) ?[]const u8 {
+    return switch (fieldOf(v, name) orelse return null) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+/// Verifies a Shader's sub-program blob round-trips: the d3d11 platform blob
+/// decompresses and every record that is a parameter blob re-encodes byte
+/// for byte (the property the reference implementation holds on every stock
+/// blob). Code records hold opaque compiled bytes and are not re-encoded.
+/// Shaders without a single-tier d3d11 blob have nothing to check and report
+/// true.
+pub fn verifyBlob(arena: std.mem.Allocator, v: value.Value) !bool {
+    const blob = (try openD3d11Blob(arena, v)) orelse return true;
+    const data = blob.data;
+    for (blob.records) |rec| {
+        const off: usize = rec.offset;
+        const rec_end: usize = off + @as(usize, rec.length);
+        if (off + 8 > data.len or rec_end > data.len) continue;
+        const raw = data[off..rec_end];
+        // Parameter blobs are re-encoded; anything that does not parse as one
+        // (a code record, or an unknown record) is not re-encoded.
+        const pb = parseParameterBlobFull(arena, data, off) catch continue;
+        var w = streams.Writer.init(arena);
+        try writeParameterBlob(&w, pb);
+        const rebuilt = w.getWritten();
+        if (rebuilt.len != raw.len or !std.mem.eql(u8, rebuilt, raw)) return false;
+    }
+    return true;
+}
+

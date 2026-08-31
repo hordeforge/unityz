@@ -10,7 +10,11 @@
 //! incl. HDR; packed sprites merge their separate alpha texture and render
 //! tight/polygon meshes); MonoBehaviours resolve their
 //! MonoScript identity and export the raw serialized script payload;
-//! managed-reference registries decode through their type trees. Objects
+//! managed-reference registries decode through their type trees. Shader
+//! (class 48) sub-program blobs decode: per-record parameter blobs (constant
+//! buffers + texture/cbuffer/UAV/sampler entries) and code blobs (38-byte
+//! program-data header, DXBC chunk analysis incl. ISGN/RDEF, ParserBindChannels),
+//! surfaced via `show`/`shader` and round-trip checked by `verify`. Objects
 //! can be edited in place across all supported serialized formats
 //! (2-22 except 4).
 
