@@ -26,6 +26,14 @@ pub fn intField(v: value.Value, name: []const u8) ?i64 {
     return f.asInt();
 }
 
+/// Narrows an untrusted type-tree integer to `T`, yielding 0 when it does
+/// not fit. Field values come from the file, so a negative or oversized
+/// integer must degrade to the default the same way a missing field does
+/// rather than make `@intCast` illegal behaviour.
+fn narrow(comptime T: type, v: i64) T {
+    return std.math.cast(T, v) orelse 0;
+}
+
 pub fn boolField(v: value.Value, name: []const u8) ?bool {
     return switch (fieldOf(v, name) orelse return null) {
         .bool => |b| b,
@@ -61,7 +69,7 @@ pub fn pptrField(v: value.Value, name: []const u8) ?value.PPtr {
             // PPtrs with extra fields were read as objects.
             const file = intField(.{ .obj = fields }, "m_FileID") orelse break :blk null;
             const path = intField(.{ .obj = fields }, "m_PathID") orelse break :blk null;
-            break :blk .{ .file_id = @intCast(file), .path_id = path };
+            break :blk .{ .file_id = narrow(i32, file), .path_id = path };
         },
         else => null,
     };
@@ -91,8 +99,8 @@ pub const StreamingInfo = struct {
     pub fn fromValue(v: value.Value) StreamingInfo {
         const f = fieldOf(v, "m_StreamData") orelse return .{};
         return .{
-            .offset = @intCast(intField(f, "offset") orelse intField(f, "m_Offset") orelse 0),
-            .size = @intCast(intField(f, "size") orelse intField(f, "m_Size") orelse 0),
+            .offset = narrow(u32, intField(f, "offset") orelse intField(f, "m_Offset") orelse 0),
+            .size = narrow(u32, intField(f, "size") orelse intField(f, "m_Size") orelse 0),
             .path = stringField(f, "path") orelse stringField(f, "m_Path") orelse "",
         };
     }
@@ -114,12 +122,12 @@ pub const Texture2D = struct {
 
     pub fn fromValue(v: value.Value) Texture2D {
         return .{
-            .width = @intCast(intField(v, "m_Width") orelse 0),
-            .height = @intCast(intField(v, "m_Height") orelse 0),
-            .format = @intCast(intField(v, "m_TextureFormat") orelse 0),
-            .mip_count = @intCast(intField(v, "m_MipCount") orelse 1),
-            .image_count = @intCast(intField(v, "m_ImageCount") orelse 1),
-            .complete_image_size = @intCast(intField(v, "m_CompleteImageSize") orelse 0),
+            .width = narrow(u32, intField(v, "m_Width") orelse 0),
+            .height = narrow(u32, intField(v, "m_Height") orelse 0),
+            .format = narrow(i32, intField(v, "m_TextureFormat") orelse 0),
+            .mip_count = narrow(u32, intField(v, "m_MipCount") orelse 1),
+            .image_count = narrow(u32, intField(v, "m_ImageCount") orelse 1),
+            .complete_image_size = narrow(u32, intField(v, "m_CompleteImageSize") orelse 0),
             .is_readable = boolField(v, "m_IsReadable") orelse false,
             // The pixel payload is named "image data" in modern type trees
             // (2021.2+) and "m_ImageData" in older ones; accept both.
@@ -159,14 +167,14 @@ pub const AudioClip = struct {
         const f = fieldOf(v, "m_Resource") orelse return .{};
         return .{
             .name = stringField(v, "m_Name") orelse "",
-            .channels = @intCast(intField(v, "m_Channels") orelse 0),
-            .frequency = @intCast(intField(v, "m_Frequency") orelse 0),
-            .bits_per_sample = @intCast(intField(v, "m_BitsPerSample") orelse 0),
-            .compression_format = @intCast(intField(v, "m_CompressionFormat") orelse 0),
+            .channels = narrow(u32, intField(v, "m_Channels") orelse 0),
+            .frequency = narrow(u32, intField(v, "m_Frequency") orelse 0),
+            .bits_per_sample = narrow(u32, intField(v, "m_BitsPerSample") orelse 0),
+            .compression_format = narrow(i32, intField(v, "m_CompressionFormat") orelse 0),
             .audio_data = bytesField(v, "m_AudioData") orelse &.{},
             .resource = .{
-                .offset = @intCast(intField(f, "m_Offset") orelse 0),
-                .size = @intCast(intField(f, "m_Size") orelse 0),
+                .offset = narrow(u32, intField(f, "m_Offset") orelse 0),
+                .size = narrow(u32, intField(f, "m_Size") orelse 0),
                 .path = stringField(f, "m_Source") orelse "",
             },
         };
@@ -280,8 +288,8 @@ pub const Sprite = struct {
             .alpha_texture = pptrField(v, "m_AlphaTexture"),
             .pixels_to_units = ptu,
         };
-        if (intField(v, "m_Width")) |w| self.width = @intCast(w);
-        if (intField(v, "m_Height")) |h| self.height = @intCast(h);
+        if (intField(v, "m_Width")) |w| self.width = narrow(u32, w);
+        if (intField(v, "m_Height")) |h| self.height = narrow(u32, h);
         if (fieldOf(v, "m_Rect")) |r| readRect(r, &self.rect);
         // Modern sprites carry the render data in m_RD (texture + rect);
         // it takes precedence over the legacy top-level fields.
@@ -810,11 +818,11 @@ pub const Mesh = struct {
 
     pub fn fromValue(v: value.Value) Mesh {
         var m = Mesh{ .name = stringField(v, "m_Name") orelse "" };
-        if (intField(v, "m_IndexFormat")) |f| m.index_format = @intCast(f);
+        if (intField(v, "m_IndexFormat")) |f| m.index_format = narrow(i32, f);
         m.index_buffer = bytesField(v, "m_IndexBuffer") orelse "";
 
         const vd = fieldOf(v, "m_VertexData") orelse return m;
-        if (intField(vd, "m_VertexCount")) |n| m.vertex_count = @intCast(n);
+        if (intField(vd, "m_VertexCount")) |n| m.vertex_count = narrow(u32, n);
         m.vertex_data = bytesField(vd, "m_DataSize") orelse "";
 
         if (fieldOf(vd, "m_Channels")) |chans| {
@@ -823,10 +831,10 @@ pub const Mesh = struct {
                 const n = @min(arr.len, m.channels.len);
                 for (arr[0..n], 0..) |c, i| {
                     m.channels[i] = .{
-                        .stream = @intCast(intField(c, "stream") orelse 0),
-                        .offset = @intCast(intField(c, "offset") orelse 0),
-                        .format = @intCast(intField(c, "format") orelse 0),
-                        .dimension = @intCast(intField(c, "dimension") orelse 0),
+                        .stream = narrow(u32, intField(c, "stream") orelse 0),
+                        .offset = narrow(u32, intField(c, "offset") orelse 0),
+                        .format = narrow(i32, intField(c, "format") orelse 0),
+                        .dimension = narrow(u32, intField(c, "dimension") orelse 0),
                     };
                 }
                 m.channel_count = n;

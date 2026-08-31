@@ -747,7 +747,13 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const qual = if (ms_ns.len != 0)
                     try std.fmt.bufPrint(&qual_buf, "{s}.{s}", .{ ms_ns, ms_cn })
                 else
-                    ms_cn;
+                    try std.fmt.bufPrint(&qual_buf, "{s}", .{ms_cn});
+                // The name comes from the file: keep it one path component
+                // so it cannot steer the output path out of the extract dir.
+                for (qual) |*c| switch (c.*) {
+                    '/', '\\' => c.* = '_',
+                    else => {},
+                };
                 var fname_buf: [192]u8 = undefined;
                 const fname = try std.fmt.bufPrint(&fname_buf, "script_{d}_{s}.bin", .{ o.path_id, if (qual.len != 0) qual else "unnamed" });
                 try extractFile(subdir, fname, payload);
