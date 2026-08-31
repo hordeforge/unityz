@@ -1591,3 +1591,17 @@ skin (no blend channels, no bone bindings) and that the scene's
 SkinnedMeshRenderer (46) references it, exiting 1 - so that scene's
 renderer would show broken skinning in-game, a real finding the tool
 surfaces. The atlas bundle passes with exit 0. 279/279 tests.
+
+2026-08-31 (JSON names + sprite pixel-diff cache fix): `hash --json`
+entries and `stats --json` classes now carry object/class names,
+consistent with the `info --objects` names.
+
+Adding the names surfaced a
+real regression from the merged sprite-cache memoization: `pixelPass`
+created ONE `SpriteCache` and passed it to both files' decodes, so file
+B's sprites resolved their atlas texture through file A's memoized
+atlas values and every sprite rendered identically - `diff --pixels`
+reported 0 diffs even though extract proved the renders differ (the
+mutated atlas's WaterTowerModern3). Fixed with per-file caches; the
+sprite pixel diff now reports the correct 14 pixels again in text, JSON
+and directory modes. 279/279 tests.

@@ -3203,7 +3203,7 @@ fn writeJsonStringList(stdout: *Io.Writer, items: []const []const u8) !void {
 }
 
 /// One object's content fingerprint for `diff`.
-const Fp = struct { path_id: i64, class_id: i32, hash: u64, size: u32, node: ?[]const u8 = null };
+const Fp = struct { path_id: i64, class_id: i32, hash: u64, size: u32, node: ?[]const u8 = null, name: []const u8 = "" };
 
 /// `hash <path> [--path-id N]` — print each object's content fingerprint
 /// (Wyhash of its raw bytes) with class and size, so builds can be
@@ -3300,7 +3300,12 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                 try writeJsonString(stdout, n);
                 try stdout.writeByte(',');
             }
-            try stdout.print("\"path_id\":{d},\"hash\":\"{x:0>16}\",\"class\":{d},\"size\":{d}}}", .{ fp.path_id, fp.hash, fp.class_id, fp.size });
+            try stdout.print("\"path_id\":{d},\"hash\":\"{x:0>16}\",\"class\":{d},\"size\":{d}", .{ fp.path_id, fp.hash, fp.class_id, fp.size });
+            if (fp.name.len != 0) {
+                try stdout.writeAll(",\"name\":");
+                try writeJsonString(stdout, std.mem.trimEnd(u8, fp.name, "\x00"));
+            }
+            try stdout.writeByte('}');
         }
         try stdout.print("]\n", .{});
     }
@@ -3327,6 +3332,7 @@ fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
                 .hash = h,
                 .size = @intCast(data.len),
                 .node = node,
+                .name = objectName(arena, &sf, o),
             });
         } else {
             try stdout.print("{d}\t{x:0>16}\t{s} (class {d})\t{d} bytes\n", .{
@@ -3346,15 +3352,16 @@ fn pixelPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
     var b_list: std.ArrayList(Fp) = .empty;
     try collectFingerprints(arena, a_bytes, class_filter, null, &a_list);
     try collectFingerprints(arena, b_bytes, class_filter, null, &b_list);
-    var sprite_cache: SpriteCache = .{};
+    var cache_a: SpriteCache = .{};
+    var cache_b: SpriteCache = .{};
     for (a_list.items) |fa| {
         for (b_list.items) |fb| {
             if (fb.path_id != fa.path_id or !sameNode(fb.node, fa.node)) continue;
             switch (fa.class_id) {
-                28 => if (try diffTexturePixels(arena, a_bytes, b_bytes, fa, &sprite_cache, stdout)) |st| {
+                28 => if (try diffTexturePixels(arena, a_bytes, b_bytes, fa, &cache_a, &cache_b, stdout)) |st| {
                     if (st.diff_pixels != 0) try stats.append(arena, st);
                 },
-                213 => if (try diffSpritePixels(arena, a_bytes, b_bytes, fa, &sprite_cache, stdout)) |st| {
+                213 => if (try diffSpritePixels(arena, a_bytes, b_bytes, fa, &cache_a, &cache_b, stdout)) |st| {
                     if (st.diff_pixels != 0) try stats.append(arena, st);
                 },
                 else => {},
@@ -3664,9 +3671,9 @@ fn findObjectValueInSerialized(arena: std.mem.Allocator, bytes: []const u8, path
 /// entry. Pixels may be embedded in the object, streamed inside the same
 /// serialized file, or streamed from a sibling `.resS` / `.resource`
 /// sidecar node inside the same container, all resolved here.
-fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, cache: *SpriteCache, stdout: *Io.Writer) !?PixelStat {
-    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .texture, cache);
-    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .texture, cache);
+fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, cache_a: *SpriteCache, cache_b: *SpriteCache, stdout: *Io.Writer) !?PixelStat {
+    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .texture, cache_a);
+    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .texture, cache_b);
     if (rgba_a == null or rgba_b == null) {
         try stdout.print("    (pixels: object {d} texture could not be decoded in one or both files)\n", .{fa.path_id});
         return null;
@@ -3684,9 +3691,12 @@ fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []c
 /// rotation, alpha-texture merge, tight/polygon mesh) and compares the
 /// RGBA. Object bytes are unchanged when only the streamed atlas pixels
 /// change, so this is the only diff signal that sees those edits.
-fn diffSpritePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, cache: *SpriteCache, stdout: *Io.Writer) !?PixelStat {
-    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .sprite, cache);
-    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .sprite, cache);
+fn diffSpritePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, cache_a: *SpriteCache, cache_b: *SpriteCache, stdout: *Io.Writer) !?PixelStat {
+    // each file gets its own cache: the atlas memoization is per serialized
+    // file, so sharing one cache across both files made file B's sprites
+    // resolve through file A's atlas data and rendered them identically
+    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .sprite, cache_a);
+    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .sprite, cache_b);
     if (rgba_a == null or rgba_b == null) {
         try stdout.print("    (pixels: object {d} sprite could not be rendered in one or both files)\n", .{fa.path_id});
         return null;
@@ -4659,7 +4669,9 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, st
     try stdout.print("{{\"objects\":{d},\"bytes\":{d},\"duplicates\":{d},\"duplicate_bytes\":{d},\"classes\":{{", .{ total_objects, total_bytes, dup_count, dup_bytes });
     for (classes.items, 0..) |c, ci| {
         if (ci != 0) try stdout.print(",", .{});
-        try stdout.print("\"{d}\":{{\"count\":{d},\"bytes\":{d}}}", .{ c.class_id, c.count, c.bytes });
+        try stdout.print("\"{d}\":{{\"name\":", .{c.class_id});
+        try writeJsonString(stdout, className(c.class_id) orelse "Class");
+        try stdout.print(",\"count\":{d},\"bytes\":{d}}}", .{ c.count, c.bytes });
     }
     try stdout.print("}},\"duplicate_groups\":[", .{});
     for (groups.items, 0..) |g, gi| {
