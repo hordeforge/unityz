@@ -263,4 +263,27 @@ test "GCADPCM decode matches a hand-computed block" {
     const pcm = try decodeSample(a, &data, 0, s, 6);
     defer a.free(pcm);
     try std.testing.expectEqualSlices(i16, &.{ 1, -1, 2, -2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, pcm);
+
+    // Non-degenerate path: byte0 0xA0 selects predictor index 10, which
+    // clamps to pair 7 = (4096, 2048) = (2.0, 1.0) after the 2^-11 scaling,
+    // so the feedback taps stay live. One +1 nibble then zeros recurses
+    // v = floor(0.5 + 2*prev1 + prev2) per sample — an unstable ramp:
+    // 1, 2, 5, 12, 29, 70, 169, 408, 985, 2378, 5741, 13860 — which then
+    // exceeds the i16 clamp and pins the last two samples at 32767.
+    var coefsA = [_]i16{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    coefsA[14] = 4096;
+    coefsA[15] = 2048;
+    const dataA = [_]u8{ 0xA0, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    const sA = fsb5.Sample{ .data_offset = 0, .sample_count = 14, .channels = 1, .frequency = 8000, .dsp_coefs = &coefsA };
+    const pcmA = try decodeSample(a, &dataA, 0, sA, 6);
+    defer a.free(pcmA);
+    try std.testing.expectEqualSlices(i16, &.{ 1, 2, 5, 12, 29, 70, 169, 408, 985, 2378, 5741, 13860, 32767, 32767 }, pcmA);
+
+    // Scale exponent 1 doubles each nibble before the rounding bias, and
+    // the floor shift is asymmetric: +1 rounds to 2, -1 to -2.
+    const dataS = [_]u8{ 0x01, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    const sS = fsb5.Sample{ .data_offset = 0, .sample_count = 2, .channels = 1, .frequency = 8000, .dsp_coefs = &coefs };
+    const pcmS = try decodeSample(a, &dataS, 0, sS, 6);
+    defer a.free(pcmS);
+    try std.testing.expectEqualSlices(i16, &.{ 2, -2 }, pcmS);
 }
