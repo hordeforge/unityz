@@ -1203,6 +1203,7 @@ larger than the remaining metadata before they size an allocation.
 `main`
 replaces path separators in script class names so an extracted script stays
 a single path component under the extract directory.
+
 2026-08-31 (diff --pixels + v6 bundle rebuild fix): `diff --pixels`
 decodes changed Texture2D objects from both files - resolving `.resS` /
 `.resource` sidecar nodes inside the same bundle/webfile - and reports
@@ -1226,3 +1227,34 @@ smaller fix: the pixel-diff sidecar walk collected sidecars in the same
 pass as the serialized-node search, but the .resS node usually follows
 the serialized node, leaving the sidecar list empty; the walk is now
 two-pass. 251/251 tests.
+
+2026-08-31 (shader sub-program blob decode): extended the existing
+shader-blob parser (from the skin-detection pass) into a full decoder.
+`src/shader.zig` now lists every record of the d3d11 platform blob as either
+a parameter blob or a code blob, and decodes each: parameter blobs carry the
+constant buffers (name, used_size, members with their byte index, nested
+structs) and the texture/cbuffer-bind/UAV/sampler entries; code blobs carry
+the 38-byte program-data header (version, SRV/cbuffer/sampler counts, UAV,
+geometry primitive), the DXBC chunk set, the SHDR/SHEX declaration counts
+(srv/cbuffer/sampler/UAV + temp registers), the ISGN input signature, the
+RDEF constant-buffer member offsets, and the trailing ParserBindChannels
+(source,target) pairs. Non-d3d11 program payloads (SMOL-V/GLSL) are recorded
+as undecoded rather than guessed. Surfaced under `show` and a new `shader`
+command (`<path> <node:path-id>`), which extends the Shader's JSON with a
+`shaderBlob` field; `verify` adds a class-48 check that re-encodes each
+parameter blob byte for byte.
+
+Validated byte-exact
+against the reference tools on the game bundle (`Game/SDCS/Skin` d3d11
+vertex records carry bind channels (0,0)(2,2)(1,1)(4,5), with COLOR (3,3) on
+some records and no blend channels) and the pipeline-synthesized
+`shamwayselftest.unity3d` (6/6 parameter blobs re-emit exactly); `verify`
+still passes on both bundles.
+
+Found a real allocation-safety bug while wiring
+`verify`: the new parameter-blob parser pre-allocated arrays from a corrupt
+count before validating it, so a bad count in one shader's blob exhausted the
+arena and broke the next object's read; counts are now bounded against the
+data length, matching the existing "reject counts larger than the remaining
+metadata" rule. Unit tests cover the parameter-blob round-trip (incl. the
+nameless base buffer) and `verifyBlob` on a synthetic shader.
