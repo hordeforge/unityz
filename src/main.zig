@@ -586,6 +586,30 @@ fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.Serial
     return null;
 }
 
+/// Wraps interleaved little-endian PCM in a WAV container. `bits` is the
+/// source sample width (16 for decoded FSB5 samples; the raw AudioClip
+/// path passes its own width).
+fn wavPcm16(arena: std.mem.Allocator, pcm: []const u8, channels: u16, rate: u32, bits: u16) ![]u8 {
+    var wav_buf: std.ArrayList(u8) = .empty;
+    var hdr: [44]u8 = undefined;
+    @memcpy(hdr[0..4], "RIFF");
+    std.mem.writeInt(u32, hdr[4..8], @as(u32, @intCast(36 + pcm.len)), .little);
+    @memcpy(hdr[8..12], "WAVE");
+    @memcpy(hdr[12..16], "fmt ");
+    std.mem.writeInt(u32, hdr[16..20], 16, .little);
+    std.mem.writeInt(u16, hdr[20..22], 1, .little); // PCM
+    std.mem.writeInt(u16, hdr[22..24], channels, .little);
+    std.mem.writeInt(u32, hdr[24..28], rate, .little);
+    std.mem.writeInt(u32, hdr[28..32], rate * @as(u32, channels) * @as(u32, bits) / 8, .little);
+    std.mem.writeInt(u16, hdr[32..34], @intCast(@as(u32, channels) * @as(u32, bits) / 8), .little);
+    std.mem.writeInt(u16, hdr[34..36], bits, .little);
+    @memcpy(hdr[36..40], "data");
+    std.mem.writeInt(u32, hdr[40..44], @as(u32, @intCast(pcm.len)), .little);
+    try wav_buf.appendSlice(arena, &hdr);
+    try wav_buf.appendSlice(arena, pcm);
+    return wav_buf.items;
+}
+
 /// FSB5 bank metadata as a JSON document, or null when the data is not a
 /// well-formed FSB5 bank. Beyond UnityPy: its export converts the audio
 /// but never reports loop points or the header fields.
@@ -743,23 +767,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     // wrap raw PCM in a WAV container
                     const bits: u16 = @intCast(if (ac.bits_per_sample == 0) 16 else ac.bits_per_sample);
                     const ch: u16 = @intCast(if (ac.channels == 0) 1 else ac.channels);
-                    const rate: u32 = ac.frequency;
-                    var hdr: [44]u8 = undefined;
-                    @memcpy(hdr[0..4], "RIFF");
-                    std.mem.writeInt(u32, hdr[4..8], @as(u32, @intCast(36 + audio.len)), .little);
-                    @memcpy(hdr[8..12], "WAVE");
-                    @memcpy(hdr[12..16], "fmt ");
-                    std.mem.writeInt(u32, hdr[16..20], 16, .little);
-                    std.mem.writeInt(u16, hdr[20..22], 1, .little); // PCM
-                    std.mem.writeInt(u16, hdr[22..24], ch, .little);
-                    std.mem.writeInt(u32, hdr[24..28], rate, .little);
-                    std.mem.writeInt(u32, hdr[28..32], rate * @as(u32, ch) * @as(u32, bits) / 8, .little);
-                    std.mem.writeInt(u16, hdr[32..34], @intCast(@as(u32, ch) * @as(u32, bits) / 8), .little);
-                    std.mem.writeInt(u16, hdr[34..36], bits, .little);
-                    @memcpy(hdr[36..40], "data");
-                    std.mem.writeInt(u32, hdr[40..44], @as(u32, @intCast(audio.len)), .little);
-                    try wav_buf.appendSlice(arena, &hdr);
-                    try wav_buf.appendSlice(arena, audio);
+                    wav_buf.appendSlice(arena, wavPcm16(arena, audio, ch, ac.frequency, bits) catch continue) catch continue;
                     ext = "wav";
                     audio = wav_buf.items;
                 }
@@ -778,6 +786,31 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                         var meta_name_buf: [160]u8 = undefined;
                         const meta_name = try std.fmt.bufPrint(&meta_name_buf, "{s}.json", .{name});
                         try extractFile(subdir, meta_name, meta);
+                    }
+                    // Codecs that decode in pure Zig (PCM8/16/24/32/FLOAT,
+                    // IMA ADPCM) also export as a playable WAV, no external
+                    // tools needed. Vorbis banks (mode 15) need a transform
+                    // codec and stay as .fsb - UnityPy shells out to ffmpeg
+                    // for every conversion, so this is beyond-parity.
+                    if (try unityz.fsb5.parse(arena, audio)) |bank| {
+                        if (unityz.audio.decodable(bank.mode)) {
+                            for (bank.samples, 0..) |s, si| {
+                                const pcm = unityz.audio.decodeSample(arena, audio, bank.data_start, s, bank.mode) catch |err| {
+                                    try stdout.print("  audio {d}: FSB5 decode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                                    skipped += 1;
+                                    continue;
+                                };
+                                const wav = wavPcm16(arena, std.mem.sliceAsBytes(pcm), @intCast(s.channels), s.frequency, 16) catch continue;
+                                var wav_name_buf: [160]u8 = undefined;
+                                const wav_name = if (bank.samples.len == 1)
+                                    try std.fmt.bufPrint(&wav_name_buf, "audio_{d}_{s}.wav", .{ o.path_id, base_name })
+                                else
+                                    try std.fmt.bufPrint(&wav_name_buf, "audio_{d}_{s}_s{d}.wav", .{ o.path_id, base_name, si });
+                                try extractFile(subdir, sanitizeComponent(wav_name), wav);
+                                try stdout.print("extracted {s} ({d} samples, {s})\n", .{ wav_name, s.sample_count, unityz.audio.modeName(bank.mode) });
+                                extracted += 1;
+                            }
+                        }
                     }
                 }
                 try stdout.print("extracted {s} ({d} bytes, {s})\n", .{ name, audio.len, ext });

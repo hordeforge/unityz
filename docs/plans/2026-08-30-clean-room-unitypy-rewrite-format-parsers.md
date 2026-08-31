@@ -1339,3 +1339,24 @@ bundles: the atlas bundle's 8 asset paths resolve through
 .spriteatlas path, Sprite 213 for the .png paths), and char_118's 35
 assets are all .ogg paths matching the extracted audio; `--class 142`
 extracts only the manifest. 274/274 tests.
+
+2026-08-31 (FSB5 audio decode to WAV in pure Zig): new src/audio.zig
+decodes FSB5 banks to 16-bit PCM for the codecs that need no transform
+decoder - PCM8/16/24/32/FLOAT and IMA ADPCM (mode 7, the XBOX IMA
+framing FSB5 uses for 1-2 channels: 36-byte per-channel blocks, header
+sample + 63 nibble samples, state reset per block, low nibble first,
+mirroring vgmstream's fsb5.c / ima_decoder.c). `extract` now writes a
+playable .wav for those banks in addition to the .fsb + metadata
+sidecar; Vorbis banks (the common case) stay as .fsb - UnityPy shells
+out to ffmpeg for every conversion, so this removes the dependency for
+the decodable modes.
+
+Verified on synthetic banks in every mode: PCM8/16/FLOAT decode exactly
+against fsb5.py (UnityPy's own dependency), IMA mono + stereo decode
+exactly against an independent Python implementation of the same
+framing, and a single-frame IMA bank agrees with ffmpeg's adpcm_ima_xbox
+within ±2 LSB (its direct-multiplication delta formula rounds differently
+from the branch form vgmstream uses for FSB5; framing and step-index
+evolution match). PCM24/32 use straightforward sign-extend + truncate.
+The real char_118 banks (all Vorbis) still extract with .fsb + sidecar
+and no wav, as before. 277/277 tests.
