@@ -1292,3 +1292,17 @@ Verified end-to-end on the real atlas bundle: all 8 objects (7 sprites +
 the crunched 1024x512 texture) extracted in every format decode
 pixel-identical to the PNG baseline through an independent Pillow reader,
 alpha included. 274/274 tests.
+
+2026-08-31 (diff --pixels on directories): `diff <dir> <dir> --pixels`
+previously dropped the flag on the directory branch - the per-file
+comparison never looked at pixels, so a streamed-only edit was reported
+as nothing. The pixel walk is now a shared `pixelPass` (file and
+directory diffs both use it), and directory diffs run it on every matched
+file pair with the same matched-object semantics (streamed .resS edits
+are invisible to file hashes).
+
+Verified on the real atlas pair as
+directories: the mutated stream reports the same 14-pixel texture +
+sprite diffs as the file-level diff, identical directories report all
+zeros, `--class 213` scopes to sprites, and non-asset files in the
+directory are skipped. 274/274 tests.

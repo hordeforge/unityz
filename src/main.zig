@@ -2484,7 +2484,7 @@ fn warnToStderr(path: []const u8, err: anyerror) void {
 /// Compares two directories file-by-file by content hash, reporting
 /// unchanged/changed/new/deleted files and totals. UnityPy has no tree
 /// comparison.
-fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool, stdout: *Io.Writer) !void {
+fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool, pixels: bool, class_filter: ?i32, stdout: *Io.Writer) !void {
     const DirFile = struct { name: []const u8, hash: u64, size: u64 };
     var files_a: std.ArrayList(DirFile) = .empty;
     var files_b: std.ArrayList(DirFile) = .empty;
@@ -2543,6 +2543,27 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
                 }
             } else {
                 unchanged += 1;
+            }
+            // The pixel pass runs on every matched pair, not only changed
+            // files: streamed pixels live outside the file's serialized
+            // bytes, so the file hash cannot see .resS edits.
+            if (pixels) {
+                const pa = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_a, fa.name });
+                defer std.heap.page_allocator.free(pa);
+                const pb = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_b, fb.name });
+                defer std.heap.page_allocator.free(pb);
+                const data_a = std.Io.Dir.cwd().readFileAlloc(io, pa, std.heap.page_allocator, .unlimited) catch continue;
+                const data_b = std.Io.Dir.cwd().readFileAlloc(io, pb, std.heap.page_allocator, .unlimited) catch continue;
+                defer std.heap.page_allocator.free(data_a);
+                defer std.heap.page_allocator.free(data_b);
+                const ka = unityz.container.sniff(data_a).container;
+                const kb = unityz.container.sniff(data_b).container;
+                if (ka == kb and (ka == .serialized or ka == .bundle or ka == .webfile)) {
+                    try stdout.print("  pixels in {s}:\n", .{fa.name});
+                    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                    defer arena_state.deinit();
+                    try pixelPass(arena_state.allocator(), data_a, data_b, class_filter, stdout);
+                }
             }
             break;
         }
@@ -2744,6 +2765,29 @@ fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
             try stdout.print("{d}\t{x:0>16}\t{s} (class {d})\t{d} bytes\n", .{
                 o.path_id, h, className(o.class_id) orelse "Class", o.class_id, data.len,
             });
+        }
+    }
+}
+
+/// `diff --pixels` core: runs the per-object pixel comparison for every
+/// matched Texture2D and Sprite in two files (same node + path id). Shared
+/// by file diffs and per-pair directory diffs. The pass covers matched
+/// objects, not only changed ones: streamed pixels live outside the
+/// serialized payload, so an edited .resS byte changes no object hash.
+fn pixelPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, class_filter: ?i32, stdout: *Io.Writer) !void {
+    var a_list: std.ArrayList(Fp) = .empty;
+    var b_list: std.ArrayList(Fp) = .empty;
+    try collectFingerprints(arena, a_bytes, class_filter, null, &a_list);
+    try collectFingerprints(arena, b_bytes, class_filter, null, &b_list);
+    for (a_list.items) |fa| {
+        for (b_list.items) |fb| {
+            if (fb.path_id != fa.path_id or !sameNode(fb.node, fa.node)) continue;
+            switch (fa.class_id) {
+                28 => try diffTexturePixels(arena, a_bytes, b_bytes, fa, stdout),
+                213 => try diffSpritePixels(arena, a_bytes, b_bytes, fa, stdout),
+                else => {},
+            }
+            break;
         }
     }
 }
@@ -2958,7 +3002,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         return;
     };
     if (stat_a.kind == .directory or stat_b.kind == .directory) {
-        return diffDirectories(io, path, rest[0], json, stdout);
+        return diffDirectories(io, path, rest[0], json, pixels, class_filter, stdout);
     }
     const other_bytes = std.Io.Dir.cwd().readFileAlloc(io, rest[0], std.heap.page_allocator, .unlimited) catch |err| {
         try stdout.print("unityz: {s}: {s}\n", .{ rest[0], @errorName(err) });
@@ -3009,17 +3053,6 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             } else {
                 unchanged += 1;
             }
-            // The pixel pass runs on every matched texture/sprite, not only
-            // changed objects: streamed pixels live outside the serialized
-            // payload, so an edited .resS byte changes no object hash. This
-            // is the only signal that sees such edits.
-            if (pixels) {
-                switch (fa.class_id) {
-                    28 => try diffTexturePixels(arena, bytes, other_bytes, fa, stdout),
-                    213 => try diffSpritePixels(arena, bytes, other_bytes, fa, stdout),
-                    else => {},
-                }
-            }
             break;
         }
         if (!matched) {
@@ -3058,6 +3091,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
         }
     }
+    if (pixels) try pixelPass(arena, bytes, other_bytes, class_filter, stdout);
     if (json) {
         try stdout.print("{{\"a\":", .{});
         try writeJsonString(stdout, path);
