@@ -3476,57 +3476,101 @@ fn findAudioStreamInSerialized(arena: std.mem.Allocator, bytes: []const u8, path
     return null;
 }
 
+/// One `diff --fields` entry for the JSON report.
+const FieldDiff = struct {
+    path_id: i64,
+    path: []const u8,
+    old: []const u8,
+    new: []const u8,
+};
+
 /// `diff --fields`: reports the exact fields that changed inside a
 /// changed object, by decoding both value trees and walking them. Field
-/// paths look like `m_LocalPosition.x` or `m_Children[2]`.
-fn diffObjectFields(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !void {
+/// paths look like `m_LocalPosition.x` or `m_Children[2]`. With
+/// `collect` set (json mode) the entries are appended instead of printed.
+fn diffObjectFields(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, collect: ?*std.ArrayList(FieldDiff), stdout: *Io.Writer) !void {
     const va = try findObjectValue(arena, a_bytes, fa);
     const vb = try findObjectValue(arena, b_bytes, fa);
     if (va == null or vb == null) return;
     var path_buf: [256]u8 = undefined;
     var reported: usize = 0;
-    const cname = className(fa.class_id) orelse "Class";
-    try stdout.print("  fields: object {d} ({s}):\n", .{ fa.path_id, cname });
-    try diffValueTree(va.?, vb.?, &path_buf, 0, &reported, stdout);
+    if (collect == null) {
+        const cname = className(fa.class_id) orelse "Class";
+        try stdout.print("  fields: object {d} ({s}):\n", .{ fa.path_id, cname });
+    }
+    try diffValueTree(va.?, vb.?, fa.path_id, &path_buf, 0, &reported, collect, stdout);
 }
 
 /// Recursive value-tree comparison; `buf[0..len]` is the current field
 /// path. Reports at most 10 differing leaves.
-fn diffValueTree(a: unityz.value.Value, b: unityz.value.Value, buf: *[256]u8, len: usize, reported: *usize, stdout: *Io.Writer) !void {
+fn diffValueTree(a: unityz.value.Value, b: unityz.value.Value, path_id: i64, buf: *[256]u8, len: usize, reported: *usize, collect: ?*std.ArrayList(FieldDiff), stdout: *Io.Writer) !void {
     if (reported.* >= 10) return;
     const path = buf[0..len];
     switch (a) {
         .obj => |af| {
-            if (b != .obj) return reportLeaf(a, b, path, reported, stdout);
+            if (b != .obj) return reportLeaf(a, b, path_id, path, reported, collect, stdout);
             for (af) |f| {
                 if (reported.* >= 10) return;
                 const bv = unityz.classes.fieldOf(b, f.name) orelse {
-                    try printFieldLine(path, f.name, "removed", reported, stdout);
+                    try emitField(path_id, path, f.name, try renderValue(f.value), "<absent>", reported, collect, stdout);
                     continue;
                 };
                 const new_len = try appendPath(buf, len, f.name);
-                try diffValueTree(f.value, bv, buf, new_len, reported, stdout);
+                try diffValueTree(f.value, bv, path_id, buf, new_len, reported, collect, stdout);
             }
             // fields present only in b
             for (b.obj) |f| {
                 if (reported.* >= 10) return;
                 if (unityz.classes.fieldOf(a, f.name) == null) {
-                    try printFieldLine(path, f.name, "added", reported, stdout);
+                    try emitField(path_id, path, f.name, "<absent>", try renderValue(f.value), reported, collect, stdout);
                 }
             }
         },
         .array => |aa| {
-            if (b != .array or aa.len != b.array.len) return reportLeaf(a, b, path, reported, stdout);
+            if (b != .array or aa.len != b.array.len) return reportLeaf(a, b, path_id, path, reported, collect, stdout);
             for (aa, 0..) |x, i| {
                 if (reported.* >= 10) return;
                 const new_len = try appendIndex(buf, len, i);
-                try diffValueTree(x, b.array[i], buf, new_len, reported, stdout);
+                try diffValueTree(x, b.array[i], path_id, buf, new_len, reported, collect, stdout);
             }
         },
         else => {
-            if (!valuesEqual(a, b)) try reportLeaf(a, b, path, reported, stdout);
+            if (!valuesEqual(a, b)) try reportLeaf(a, b, path_id, path, reported, collect, stdout);
         },
     }
+}
+
+/// Renders a leaf value as a short JSON string for the report.
+fn renderValue(v: unityz.value.Value) ![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(std.heap.page_allocator, &buf);
+    try unityz.value.jsonWrite(v, &aw.writer);
+    const out = aw.toArrayList();
+    return try std.heap.page_allocator.dupe(u8, truncateLeaf(out.items));
+}
+
+fn emitField(path_id: i64, path: []const u8, name: []const u8, old: []const u8, new: []const u8, reported: *usize, collect: ?*std.ArrayList(FieldDiff), stdout: *Io.Writer) !void {
+    const full_path = if (path.len == 0)
+        try std.heap.page_allocator.dupe(u8, name)
+    else
+        try std.fmt.allocPrint(std.heap.page_allocator, "{s}.{s}", .{ path, name });
+    if (collect) |c| {
+        try c.append(std.heap.page_allocator, .{ .path_id = path_id, .path = full_path, .old = old, .new = new });
+    } else {
+        try stdout.print("    {s} ({s} -> {s})\n", .{ full_path, old, new });
+    }
+    reported.* += 1;
+}
+
+fn reportLeaf(a: unityz.value.Value, b: unityz.value.Value, path_id: i64, path: []const u8, reported: *usize, collect: ?*std.ArrayList(FieldDiff), stdout: *Io.Writer) !void {
+    const old = try renderValue(a);
+    const new = try renderValue(b);
+    if (collect) |c| {
+        try c.append(std.heap.page_allocator, .{ .path_id = path_id, .path = try std.heap.page_allocator.dupe(u8, path), .old = old, .new = new });
+    } else {
+        try stdout.print("    {s} ({s} -> {s})\n", .{ path, old, new });
+    }
+    reported.* += 1;
 }
 
 fn valuesEqual(a: unityz.value.Value, b: unityz.value.Value) bool {
@@ -3553,26 +3597,6 @@ fn appendPath(buf: *[256]u8, len: usize, name: []const u8) !usize {
 fn appendIndex(buf: *[256]u8, len: usize, index: usize) !usize {
     const out = try std.fmt.bufPrint(buf[len..], "[{d}]", .{index});
     return len + out.len;
-}
-
-fn printFieldLine(path: []const u8, name: []const u8, verb: []const u8, reported: *usize, stdout: *Io.Writer) !void {
-    try stdout.print("    {s}.{s} ({s})\n", .{ path, name, verb });
-    reported.* += 1;
-}
-
-fn reportLeaf(a: unityz.value.Value, b: unityz.value.Value, path: []const u8, reported: *usize, stdout: *Io.Writer) !void {
-    var buf_a: std.ArrayList(u8) = .empty;
-    var aw_a = std.Io.Writer.Allocating.fromArrayList(std.heap.page_allocator, &buf_a);
-    try unityz.value.jsonWrite(a, &aw_a.writer);
-    var buf_b: std.ArrayList(u8) = .empty;
-    var aw_b = std.Io.Writer.Allocating.fromArrayList(std.heap.page_allocator, &buf_b);
-    try unityz.value.jsonWrite(b, &aw_b.writer);
-    const out_a = aw_a.toArrayList();
-    const out_b = aw_b.toArrayList();
-    // binary leaves (base64) can be huge; show a prefix so the report
-    // stays readable when e.g. a mesh's index buffer changes
-    try stdout.print("    {s} ({s} -> {s})\n", .{ path, truncateLeaf(out_a.items), truncateLeaf(out_b.items) });
-    reported.* += 1;
 }
 
 fn truncateLeaf(s: []const u8) []const u8 {
@@ -3898,6 +3922,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var changed_objs: std.ArrayList(Fp) = .empty;
     var only_a_objs: std.ArrayList(Fp) = .empty;
     var only_b_objs: std.ArrayList(Fp) = .empty;
+    var field_diffs: std.ArrayList(FieldDiff) = .empty;
     // Index both sides by (path_id, node). The nested scans this replaces
     // were quadratic in the object count, which bites on bundles holding
     // thousands of objects.
@@ -3931,7 +3956,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                     }
                     reported += 1;
                 }
-                if (fields and !json) try diffObjectFields(arena, bytes, other_bytes, fa, stdout);
+                if (fields) try diffObjectFields(arena, bytes, other_bytes, fa, if (json) &field_diffs else null, stdout);
             } else {
                 unchanged += 1;
             }
@@ -3994,10 +4019,29 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         try writePixelStats(stdout, pixel_stats.items);
         try stdout.print(",\"audio\":", .{});
         try writeAudioStats(stdout, audio_stats.items);
+        try stdout.print(",\"fields\":", .{});
+        try writeFieldDiffs(stdout, field_diffs.items);
         try stdout.print("}}\n", .{});
     } else {
         try stdout.print("{d} unchanged, {d} changed, {d} only in {s}, {d} only in {s}\n", .{ unchanged, changed, only_a, path, only_b, rest[0] });
     }
+}
+
+/// JSON array of `{"path_id":N,"path":"...","old":"...","new":"..."}`
+/// for the exact fields that changed inside changed objects.
+fn writeFieldDiffs(stdout: *Io.Writer, items: []const FieldDiff) !void {
+    try stdout.writeByte('[');
+    for (items, 0..) |it, idx| {
+        if (idx != 0) try stdout.writeByte(',');
+        try stdout.print("{{\"path_id\":{d},\"path\":", .{it.path_id});
+        try writeJsonString(stdout, it.path);
+        try stdout.writeAll(",\"old\":");
+        try writeJsonString(stdout, it.old);
+        try stdout.writeAll(",\"new\":");
+        try writeJsonString(stdout, it.new);
+        try stdout.writeByte('}');
+    }
+    try stdout.writeByte(']');
 }
 
 /// JSON array of `{"path_id":N,"class":N,"width":W,"height":H,

@@ -95,7 +95,8 @@ describe the code (see the completion notes): the exotic texture formats
 were taken on after an audit against UnityPy's TextureFormat enum, so
 ASTC HDR, the crunch variants, and the raw half/float/16-bit/signed
 family now decode, and later passes closed the rest of the block-format
-gap too (BC6H, PVRTC, ATC, EAC, the 3DS ETC variants, ETC2_RGBA1); and
+gap too (BC6H, PVRTC, ATC, EAC, the 3DS ETC variants, ETC2_RGBA1).
+
 AudioClip data is now extracted (container detection, raw PCM wrapped in
 a WAV header) rather than skipped, though nothing is transcoded, so
 audio/movie *conversion* remains out. The other four non-goals still
@@ -1549,3 +1550,14 @@ The real-bundle diff now reports the actual differences
 (container paths renamed and a "physics" entry added, GO/material/mesh
 names, the material's shader reference 73 -> 74) in 0.05s with zero
 false positives. 277/277 tests.
+
+2026-08-31 (diff --fields JSON): `diff --json --fields` now carries the
+exact-field reports in the JSON document - a `fields` array of
+`{path_id, path, old, new}` entries - instead of text-only diagnostics,
+completing the pixel/audio/fields JSON story (stdout is a single
+parseable document with the text diagnostics on stderr). The walker now
+collects instead of printing when in json mode; added/removed fields
+render as `<absent>`. Verified: the real-bundle diff emits 28 entries
+(the container rename, GO/material/mesh names, the shader reference
+73->74) matching the text mode, and a single-field edit reports
+`m_LocalPosition.y (0.6 -> 1.25)` in both modes. 279/279 tests.
