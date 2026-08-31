@@ -1963,3 +1963,27 @@ object_reader.zig ("injected-tree GizmoBox decode ... (temp)"). This
 WIP is intentionally left untouched and uncommitted; it belongs to
 that session. Local checkout is on feat/verify-streamed-refs (the
 merged PR branch); origin/main is 15c5deb.
+
+2026-09-01 (bundle rebuild: LZ4 compression + edit --verify sidecars):
+two fixes in the edit/rebuild path. (1) The rebuilder always wrote one
+uncompressed block, flattening any compressed bundle on edit; it now
+LZ4-compresses the single output block when the source had compressed
+blocks (LZMA/LZHAM convert losslessly), staying uncompressed when
+compression does not shrink.
+
+This needed a pure-Zig LZ4 block compressor in src/lz4.zig (greedy
+hash-table matcher) that implements the end-of-block conditions from
+lz4_Block_format.md: the last sequence is literals-only with >= 5
+literals and the last match starts >= 12 bytes before the end - the
+first version emitted a 1-literal final sequence and a trailing match,
+which the C reference decoder (and UnityPy) reject; the round-trip
+tests pin the tail structure.
+
+(2) edit --verify passed no sidecar nodes to the #51 streamed-reference
+check, so verifying any streamed bundle edit failed every
+AudioClip/Texture2D with "no sidecar node"; verifyEditResult now builds
+the sidecar list like verify does. Verified: char_118 (LZ4HC source)
+edit --patch --verify passes, 36/36 verify, UnityPy reads all 36
+objects from the LZ4-rebuilt bundle (block flags 0x42, ~9.6KB smaller
+than uncompressed); atlas streamed edit --verify passes; 308/308
+tests.
