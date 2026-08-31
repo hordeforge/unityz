@@ -31,6 +31,14 @@ Nothing in flight.
   parameter and code records, and a shader's vertex stage is reported as
   skinning or not (`info --json`, plus a `skin` command that exits non-zero
   when a SkinnedMeshRenderer references a shader that does not skin).
+- Shader sub-program blobs fully decode: each record is listed under
+  `show`/`shader <path> <node:path-id>` with its parameter blob (constant
+  buffers and member offsets, texture/cbuffer/UAV/sampler entries) or code
+  blob (38-byte program-data header, DXBC chunk set, ISGN input signature,
+  RDEF member offsets, ParserBindChannels (source,target) pairs), and
+  `verify` round-trips the parameter blobs byte for byte. Validated against
+  the game bundle and the pipeline-synthesized shader bundle, reproducing
+  the Game/SDCS/Skin d3d11 vertex bind tables.
 - Sprite export covers packed sprites: separate alpha textures merge in
   (RGB from the main texture, alpha from the alpha texture's R channel),
   packing rotation is applied, and tight/polygon sprites render through
