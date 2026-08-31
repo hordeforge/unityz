@@ -21,10 +21,7 @@ strings are always 4-aligned in the wire format regardless of the
 type-tree meta flag (this fixed AssetBundle, Mesh, and Shader objects,
 which previously failed to read).
 
-One known limitation remains: `container.sniff`'s
-version filter still excludes format 4, so a bare v4 file is
-unreachable from the CLI even though the library parses and
-rewrites it. The serialized .NET object graph inside m_Script
+The serialized .NET object graph inside m_Script
 payloads is no longer a limitation: `extract` decodes the graph
 through its type tree and writes a `.json` sidecar alongside the raw
 `.bin` payload (UnityPy itself still requires external .NET
@@ -41,8 +38,8 @@ public format documentation only - no code or data taken from UnityPy.
   type/object/external counts for any UnityFS bundle, WebFile,
   `.assets`/`.resources`/`.resS` file produced by Unity 2.5 through current
   versions (serialized formats 2-22, version 4 included; container
-  detection still skips v4, so a bare v4 file is not reachable from the
-  CLI even though the library parses it).
+  detection covers every supported version, so bare v4 files are
+  reachable from the CLI too).
   `--objects` adds the object table; per-class object counts are
   `unityz stats`.
 - `unityz extract <file>` writes embedded assets (textures, text assets,
@@ -1987,3 +1984,20 @@ edit --patch --verify passes, 36/36 verify, UnityPy reads all 36
 objects from the LZ4-rebuilt bundle (block flags 0x42, ~9.6KB smaller
 than uncompressed); atlas streamed edit --verify passes; 308/308
 tests.
+
+2026-09-01 (bare v4 serialized files reachable from the CLI): the
+container sniff's version filter excluded format 4 even though the
+parser reads 2-22, so every CLI command routed v4 files to "not a
+recognized Unity asset file". Widened the filter to all supported
+versions (v4 uses the same 16-byte legacy header as 2/3) and added a
+minimal v4 fixture test (header + trailing metadata opened by the
+endianness byte, zero types/objects - the legacy user-info read is
+skipped below format 5); the sniff unit test now expects v4 to sniff
+as serialized and keeps rejecting implausible v4 headers.
+
+Verified end to end: a synthesized 29-byte v4 file runs info (type
+SerializedFile, version 4, endian little), verify (clean), and stats
+(0 objects) through the CLI. The remaining v4 gap is object decode
+with legacy recursive type trees, which has no fixture or real sample
+to verify against. README + plan updated (the "skips version 4"
+claims removed).
