@@ -940,13 +940,22 @@ pub fn writeParameterBlob(w: *streams.Writer, pb: ParameterBlobFull) !void {
 // --- DXBC container analysis ---
 
 /// A DXBC input-signature semantic.
-pub const Semantic = struct { name: []const u8, index: u32, };
+pub const Semantic = struct {
+    name: []const u8,
+    index: u32,
+};
 
 /// A constant buffer member offset from a DXBC `RDEF` chunk.
-pub const RdefMember = struct { name: []const u8, offset: u32, };
+pub const RdefMember = struct {
+    name: []const u8,
+    offset: u32,
+};
 
 /// A constant buffer from a DXBC `RDEF` chunk: name and member offsets.
-pub const RdefBuffer = struct { name: []const u8, members: []const RdefMember, };
+pub const RdefBuffer = struct {
+    name: []const u8,
+    members: []const RdefMember,
+};
 
 /// The analysis of a DXBC program container: chunk set, declaration counts,
 /// the temp-register and geometry-primitive values the program-data header
@@ -1415,4 +1424,3 @@ pub fn verifyBlob(arena: std.mem.Allocator, v: value.Value) !bool {
     }
     return true;
 }
-

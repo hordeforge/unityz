@@ -19,6 +19,14 @@ and written with an explicit byte order — so other targets `zig build
 -Dtarget=...` accepts are expected to work, but are not covered by CI.
 Windows is untested.
 
+CI also blocks on formatting and shell lint. Run the same checks before
+pushing:
+
+```bash
+zig fmt --check build.zig src
+shellcheck scripts/*.sh
+```
+
 Run the CLI:
 
 ```bash

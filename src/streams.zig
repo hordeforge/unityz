@@ -15,7 +15,7 @@ const std = @import("std");
 
 pub const Endian = std.builtin.Endian;
 
-pub const ReadError = error{ OutOfBounds };
+pub const ReadError = error{OutOfBounds};
 
 /// Bounds-checked cursor over a `[]const u8` buffer.
 pub const Reader = struct {

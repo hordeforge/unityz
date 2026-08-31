@@ -25,7 +25,20 @@ pub fn build(b: *std.Build) void {
     });
     crunch_lib.root_module.addCSourceFile(.{
         .file = b.path("src/vendor/unitycrunch_shim.cpp"),
-        .flags = &.{"-DNDEBUG"},
+        // The shim is the only hand-written C++ here, so its warnings are
+        // errors. Both exclusions cover noise from the vendored
+        // crn_decomp.h it includes, never the shim itself: an unused
+        // parameter in a `scalar_type` template stub, and the sprintf /
+        // vsprintf inside the decoder's own `crnd_assert` / `crnd_trace`
+        // debug reporters.
+        .flags = &.{
+            "-DNDEBUG",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wno-unused-parameter",
+            "-Wno-deprecated-declarations",
+        },
     });
     lib.linkLibrary(crunch_lib);
 

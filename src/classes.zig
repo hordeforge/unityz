@@ -469,7 +469,7 @@ pub const GameObject = struct {
         };
         var list: std.ArrayList(value.PPtr) = .empty;
         for (arr) |item| {
-            if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item } } }, "x")) |p| {
+            if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
                 list.append(std.heap.page_allocator, p) catch {};
             }
         }

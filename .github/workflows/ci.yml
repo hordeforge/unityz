@@ -5,6 +5,20 @@ on:
   pull_request:
 
 jobs:
+  # Static analysis, blocking and separate from the build matrix: formatting
+  # and shell lint are platform-independent, so one Linux runner covers them.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Check Zig formatting
+        run: zig fmt --check build.zig src
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh
+
   build-test:
     # The library and CLI are developed on macOS and released as a Zig
     # package consumers build for their own target, so both host platforms

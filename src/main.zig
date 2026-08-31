@@ -577,8 +577,7 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
     try w.print("{d},\"mode\":{d},\"samples\":[", .{ bank.version, bank.mode });
     for (bank.samples, 0..) |s, i| {
         if (i != 0) try w.writeByte(',');
-        try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d}",
-            .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count });
+        try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d}", .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count });
         if (s.loop_start) |ls| {
             try w.print(",\"loopStart\":{d},\"loopEnd\":{d}", .{ ls, s.loop_end orelse 0 });
         }
@@ -588,7 +587,6 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
     var list = aw.toArrayList();
     return try list.toOwnedSlice(arena);
 }
-
 
 fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
@@ -1108,7 +1106,8 @@ fn renderSprite(
     // m_RD.texture empty and name the atlas texture instead.
     const hit = if (sprite.texture) |t| blk: {
         if (t.path_id != 0) break :blk AtlasHit{
-            .texture = t, .rect = sprite.rect,
+            .texture = t,
+            .rect = sprite.rect,
             .alpha_texture = sprite.alpha_texture,
             .settings_raw = sprite.settings_raw,
         };

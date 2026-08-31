@@ -196,9 +196,9 @@ test "encode produces a decodable png" {
     const a = std.testing.allocator;
     // 2x2 image with distinct pixels.
     const rgba = [_]u8{
-        255, 0,   0,   255, // red
-        0,   255, 0,   255, // green
-        0,   0,   255, 255, // blue
+        255, 0, 0, 255, // red
+        0, 255, 0, 255, // green
+        0, 0, 255, 255, // blue
         255, 255, 255, 255, // white
     };
     const png = try encode(a, 2, 2, &rgba);
