@@ -1,12 +1,12 @@
 //! FSB5 audio bank metadata parsing.
 //!
 //! FSB5 is FMOD's sound bank format. This module reads only the header
-//! metadata (no audio decoding): the fixed 48-byte header, the variable
-//! chunked per-sample headers, and the name table. Loop points come from
-//! each sample's LOOP metadata chunk. The layout follows the fsb5
-//! Python package (UnityPy's own dependency), so the fields cross-check
-//! against it; UnityPy's export never surfaces this metadata, so
-//! emitting it is beyond-parity.
+//! metadata (no audio decoding): the 60-byte header (64 when the version
+//! field is 0), the variable chunked per-sample headers, and the name
+//! table. Loop points come from each sample's LOOP metadata chunk. The
+//! layout follows the fsb5 Python package (UnityPy's own dependency), so
+//! the fields cross-check against it; UnityPy's export never surfaces
+//! this metadata, so emitting it is beyond-parity.
 
 const std = @import("std");
 

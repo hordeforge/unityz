@@ -34,13 +34,15 @@ Run the CLI:
 ./zig-out/bin/unityz hash path/to/asset
 ./zig-out/bin/unityz diff asset_a asset_b
 ./zig-out/bin/unityz skin path/to/asset
+./zig-out/bin/unityz shader path/to/asset 100
 ```
 
 Beyond the core `info`/`extract`/`edit`, the CLI adds capabilities UnityPy
 does not offer: `verify` (read every object through its type tree, write
 it back, compare bytes; non-zero exit on failure), `stats` (per-class
 sizes and duplicate-object detection), `find` (name/class search, with
-`--exact` for whole-name lookups), `show` (one object as JSON, or a hex
+`--exact` for case-sensitive whole-name lookups; the default substring
+match is case-insensitive), `show` (one object as JSON, or a hex
 dump of its bytes with `--raw`), `diff` (compare two files' objects by
 content hash, scoped with `--class`, or two directories file-by-file),
 `hash` (per-object content fingerprints), and `skin` (whether every Shader
@@ -95,7 +97,7 @@ a script needs is plain text and a non-zero exit code on failure.
 - a **library** (`src/lib.zig`, imported as `@import("unityz")`) with parsers
   for Unity's asset formats, and
 - a **CLI** (`src/main.zig`, `unityz`) with `info`, `extract`, `edit`,
-  `verify`, `stats`, `find`, `show`, `hash`, `diff`, and `skin`
+  `verify`, `stats`, `find`, `show`, `hash`, `diff`, `skin`, and `shader`
   subcommands for inspecting, pulling out, modifying, checking, and
   comparing assets. `unityz --help` is the authoritative flag reference.
 
@@ -109,9 +111,11 @@ UnityFS bundles, WebFiles, and SerializedFiles (`.assets` and friends)
 and prints what it found (header, type tree presence, object table with
 per-class counts for serialized files, nodes for bundles). With `--dump`,
 objects of a serialized file are read through their type trees and printed
-as JSON. Serialized formats 2-22 are supported (version 4 included, whose
-legacy recursive type-tree and trailing-metadata layouts are handled);
-decompression covers none (uncompressed), LZ4 (in-tree), and
+as JSON. Serialized formats 2-22 are supported by the library's parser
+(version 4 included, whose legacy recursive type-tree and
+trailing-metadata layouts are handled), though container detection
+currently skips version 4, so a bare v4 file is not reachable from the
+CLI. Decompression covers none (uncompressed), LZ4 (in-tree), and
 LZMA (via std), with LZHAM detected but unsupported.
 
 The generic object reader is in: object payloads are decoded through

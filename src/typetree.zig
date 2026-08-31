@@ -5,7 +5,7 @@
 //! nodes, each naming a field (`name`) and its type (`type_name`), with
 //! size/flags metadata. Two wire encodings exist:
 //!
-//! - **Legacy** (formats 2, 3, 5-9, 11): recursive nodes, each with
+//! - **Legacy** (formats 2-9 and 11): recursive nodes, each with
 //!   inline 4-byte-aligned strings. Field presence varies by format
 //!   version: format 2 adds `variable_count`; format 3 omits `index` and
 //!   `meta_flags`.

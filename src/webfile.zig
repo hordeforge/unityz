@@ -4,7 +4,7 @@
 //! Unity webfiles):
 //!
 //! ```text
-//! signature:  "UnityWebData1.0\0"  (17 bytes)
+//! signature:  "UnityWebData1.0\0"  (16 bytes)
 //! head_size:  u32, little endian — byte offset where the file data begins
 //! file table (until the reader reaches head_size):
 //!   offset:      u32 LE — absolute offset of the file data in this file

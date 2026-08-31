@@ -38,7 +38,8 @@ const usage =
     \\                 (--json for a machine-readable summary;
     \\                  --class <id> to filter; --dups for only the
     \\                  duplicate report)
-    \\  find <path> <s>  Find objects whose name contains <s>
+    \\  find <path> <s>  Find objects whose name contains <s>,
+    \\                 case-insensitively
     \\                 (--class <id> to filter by class;
     \\                  --exact for a case-sensitive whole-name match;
     \\                  --json for a machine-readable array)

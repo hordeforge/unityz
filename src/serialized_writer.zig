@@ -4,7 +4,7 @@
 //! The type section of the metadata (unity version, platform, type trees,
 //! externals, ...) is copied verbatim from the source; only the object
 //! table and the data section are rebuilt, so edited objects may change
-//! size and later objects shift. All supported formats (2-22 except 4) round-trip:
+//! size and later objects shift. All supported formats (2-22) round-trip:
 //! the object-table entry layout, per-object tail fields (destroyed flag,
 //! script identity) and the two header layouts (Legacy16 metadata-at-end
 //! for formats 2-8, metadata-after-header for 9+) are reproduced per
