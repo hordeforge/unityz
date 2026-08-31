@@ -245,7 +245,8 @@ var extract_outdir: ?[]const u8 = null;
 /// `extract <path> [--raw] [--json]` — write embedded assets (to the
 /// current directory or `--outdir <dir>`): bundle/webfile nodes as files,
 /// serialized-file textures as PNG, meshes as OBJ, text assets, sprites,
-/// materials, shaders, and MonoBehaviour payloads. With `--raw`, every
+/// materials, shaders, and MonoBehaviour payloads (raw `.bin` plus a decoded
+/// `.json` of the managed .NET object graph). With `--raw`, every
 /// object's serialized bytes are written as-is; with `--json`, every
 /// object with a type tree is exported as its value tree JSON instead.
 /// `--outdir` is created if missing.
@@ -829,6 +830,13 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     std.mem.trimEnd(u8, ms.assembly, "\x00"),
                 });
                 try stdout.print("extracted {s} ({d} bytes) [{s}]\n", .{ fname, payload.len, label });
+                // The decoded managed object graph (the type-tree fields plus
+                // the serialized .NET fields) is already in `v`; write it as a
+                // JSON sidecar so the graph, not just the raw `m_Script` blob,
+                // is a first-class extract output.
+                var graph_buf: [192]u8 = undefined;
+                const graph_name = try std.fmt.bufPrint(&graph_buf, "script_{d}_{s}.json", .{ o.path_id, if (qual.len != 0) qual else "unnamed" });
+                try extractFile(subdir, graph_name, try writeValueJson(arena, v));
                 extracted += 1;
             },
             else => {},
@@ -1156,6 +1164,35 @@ fn meshF32(
 
 fn fieldStr(v: unityz.value.Value, name: []const u8) []const u8 {
     return unityz.classes.stringField(v, name) orelse "";
+}
+
+/// Adapter so `value.jsonWrite` (which expects `writeAll`/`writeByte`/`print`)
+/// can emit a value into an arena-backed `streams.Writer`.
+const JsonWriterAdapter = struct {
+    inner: unityz.streams.Writer,
+
+    pub fn init(arena: std.mem.Allocator) JsonWriterAdapter {
+        return .{ .inner = unityz.streams.Writer.init(arena) };
+    }
+    pub fn writeByte(self: *JsonWriterAdapter, b: u8) !void {
+        try self.inner.writeByte(b);
+    }
+    pub fn writeAll(self: *JsonWriterAdapter, bytes: []const u8) !void {
+        try self.inner.writeBytes(bytes);
+    }
+    pub fn print(self: *JsonWriterAdapter, comptime fmt: []const u8, args: anytype) !void {
+        try self.inner.print(fmt, args);
+    }
+    fn get(self: *JsonWriterAdapter) []const u8 {
+        return self.inner.getWritten();
+    }
+};
+
+/// Serializes a value tree to compact JSON in the arena.
+fn writeValueJson(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u8 {
+    var ad = JsonWriterAdapter.init(arena);
+    try unityz.value.jsonWrite(v, &ad);
+    return arena.dupe(u8, ad.get());
 }
 
 /// Major component of a Unity version string like "2022.3.62f2".
