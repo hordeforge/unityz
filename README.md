@@ -14,8 +14,8 @@ zig build
 ```
 
 Linux (x86_64) and macOS (aarch64) are built and tested in CI. There is no
-host-endianness or word-size assumption in the parsers — every field is read
-and written with an explicit byte order — so other targets `zig build
+host-endianness or word-size assumption in the parsers (every field is read
+and written with an explicit byte order), so other targets `zig build
 -Dtarget=...` accepts are expected to work, but are not covered by CI.
 Windows is untested.
 
@@ -123,8 +123,9 @@ ids in different nodes can be targeted individually.
 - `find --json` - matching objects as a JSON array
 - `diff --json` - the changed/new/deleted objects (or files, for directory
   diffs) with counts, scoped to one class with `--class <id>` where
-  useful; with `--pixels`/`--audio` the same document carries per-object
-  pixel/audio stats and the text diagnostics move to stderr, so stdout
+  useful; with `--pixels`/`--audio`/`--fields` the same document carries
+  per-object pixel/audio stats and the exact changed fields, and the text
+  diagnostics move to stderr, so stdout
   stays a single parseable JSON document
 - `verify --json` - a pass/fail report with per-object failure records
 - `skin --json` - the per-shader skinning report plus the skinned-mesh
@@ -156,7 +157,9 @@ UnityFS bundles, WebFiles, and SerializedFiles (`.assets` and friends)
 and prints what it found (header, type tree presence, object table with
 per-class counts for serialized files, nodes for bundles). With `--dump`,
 objects of a serialized file are read through their type trees and printed
-as JSON. Serialized formats 2-22 are supported by the library's parser
+as JSON.
+
+Serialized formats 2-22 are supported by the library's parser
 (version 4 included, whose legacy recursive type-tree and
 trailing-metadata layouts are handled), though container detection
 currently skips version 4, so a bare v4 file is not reachable from the
