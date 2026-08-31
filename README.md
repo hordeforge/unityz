@@ -172,7 +172,6 @@ arrays, maps, PPtrs, raw bytes), honoring Unity's alignment and
 length-prefix rules.
 
 Texture decoding, reserialization, and the `extract`/`edit` commands have
-Texture decoding, reserialization, and the `extract`/`edit` commands have
 landed: textures decode to RGBA8 and write as PNG, covering:
 
 - RGB/RGBA8, BGR24, 16-bit R16/RG16, half/float RHalf/RGHalf/RGBAHalf/
@@ -313,4 +312,6 @@ interpolation.
 - `src/bmp.zig` - minimal BMP encoder (32bpp BI_BITFIELDS, alpha-carrying)
 - `src/vendor/unitycrunch/` - vendored unitycrunch decompressor
   (ZLIB-licensed C++, built with `-DNDEBUG` so corrupt input can't abort)
+- `src/vendor/lzham/` - vendored LZHAM decompressor (MIT-licensed C++, for
+  UnityFS LZHAM blocks)
 - `build.zig`, `build.zig.zon` - package metadata and build steps
