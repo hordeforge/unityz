@@ -201,7 +201,12 @@ ParserBindChannels block with its (source,target) channel pairs).
 
 AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
 MP3) with an FSB5 metadata sidecar (sample rate, channels, loop points,
-duration, format - UnityPy never surfaces these), and objects reserialize
+duration, format - UnityPy never surfaces these). FSB5 banks in the
+codecs that decode in pure Zig (PCM8/16/24/32/FLOAT, IMA ADPCM) also
+export as a playable WAV with no external tools; Vorbis banks (the
+common case) stay as `.fsb` because they carry no codec headers -
+UnityPy shells out to ffmpeg for every conversion, so even that is at
+parity. Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
 
@@ -243,6 +248,8 @@ interpolation.
 - `src/classes.zig` - typed views for the common classes
 - `src/fsb5.zig` - FSB5 audio bank metadata parser (sample rate, channels,
   loop points, format)
+- `src/audio.zig` - FSB5 audio sample decoding to 16-bit PCM (PCM8/16/24/
+  32/FLOAT, IMA ADPCM), no external tools
 - `src/shader.zig` - Shader (class 48) sub-program blob decoding: the LZ4
   per-platform blobs, record table, parameter blobs (constant buffers with
   member offsets, texture/cbuffer/UAV/sampler entries), code blobs (38-byte

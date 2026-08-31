@@ -26,6 +26,10 @@ pub const Bank = struct {
     num_samples: u32,
     mode: u32,
     samples: []Sample,
+    /// Absolute offset of the sample-data section (header + sample
+    /// headers + name table); sample data lives at `data_start +
+    /// sample.data_offset`.
+    data_start: u32,
 };
 
 const FREQUENCY_VALUES = [_]u32{ 0, 8000, 11000, 11025, 16000, 22050, 24000, 32000, 44100, 48000 };
@@ -121,6 +125,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Bank {
         .num_samples = num_samples,
         .mode = mode,
         .samples = samples,
+        .data_start = @intCast(headers_end + name_table_size),
     };
 }
 
