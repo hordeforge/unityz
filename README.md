@@ -91,6 +91,15 @@ bundles/webfiles each node's objects land in its own `objects/<node>/`
 subdirectory so identical path ids never collide), and
 auto-creates `--outdir <dir>`.
 
+Mono builds strip the class type trees from serialized files, leaving
+typeless objects undecodable. `--trees <file.json>` supplies them: a
+JSON table in the shape `TypeTreeGeneratorAPI.get_nodes_as_json()`
+emits (per-class flat node lists plus `__class_ids__` and
+`__monoscripts__` for MonoBehaviour resolution), and `extract`,
+`show`, and `verify` decode with the injected trees. A missing or
+malformed trees file prints a diagnostic and continues without the
+trees.
+
 Textures and sprites export as PNG by default or TGA / BMP / raw RGBA8
 with `--format tga|bmp|raw` (UnityPy only writes PNG). SpriteAtlas
 objects export as a JSON mapping packed sprite path ids to names (so
@@ -137,8 +146,8 @@ selectors (e.g. `show bundle.unity3d CAB-abc123:7` or
 `edit bundle.unity3d CAB-abc123:7 m_Name "renamed"`) so colliding path
 ids in different nodes can be targeted individually.
 
-`info`, `stats`, `hash`, `find`, `diff`, `verify`, and `skin` also have a
-`--json` mode for scripting:
+`info`, `stats`, `hash`, `find`, `diff`, `verify`, `skin`, and
+`hierarchy` also have a `--json` mode for scripting:
 
 - `info --json` - summarizes a file or container (adding `--objects`
   includes the per-object table, tagged with its container node and
@@ -157,6 +166,7 @@ ids in different nodes can be targeted individually.
 - `verify --json` - a pass/fail report with per-object failure records
 - `skin --json` - the per-shader skinning report plus the skinned-mesh
   failures
+- `hierarchy --json` - the GameObject/Transform tree as nested objects
 
 `hash` and `verify` accept `--class <id>` / `--path-id <id>` filters,
 `stats` accepts `--class <id>`; `stats --dups` prints only the duplicate
@@ -170,9 +180,10 @@ a script needs is plain text and a non-zero exit code on failure.
 - a **library** (`src/lib.zig`, imported as `@import("unityz")`) with parsers
   for Unity's asset formats, and
 - a **CLI** (`src/main.zig`, `unityz`) with `info`, `extract`, `edit`,
-  `verify`, `stats`, `find`, `show`, `hash`, `diff`, `skin`, and `shader`
-  subcommands for inspecting, pulling out, modifying, checking, and
-  comparing assets. `unityz --help` is the authoritative flag reference.
+  `verify`, `stats`, `find`, `show`, `hash`, `diff`, `skin`, `shader`,
+  and `hierarchy` subcommands for inspecting, pulling out, modifying,
+  checking, and comparing assets. `unityz --help` is the authoritative
+  flag reference.
 
 Targeted formats: SerializedFile (`.assets`), asset bundles (`.unity3d` /
 `.bundle`), and `.resources` / `.resS` sidecar files.

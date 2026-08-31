@@ -1947,8 +1947,19 @@ as one commit covering both changes.
 The combined tree compiles and passes 292/292 tests, and the --trees
 CLI surface smoke-tests clean (missing file / bad JSON -> diagnostic
 and continue; empty trees -> normal extraction; verify unaffected).
-The --trees half has no unit tests and no README note - both remain
-follow-ups. The streamed-reference work itself is complete and
-verified (positive pass on all five real bundles; negative cases via
-edit --patch: m_Resource.m_Size out of range -> "exceeds sidecar",
-m_Source retyped -> "no sidecar node", both also in --json mode).
+The --trees README note was added in the 2026-09-01 docs sweep; unit
+tests for it remain a follow-up. The streamed-reference work itself
+is complete and verified (positive pass on all five real bundles;
+negative cases via edit --patch: m_Resource.m_Size out of range ->
+"exceeds sidecar", m_Source retyped -> "no sidecar node", both also
+in --json mode).
+
+2026-09-01 (session note 2): the --trees session resumed after PR
+#51 merged. It is now debugging the injected-tree decode against a
+real Raft MonoBehaviour (GizmoBox, sharedassets0.assets object
+30969): the working tree carries DBG prints in
+main.zig's injectedTreeFor plus a temporary test in
+object_reader.zig ("injected-tree GizmoBox decode ... (temp)"). This
+WIP is intentionally left untouched and uncommitted; it belongs to
+that session. Local checkout is on feat/verify-streamed-refs (the
+merged PR branch); origin/main is 15c5deb.
