@@ -987,3 +987,28 @@ UnityPy's own converters for these
 are lossy - its half path does int(x*256) and raises on values above 1.0,
 and its RG32 path reads 16-bit samples - so the conversions here are
 strictly more correct. Five regression tests; 214/214 tests.
+
+2026-08-31 (crunch DXT variants): Unity's DXT1Crunched (28) and
+DXT5Crunched (29) now route through the same vendored unitycrunch
+machinery as the ETC crunch formats: the shim decompresses to raw
+DXT1/DXT5 blocks, which the existing block decoders turn into RGBA.
+Found and fixed a latent off-by-one in the shared 565->888 expansion
+(BCn bit-replication, `(v<<3)|(v>>2)`, not `v*255/31` truncation) that
+made the whole DXT family 1 LSB low on non-maximum colors. Verified
+byte-exact (512x512) against UnityPy's Pillow 'bcn' decode on real
+UNITYCRUNCH_DXT1/DXT5.crn streams.
+
+2026-08-31 (packed sprite alpha-texture + tight meshes): sprite export
+now handles packed sprites. A separate alpha texture (m_RD.alphaTexture,
+or the atlas entry's) is merged into the decoded RGBA before the crop:
+RGB from the main texture, alpha from the alpha texture's R channel
+(UnityPy's Image.merge). Packing rotation (flipH/V, 180, 90) is applied
+to the crop before the final vertical flip, in UnityPy's order. A tight
+sprite (settingsRaw bit 1 == 0) parses its mesh (positions, UVs,
+triangles) from m_RD via m_VertexData/Channels or the vertices list,
+then masks the crop with the polygon (maskSprite) or texture-maps the
+mesh UVs onto the polygon (renderSpriteMesh), mirroring UnityPy's
+mask_sprite/render_sprite_mesh. Verified byte-exact against UnityPy on
+the real sprite.assets fixture (rectangle sprite); the tight mesh path
+has no committed Unity fixture, so it is algorithm-faithful to UnityPy
+and unit-tested but not byte-verified against a real tight sprite.
