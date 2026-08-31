@@ -2810,14 +2810,27 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
                 if (ka == kb and (ka == .serialized or ka == .bundle or ka == .webfile)) {
                     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
                     defer arena_state.deinit();
+                    // directory diffs keep pixel/audio as text diagnostics
+                    // (on stderr in --json mode); the --json stats arrays
+                    // cover single-file diffs
+                    var diag: *Io.Writer = stdout;
+                    var err_buf: [1024]u8 = undefined;
+                    var err_writer: Io.File.Writer = undefined;
+                    if (json) {
+                        err_writer = .init(.stderr(), io, &err_buf);
+                        diag = &err_writer.interface;
+                    }
+                    var pixel_stats: std.ArrayList(PixelStat) = .empty;
+                    var audio_stats: std.ArrayList(AudioStat) = .empty;
                     if (pixels) {
-                        try stdout.print("  pixels in {s}:\n", .{fa.name});
-                        try pixelPass(arena_state.allocator(), data_a, data_b, class_filter, stdout);
+                        try diag.print("  pixels in {s}:\n", .{fa.name});
+                        try pixelPass(arena_state.allocator(), data_a, data_b, class_filter, diag, &pixel_stats);
                     }
                     if (audio) {
-                        try stdout.print("  audio in {s}:\n", .{fa.name});
-                        try audioPass(arena_state.allocator(), data_a, data_b, class_filter, stdout);
+                        try diag.print("  audio in {s}:\n", .{fa.name});
+                        try audioPass(arena_state.allocator(), data_a, data_b, class_filter, diag, &audio_stats);
                     }
+                    if (json) try err_writer.flush();
                 }
             }
             break;
@@ -3029,7 +3042,7 @@ fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
 /// by file diffs and per-pair directory diffs. The pass covers matched
 /// objects, not only changed ones: streamed pixels live outside the
 /// serialized payload, so an edited .resS byte changes no object hash.
-fn pixelPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, class_filter: ?i32, stdout: *Io.Writer) !void {
+fn pixelPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, class_filter: ?i32, stdout: *Io.Writer, stats: *std.ArrayList(PixelStat)) !void {
     var a_list: std.ArrayList(Fp) = .empty;
     var b_list: std.ArrayList(Fp) = .empty;
     try collectFingerprints(arena, a_bytes, class_filter, null, &a_list);
@@ -3038,8 +3051,12 @@ fn pixelPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
         for (b_list.items) |fb| {
             if (fb.path_id != fa.path_id or !sameNode(fb.node, fa.node)) continue;
             switch (fa.class_id) {
-                28 => try diffTexturePixels(arena, a_bytes, b_bytes, fa, stdout),
-                213 => try diffSpritePixels(arena, a_bytes, b_bytes, fa, stdout),
+                28 => if (try diffTexturePixels(arena, a_bytes, b_bytes, fa, stdout)) |st| {
+                    if (st.diff_pixels != 0) try stats.append(arena, st);
+                },
+                213 => if (try diffSpritePixels(arena, a_bytes, b_bytes, fa, stdout)) |st| {
+                    if (st.diff_pixels != 0) try stats.append(arena, st);
+                },
                 else => {},
             }
             break;
@@ -3052,7 +3069,7 @@ fn pixelPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
 /// `.resource` sidecar). Stream bytes live outside the serialized
 /// payload, so an edited stream byte changes no object hash - only this
 /// pass sees it.
-fn audioPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, class_filter: ?i32, stdout: *Io.Writer) !void {
+fn audioPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, class_filter: ?i32, stdout: *Io.Writer, stats: *std.ArrayList(AudioStat)) !void {
     var a_list: std.ArrayList(Fp) = .empty;
     var b_list: std.ArrayList(Fp) = .empty;
     try collectFingerprints(arena, a_bytes, class_filter, null, &a_list);
@@ -3071,6 +3088,7 @@ fn audioPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
                 differ += 1;
             } else if (sa.?.len != sb.?.len) {
                 try stdout.print("    (audio: object {d} (AudioClip) size differs {d} vs {d})\n", .{ fa.path_id, sa.?.len, sb.?.len });
+                try stats.append(arena, .{ .path_id = fa.path_id, .size_a = sa.?.len, .size_b = sb.?.len });
                 differ += 1;
             } else if (!std.mem.eql(u8, sa.?, sb.?)) {
                 var first: usize = sa.?.len;
@@ -3081,6 +3099,7 @@ fn audioPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
                     }
                 }
                 try stdout.print("    (audio: object {d} (AudioClip) {d} bytes, first difference at offset {d})\n", .{ fa.path_id, sa.?.len, first });
+                try stats.append(arena, .{ .path_id = fa.path_id, .size_a = sa.?.len, .size_b = sb.?.len, .first_diff = first });
                 differ += 1;
             }
             break;
@@ -3166,45 +3185,46 @@ fn findAudioStreamInSerialized(arena: std.mem.Allocator, bytes: []const u8, path
 /// entry. Pixels may be embedded in the object, streamed inside the same
 /// serialized file, or streamed from a sibling `.resS` / `.resource`
 /// sidecar node inside the same container, all resolved here.
-fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !void {
+fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !?PixelStat {
     const rgba_a = try findObjectRgba(arena, a_bytes, fa, .texture);
     const rgba_b = try findObjectRgba(arena, b_bytes, fa, .texture);
     if (rgba_a == null or rgba_b == null) {
         try stdout.print("    (pixels: object {d} texture could not be decoded in one or both files)\n", .{fa.path_id});
-        return;
+        return null;
     }
     const a = rgba_a.?;
     const b = rgba_b.?;
     if (a.w != b.w or a.h != b.h) {
         try stdout.print("    (pixels: object {d} size differs {d}x{d} vs {d}x{d})\n", .{ fa.path_id, a.w, a.h, b.w, b.h });
-        return;
+        return null;
     }
-    try diffRgbaPixels(fa, a.data, b.data, a.w, a.h, stdout);
+    return diffRgbaPixels(fa, a.data, b.data, a.w, a.h, stdout);
 }
 
 /// `diff --pixels` for a Sprite: renders both sprites (crop rect, packed
 /// rotation, alpha-texture merge, tight/polygon mesh) and compares the
 /// RGBA. Object bytes are unchanged when only the streamed atlas pixels
 /// change, so this is the only diff signal that sees those edits.
-fn diffSpritePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !void {
+fn diffSpritePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !?PixelStat {
     const rgba_a = try findObjectRgba(arena, a_bytes, fa, .sprite);
     const rgba_b = try findObjectRgba(arena, b_bytes, fa, .sprite);
     if (rgba_a == null or rgba_b == null) {
         try stdout.print("    (pixels: object {d} sprite could not be rendered in one or both files)\n", .{fa.path_id});
-        return;
+        return null;
     }
     const a = rgba_a.?;
     const b = rgba_b.?;
     if (a.w != b.w or a.h != b.h) {
         try stdout.print("    (pixels: object {d} size differs {d}x{d} vs {d}x{d})\n", .{ fa.path_id, a.w, a.h, b.w, b.h });
-        return;
+        return null;
     }
-    try diffRgbaPixels(fa, a.data, b.data, a.w, a.h, stdout);
+    return diffRgbaPixels(fa, a.data, b.data, a.w, a.h, stdout);
 }
 
 /// Shared per-channel RGBA comparison; `width`/`height` describe both
-/// buffers (they must have the same length).
-fn diffRgbaPixels(fa: Fp, a: []const u8, b: []const u8, width: u32, height: u32, stdout: *Io.Writer) !void {
+/// buffers (they must have the same length). Prints the text line and
+/// returns the structured stat for `diff --json`.
+fn diffRgbaPixels(fa: Fp, a: []const u8, b: []const u8, width: u32, height: u32, stdout: *Io.Writer) !?PixelStat {
     var per_channel = [_]usize{ 0, 0, 0, 0 };
     var max_delta = [_]u32{ 0, 0, 0, 0 };
     var diff_pixels: usize = 0;
@@ -3223,7 +3243,27 @@ fn diffRgbaPixels(fa: Fp, a: []const u8, b: []const u8, width: u32, height: u32,
     }
     const name = className(fa.class_id) orelse "Class";
     try stdout.print("    (pixels: object {d} ({s}) {d}x{d}, {d} pixels differ; max delta R{d} G{d} B{d} A{d})\n", .{ fa.path_id, name, width, height, diff_pixels, max_delta[0], max_delta[1], max_delta[2], max_delta[3] });
+    return .{ .path_id = fa.path_id, .class_id = fa.class_id, .width = width, .height = height, .diff_pixels = diff_pixels, .max_delta = max_delta };
 }
+
+/// One differing object's pixel stats, for `diff --json --pixels`.
+const PixelStat = struct {
+    path_id: i64,
+    class_id: i32,
+    width: u32,
+    height: u32,
+    diff_pixels: usize,
+    max_delta: [4]u32,
+};
+
+/// One differing clip's stream stats, for `diff --json --audio`.
+const AudioStat = struct {
+    path_id: i64,
+    size_a: usize,
+    size_b: usize,
+    /// First differing byte offset; null when the sizes differ.
+    first_diff: ?usize = null,
+};
 
 test "diffRgbaPixels counts per-channel diffs and max deltas" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -3233,7 +3273,7 @@ test "diffRgbaPixels counts per-channel diffs and max deltas" {
     var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
     const a = [_]u8{ 10, 20, 30, 40, 255, 255, 255, 255 };
     const b = [_]u8{ 12, 20, 35, 44, 250, 245, 255, 255 };
-    try diffRgbaPixels(.{ .path_id = 7, .class_id = 28, .hash = 0, .size = 0 }, &a, &b, 2, 1, &aw.writer);
+    _ = try diffRgbaPixels(.{ .path_id = 7, .class_id = 28, .hash = 0, .size = 0 }, &a, &b, 2, 1, &aw.writer);
     try std.testing.expectEqualStrings("    (pixels: object 7 (Texture2D) 2x1, 2 pixels differ; max delta R5 G10 B5 A4)\n", aw.toArrayList().items);
 }
 
@@ -3462,8 +3502,20 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
         }
     }
-    if (pixels) try pixelPass(arena, bytes, other_bytes, class_filter, stdout);
-    if (audio) try audioPass(arena, bytes, other_bytes, class_filter, stdout);
+    var pixel_stats: std.ArrayList(PixelStat) = .empty;
+    var audio_stats: std.ArrayList(AudioStat) = .empty;
+    // in --json mode the pixel/audio text diagnostics go to stderr so
+    // stdout carries only the JSON document
+    var diag: *Io.Writer = stdout;
+    var err_buf: [1024]u8 = undefined;
+    var err_writer: Io.File.Writer = undefined;
+    if (json) {
+        err_writer = .init(.stderr(), io_global.io, &err_buf);
+        diag = &err_writer.interface;
+    }
+    if (pixels) try pixelPass(arena, bytes, other_bytes, class_filter, diag, &pixel_stats);
+    if (audio) try audioPass(arena, bytes, other_bytes, class_filter, diag, &audio_stats);
+    if (json) try err_writer.flush();
     if (json) {
         try stdout.print("{{\"a\":", .{});
         try writeJsonString(stdout, path);
@@ -3475,10 +3527,42 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         try writeObjList(stdout, only_a_objs.items);
         try stdout.print(",\"only_b_objects\":", .{});
         try writeObjList(stdout, only_b_objs.items);
+        try stdout.print(",\"pixels\":", .{});
+        try writePixelStats(stdout, pixel_stats.items);
+        try stdout.print(",\"audio\":", .{});
+        try writeAudioStats(stdout, audio_stats.items);
         try stdout.print("}}\n", .{});
     } else {
         try stdout.print("{d} unchanged, {d} changed, {d} only in {s}, {d} only in {s}\n", .{ unchanged, changed, only_a, path, only_b, rest[0] });
     }
+}
+
+/// JSON array of `{"path_id":N,"class":N,"width":W,"height":H,
+/// "diff_pixels":N,"max_delta":[R,G,B,A]}` for objects whose pixels
+/// differ.
+fn writePixelStats(stdout: *Io.Writer, items: []const PixelStat) !void {
+    try stdout.writeByte('[');
+    for (items, 0..) |it, idx| {
+        if (idx != 0) try stdout.writeByte(',');
+        try stdout.print("{{\"path_id\":{d},\"class\":{d},\"width\":{d},\"height\":{d},\"diff_pixels\":{d},\"max_delta\":[{d},{d},{d},{d}]}}", .{ it.path_id, it.class_id, it.width, it.height, it.diff_pixels, it.max_delta[0], it.max_delta[1], it.max_delta[2], it.max_delta[3] });
+    }
+    try stdout.writeByte(']');
+}
+
+/// JSON array of `{"path_id":N,"size_a":A,"size_b":B,"first_diff":K}`
+/// for clips whose streams differ (`first_diff` omitted when the sizes
+/// differ).
+fn writeAudioStats(stdout: *Io.Writer, items: []const AudioStat) !void {
+    try stdout.writeByte('[');
+    for (items, 0..) |it, idx| {
+        if (idx != 0) try stdout.writeByte(',');
+        try stdout.print("{{\"path_id\":{d},\"size_a\":{d},\"size_b\":{d}", .{ it.path_id, it.size_a, it.size_b });
+        if (it.first_diff) |fd| {
+            try stdout.print(",\"first_diff\":{d}", .{fd});
+        }
+        try stdout.writeByte('}');
+    }
+    try stdout.writeByte(']');
 }
 
 /// Prints a JSON array of `{"path_id":N,"class":N}` objects.
