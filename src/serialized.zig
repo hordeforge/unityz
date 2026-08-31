@@ -141,14 +141,13 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
-/// Serialized-file format versions this parser accepts: 2, 3, and 5
-/// through 22. The gap at 4 is deliberate (see the "parse rejects
-/// unsupported version" test) — `parse` returns
-/// `error.UnsupportedVersion` for it. Describe the range as "2-22 except
-/// 4"; a bare "2-22" overstates what the parser handles.
+/// Serialized-file format versions this parser accepts: 2 through 22.
+/// Version 4 is supported (its metadata and object-info layout match
+/// versions 3 and 5, which share the same code path); `parse` returns
+/// `error.UnsupportedVersion` only for versions outside that range.
 pub fn supportedVersion(version: u32) bool {
     return switch (version) {
-        2, 3, 5...22 => true,
+        2...22 => true,
         else => false,
     };
 }
@@ -167,7 +166,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!Serial
 
     var endian: streams.Endian = .little;
     switch (version) {
-        2, 3, 5...8 => {
+        2, 3, 4, 5...8 => {
             // Endianness byte: first byte of the trailing metadata block.
             if (metadata_size == 0 or metadata_size > file_size) return error.Corrupt;
             const endian_pos: usize = @intCast(file_size - metadata_size);
@@ -190,7 +189,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!Serial
     }
 
     const header_size: u64 = switch (version) {
-        2, 3, 5...8 => 16,
+        2, 3, 4, 5...8 => 16,
         9...21 => 20,
         else => 48,
     };
@@ -489,8 +488,8 @@ test "supportedVersion" {
     try std.testing.expect(supportedVersion(5));
     try std.testing.expect(supportedVersion(13));
     try std.testing.expect(supportedVersion(22));
+    try std.testing.expect(supportedVersion(4));
     try std.testing.expect(!supportedVersion(1));
-    try std.testing.expect(!supportedVersion(4));
     try std.testing.expect(!supportedVersion(23));
 }
 
@@ -538,7 +537,7 @@ test "parse rejects unsupported version" {
     defer arena.deinit();
     const a = arena.allocator();
     const bytes = try buildV22Fixture(a);
-    std.mem.writeInt(u32, bytes[8..12], 4, .big); // version 4 is unsupported
+    std.mem.writeInt(u32, bytes[8..12], 1, .big); // version 1 is out of range
     try std.testing.expectError(error.UnsupportedVersion, parse(a, bytes));
 }
 
