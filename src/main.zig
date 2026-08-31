@@ -51,7 +51,9 @@ const usage =
     \\  diff <a> <b>     Compare two files' objects by content hash;
     \\                 directories compare the two trees file-by-file
     \\                 (--json for a machine-readable diff;
-    \\                  --class <id> to compare one class)
+    \\                  --class <id> to compare one class;
+    \\                  --pixels decodes changed Texture2D objects and
+    \\                  reports per-channel pixel differences)
     \\  hash <path>      Print per-object content fingerprints
     \\                 (--json for a machine-readable array;
     \\                  --class <id> / --path-id <id> filters,
@@ -2289,7 +2291,8 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         .serialized => try skinSerializedBytes(arena, bytes, null, &shaders, &failures),
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
                 return;
             };
             for (b.nodes) |n| {
@@ -2299,7 +2302,8 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
                 return;
             };
             for (wf.entries) |e| {
@@ -2308,11 +2312,13 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
         },
         .archive => {
-            try stdout.print("{s}: UnityArchive files are not supported yet\n", .{path});
+            try diag(json, stdout, "{s}: UnityArchive files are not supported yet\n", .{path});
+            if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
             return;
         },
         .unknown => {
-            try stdout.print("{s}: not a recognized Unity asset file\n", .{path});
+            try diag(json, stdout, "{s}: not a recognized Unity asset file\n", .{path});
+            if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
             return;
         },
     }
@@ -2384,6 +2390,17 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     if (failures.items.len != 0) verify_failed_flag = true;
 }
 
+/// Routes a diagnostic to stderr while `--json` is in effect, so the
+/// document a script parses off stdout stays well-formed; without `--json`
+/// it stays on stdout with the rest of the human-readable report.
+fn diag(json: bool, stdout: *Io.Writer, comptime fmt: []const u8, args: anytype) !void {
+    if (!json) return stdout.print(fmt, args);
+    var buf: [512]u8 = undefined;
+    var w: Io.File.Writer = .init(.stderr(), io_global.io, &buf);
+    w.interface.print(fmt, args) catch return;
+    w.interface.flush() catch {};
+}
+
 /// Reports a per-file failure on stderr, keeping it out of the stdout
 /// stream that carries the command's (possibly JSON) result.
 fn warnToStderr(path: []const u8, err: anyerror) void {
@@ -2415,7 +2432,9 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
             warnToStderr(full, err);
             continue;
         };
-        try files_a.append(std.heap.page_allocator, .{ .name = entry.name, .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
+        // `entry.name` borrows the iterator's buffer and is overwritten by the
+        // next `next()`, so keep the copy inside `full` instead.
+        try files_a.append(std.heap.page_allocator, .{ .name = full[dir_a.len + 1 ..], .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
     }
 
     var dir2 = std.Io.Dir.cwd().openDir(io, dir_b, .{ .iterate = true }) catch |err| {
@@ -2430,7 +2449,7 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
             warnToStderr(full, err);
             continue;
         };
-        try files_b.append(std.heap.page_allocator, .{ .name = entry.name, .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
+        try files_b.append(std.heap.page_allocator, .{ .name = full[dir_b.len + 1 ..], .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
     }
 
     var unchanged: usize = 0;
@@ -2571,7 +2590,8 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("[]\n", .{});
                 return;
             };
             for (b.nodes) |n| {
@@ -2586,7 +2606,8 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("[]\n", .{});
                 return;
             };
             for (wf.entries) |e| {
@@ -2602,14 +2623,15 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         .serialized => {
             if (path_filter) |pf| {
                 if (pf.node != null) {
-                    try stdout.print("unityz: node selector not valid for a serialized file\n", .{});
+                    try diag(json, stdout, "unityz: node selector not valid for a serialized file\n", .{});
+                    if (json) try stdout.print("[]\n", .{});
                     return;
                 }
             }
             try hashSerializedBytes(arena, bytes, null, if (path_filter) |pf| pf.path_id else null, class_filter, json, &entries, stdout);
         },
         else => {
-            try stdout.print("{s}: hash requires a serialized file, bundle, or webfile\n", .{path});
+            try diag(json, stdout, "{s}: hash requires a serialized file, bundle, or webfile\n", .{path});
         },
     }
     if (json) {
@@ -2632,7 +2654,7 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
 
 fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, path_filter: ?i64, class_filter: ?i32, json: bool, entries: *std.ArrayList(Fp), stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
+        try diag(json, stdout, "  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
     };
     for (sf.objects) |*o| {
@@ -2772,7 +2794,6 @@ fn findTextureInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id:
     const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
     return .{ .rgba = rgba, .width = t.width, .height = t.height };
 }
-
 
 /// `diff <file1> <file2>` — compare two files' objects by content hash:
 /// reports objects only in one file, objects whose bytes changed between
@@ -3198,7 +3219,8 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("[]\n", .{});
                 return;
             };
             for (b.nodes) |n| {
@@ -3208,7 +3230,8 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("[]\n", .{});
                 return;
             };
             for (wf.entries) |e| {
@@ -3218,7 +3241,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .serialized => try findSerializedBytes(arena, bytes, null, needle, class_filter, exact, json, &found, stdout),
         else => {
-            try stdout.print("{s}: find requires a serialized file, bundle, or webfile\n", .{path});
+            try diag(json, stdout, "{s}: find requires a serialized file, bundle, or webfile\n", .{path});
         },
     }
     if (json) {
@@ -3244,7 +3267,7 @@ const FindMatch = struct { path_id: i64, class_id: i32, name: []const u8, node: 
 
 fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, needle: []const u8, class_filter: ?i32, exact: bool, json: bool, found: *std.ArrayList(FindMatch), stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
+        try diag(json, stdout, "  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
     };
     var matches: usize = 0;
