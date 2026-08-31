@@ -1,7 +1,7 @@
 # Plan - clean-room UnityPy rewrite: format parsers
 
 **Date:** 2026-08-30  
-**Status:** Complete - every default UnityPy capability covered by this
+**Status:** Completed - every default UnityPy capability covered by this
 plan is implemented and
 verified: parsers, object reader (incl. managed-reference registries), typed
 classes, texture decode (DXT/BC4/5/BC7/ETC1/2/ETC2-RGBA8, ASTC
@@ -13,8 +13,8 @@ v7 alignment, data hash, 10-byte block entries), verified against
 UnityPy on real 2022.3 bundles.
 
 The legacy-format rewrite (< v17) is
-done: formats 2-22 round-trip through the writer (per-version object
-table, tail fields, Legacy16 metadata-at-end layout), with v9 and v13
+done: formats 2-22 except 4 round-trip through the writer (per-version
+object table, tail fields, Legacy16 metadata-at-end layout), with v9 and v13
 fixture tests. Real 2022.3 CABs parse 100% clean (49/49 and 10/10
 objects, zero read errors) after the last reader gap was closed:
 strings are always 4-aligned in the wire format regardless of the
@@ -36,20 +36,21 @@ public format documentation only - no code or data taken from UnityPy.
   format version, Unity version, platform, endianness, type-tree flag, and
   type/object/external counts for any UnityFS bundle, WebFile,
   `.assets`/`.resources`/`.resS` file produced by Unity 2.5 through current
-  versions. `--objects` adds the object table; per-class object counts are
+  versions (serialized formats 2-22 except 4, which is rejected).
+  `--objects` adds the object table; per-class object counts are
   `unityz stats`.
 - `unityz extract <file>` writes embedded assets (textures, text assets,
   meshes, raw bytes of any object) to disk; texture objects are decoded to
-  PNG for the supported compressed formats (DXT1/3/5, BC4/5, BC7,
-  ETC1/2, ETC2-RGBA8, ASTC LDR and HDR, the DXT/ETC crunch variants, plus
-  the uncompressed RGB/A family and the raw half/float/16-bit/signed
-  family).
+  PNG for the supported compressed formats (DXT1/3/5, BC4/5, BC6H, BC7,
+  PVRTC, ATC, EAC, ETC1/2, ETC2-RGBA1, ETC2-RGBA8, the 3DS ETC variants,
+  ASTC LDR and HDR, the DXT/ETC crunch variants, plus the uncompressed
+  RGB/A family and the raw half/float/16-bit/signed family).
 - `unityz edit <file>` rewrites a serialized file after in-memory changes
   (e.g. dumping an object to JSON, editing it, and writing back), producing
   a valid file.
 - Beyond the three commands this plan started from, the CLI ships
-  `verify`, `stats`, `find`, `show`, `diff`, `hash`, and `skin`; the
-  completion notes below record the pass that added each one.
+  `verify`, `stats`, `find`, `show`, `shader`, `diff`, `hash`, and
+  `skin`; the completion notes below record the pass that added each one.
 - The library surface (`src/lib.zig`) exposes containers, object access, and
   raw read/write primitives so other Zig tools can build on it.
 
@@ -88,7 +89,8 @@ Two of those non-goals were reopened by later passes and no longer
 describe the code (see the completion notes): the exotic texture formats
 were taken on after an audit against UnityPy's TextureFormat enum, so
 ASTC HDR, the crunch variants, and the raw half/float/16-bit/signed
-family now decode, with PVRTC/ATC/EAC/3DS still unsupported; and
+family now decode, and later passes closed the rest of the block-format
+gap too (BC6H, PVRTC, ATC, EAC, the 3DS ETC variants, ETC2_RGBA1); and
 AudioClip data is now extracted (container detection, raw PCM wrapped in
 a WAV header) rather than skipped, though nothing is transcoded, so
 audio/movie *conversion* remains out. The other three non-goals still
@@ -168,7 +170,7 @@ The UnityFS bundle parser was corrected to the real wire format
    (v17-22 file rebuild preserving the type section verbatim), `edit` CLI
    (JSON literal field set + in-place rewrite).
 
-Formats 2-22 round-trip
+Formats 2-22 except 4 round-trip
    (per-version object-table layout, tail fields, Legacy16 and
    Standard20 header layouts); v9 and v13 fixtures cover the legacy
    paths.
