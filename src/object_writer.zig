@@ -228,8 +228,14 @@ fn asUint(v: value.Value) Error!u64 {
 }
 
 fn asFloat(v: value.Value) Error!f64 {
+    // int/uint literals widen, mirroring `value.asFloat`: `extract --json`
+    // emits whole-number floats (quaternion w:1, position x:0) without a
+    // decimal point, and the round-trip back through `edit --patch` must
+    // accept them. `asInt` has always been lenient the same way.
     return switch (v) {
         .float => |f| f,
+        .int => |i| @floatFromInt(i),
+        .uint => |u| @floatFromInt(u),
         else => error.TypeMismatch,
     };
 }
@@ -336,6 +342,37 @@ test "round trip: rich record" {
     defer out.deinit();
     try writeObject(&out, root, v, &.{});
     try std.testing.expectEqualSlices(u8, wire.getWritten(), out.getWritten());
+}
+
+test "write widens int and uint literals to float fields" {
+    // `extract --json` prints whole-number floats without a decimal point
+    // (quaternion w:1, position x:0), so `edit --patch` feeding that JSON
+    // back must accept int/uint literals where the type tree declares a
+    // float. Each writes the exact float bits of the widened value.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const root = try allocNode(a, "Vector3f", "m_Scale", 0, &.{
+        try allocNode(a, "float", "x", 0, &.{}),
+        try allocNode(a, "float", "y", 0, &.{}),
+        try allocNode(a, "float", "z", 0, &.{}),
+    });
+
+    var out: streams.Writer = .init(a);
+    defer out.deinit();
+    try writeObject(&out, root, .{ .obj = &[_]value.Field{
+        .{ .name = "x", .value = .{ .int = 0 } },
+        .{ .name = "y", .value = .{ .float = 1.5 } },
+        .{ .name = "z", .value = .{ .uint = 1 } },
+    } }, &.{});
+
+    var expect: streams.Writer = .init(a);
+    defer expect.deinit();
+    try expect.writeFloat(f32, 0.0);
+    try expect.writeFloat(f32, 1.5);
+    try expect.writeFloat(f32, 1.0);
+    try std.testing.expectEqualSlices(u8, expect.getWritten(), out.getWritten());
 }
 
 test "round trip: map and typeless data" {
