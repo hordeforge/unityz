@@ -5,12 +5,14 @@
 //! half-float RHalf/RGHalf/RGBAHalf, float RFloat/RGFloat/RGBAFloat/
 //! ARGBFloat/RG32, shared-exponent RGB9e5Float, 48/64-bit RGB48/RGBA64,
 //! and the signed variants 75-82), the S3TC/DXT block formats (BC1/BC2/
-//! BC3), BC4/BC5, BC7 (all eight modes plus the reserved mode), ETC1/ETC2
+//! BC3), BC4/BC5, BC6H (HDR, all 14 modes), BC7 (all eight modes plus
+//! the reserved mode), ETC1/ETC2
 //! (including the T/H/planar alternate modes and EAC alpha), and ASTC
 //! (4x4 through 12x12, including void-extent and error blocks). The
 //! compressed paths were cross-validated byte-exact against UnityPy's
 //! texture2ddecoder
-//! (900/900 ETC blocks, 2160/2160 BC7 blocks, 600/600 ASTC blocks), so
+//! (900/900 ETC blocks, 2160/2160 BC7 blocks, 600/600 ASTC blocks, BC6H
+//! on DirectXTex-encoded HDR samples), so
 //! output matches UnityPy pixel-for-pixel — including its wrap behavior
 //! for out-of-range ETC differential sums and its transparent-black
 //! reserved-BC7-mode output. Format numbers follow Unity's TextureFormat
@@ -26,10 +28,14 @@
 //! Unity crunch variants: ETC_RGB4Crunched (64), ETC2_RGBA8Crunched (65),
 //! DXT1Crunched (28), and DXT5Crunched (29), all routed through the
 //! vendored unitycrunch decompressor to raw ETC1/ETC2/DXT1/DXT5 blocks
-//! and then decoded by the corresponding block decoder. Crunched streams
-//! are validated against UnityPy's texture2ddecoder on real Unity crunch
-//! fixtures (the UNITYCRUNCH_*.crn test streams). PVRTC/ATC/EAC/3DS
-//! remain unsupported.
+//! and then decoded by the corresponding block decoder. The crunch C++
+//! is hardened against corrupt streams (huffman bounds + level-offset
+//! validation), and the crunched paths are validated against UnityPy's
+//! texture2ddecoder on real Unity crunch fixtures plus stock-encoder
+//! output (DXT5's alpha is not end-to-end verifiable because Unity's
+//! fork stores it separately - the block decode itself is verified on
+//! random blocks). PVRTC/ATC/EAC are validated against texture2ddecoder's
+//! own test textures; the 3DS ETC variants remain unsupported.
 //!
 //! Block formats are 4x4 pixels, row-major in the data: block (bx, by)
 //! sits at index `by * (width/4) + bx`. Within a block, pixel (x, y) is
@@ -81,6 +87,16 @@ pub const format = struct {
     pub const r_float: i32 = 18;
     pub const rg_float: i32 = 19;
     pub const rgb9e5: i32 = 22;
+    pub const pvrtc_rgb2: i32 = 30;
+    pub const atc_rgb4: i32 = 35;
+    pub const atc_rgba8: i32 = 36;
+    pub const eac_r: i32 = 41;
+    pub const eac_r_signed: i32 = 42;
+    pub const eac_rg: i32 = 43;
+    pub const eac_rg_signed: i32 = 44;
+    pub const pvrtc_rgba2: i32 = 31;
+    pub const pvrtc_rgb4: i32 = 32;
+    pub const pvrtc_rgba4: i32 = 33;
     pub const rg16: i32 = 62;
     pub const rg32: i32 = 72;
     pub const rgb48: i32 = 73;
@@ -130,13 +146,12 @@ pub const format = struct {
             25 => "BC7",
             26 => "BC4",
             27 => "BC5",
+            28 => "DXT1Crunched",
+            29 => "DXT5Crunched",
             34 => "ETC_RGB4",
             45 => "ETC2_RGB",
             46 => "ETC2_RGBA1",
-            47 => "ETC2_RGBA8",
-            28 => "DXT1Crunched",
-            29 => "DXT5Crunched",
-            64 => "ETC_RGB4Crunched",
+      64 => "ETC_RGB4Crunched",
             65 => "ETC2_RGBA8Crunched",
             63 => "R8",
             6 => "ARGBFloat",
@@ -148,6 +163,16 @@ pub const format = struct {
             18 => "RFloat",
             19 => "RGFloat",
             22 => "RGB9e5Float",
+            30 => "PVRTC_RGB2",
+            31 => "PVRTC_RGBA2",
+            32 => "PVRTC_RGB4",
+            33 => "PVRTC_RGBA4",
+            35 => "ATC_RGB4",
+            36 => "ATC_RGBA8",
+            41 => "EAC_R",
+            42 => "EAC_R_SIGNED",
+            43 => "EAC_RG",
+            44 => "EAC_RG_SIGNED",
             62 => "RG16",
             72 => "RG32",
             73 => "RGB48",
@@ -475,6 +500,15 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
         format.bc4 => try decodeBc4(out, w, h, data),
         format.bc5 => try decodeBc5(out, w, h, data),
         format.bc7 => try decodeBc7(out, w, h, data),
+        format.bc6h => decodeBc6(out, w, h, data),
+        format.pvrtc_rgb2, format.pvrtc_rgba2 => try decodePvrtc(out, w, h, data, true),
+        format.pvrtc_rgb4, format.pvrtc_rgba4 => try decodePvrtc(out, w, h, data, false),
+        format.atc_rgb4 => try decodeAtc(out, w, h, data, false),
+        format.atc_rgba8 => try decodeAtc(out, w, h, data, true),
+        format.eac_r => try decodeEac(out, w, h, data, .r_unsigned),
+        format.eac_r_signed => try decodeEac(out, w, h, data, .r_signed),
+        format.eac_rg => try decodeEac(out, w, h, data, .rg_unsigned),
+        format.eac_rg_signed => try decodeEac(out, w, h, data, .rg_signed),
         format.etc_rgb4 => try decodeEtc(out, w, h, data, .etc1),
         format.etc2_rgb => try decodeEtc(out, w, h, data, .etc2),
         format.etc2_rgba8 => try decodeEtc2Rgba8(out, w, h, data),
@@ -588,9 +622,29 @@ fn expectedSize(tex_format: i32, width: u32, height: u32) ?usize {
         format.rg32, format.rg32_signed => w * h * 8,
         format.rgb48, format.rgb48_signed => w * h * 6,
         format.rgba64, format.rgba64_signed => w * h * 8,
+        format.pvrtc_rgb2, format.pvrtc_rgba2 => blk: {
+            const pw = (w + 7) / 8 * 8;
+            const ph = (h + 3) / 4 * 4;
+            break :blk pw * ph / 4;
+        },
+        format.pvrtc_rgb4, format.pvrtc_rgba4 => blk: {
+            const pw = (w + 3) / 4 * 4;
+            const ph = (h + 3) / 4 * 4;
+            break :blk pw * ph / 2;
+        },
+        format.atc_rgb4, format.eac_r, format.eac_r_signed => blk: {
+            const bw = (w + 3) / 4;
+            const bh = (h + 3) / 4;
+            break :blk bw * bh * 8;
+        },
+        format.atc_rgba8, format.eac_rg, format.eac_rg_signed => blk: {
+            const bw = (w + 3) / 4;
+            const bh = (h + 3) / 4;
+            break :blk bw * bh * 16;
+        },
         format.r8_signed => w * h * 1,
         format.rgba32_signed => w * h * 4,
-        format.dxt1, format.dxt3, format.dxt5, format.bc4, format.bc5, format.bc7 => blk: {
+        format.dxt1, format.dxt3, format.dxt5, format.bc4, format.bc5, format.bc6h, format.bc7 => blk: {
             // dimensions are padded up to multiples of 4
             const bw = (w + 3) / 4;
             const bh = (h + 3) / 4;
@@ -617,6 +671,966 @@ fn expectedSize(tex_format: i32, width: u32, height: u32) ?usize {
         },
     };
 }
+
+// --- BC6H (BPTC HDR) ---
+
+const bc6h_mode_info = [_]Bc6hModeInfo{
+    .{ .transformed = 1, .partition_bits = 5, .endpoint_bits = 10, .delta_bits = .{5, 5, 5} },
+    .{ .transformed = 1, .partition_bits = 5, .endpoint_bits = 7, .delta_bits = .{6, 6, 6} },
+    .{ .transformed = 1, .partition_bits = 5, .endpoint_bits = 11, .delta_bits = .{5, 4, 4} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 10, .delta_bits = .{10, 10, 10} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 1, .partition_bits = 5, .endpoint_bits = 11, .delta_bits = .{4, 5, 4} },
+    .{ .transformed = 1, .partition_bits = 0, .endpoint_bits = 11, .delta_bits = .{9, 9, 9} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 1, .partition_bits = 5, .endpoint_bits = 11, .delta_bits = .{4, 4, 5} },
+    .{ .transformed = 1, .partition_bits = 0, .endpoint_bits = 12, .delta_bits = .{8, 8, 8} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 1, .partition_bits = 5, .endpoint_bits = 9, .delta_bits = .{5, 5, 5} },
+    .{ .transformed = 1, .partition_bits = 0, .endpoint_bits = 16, .delta_bits = .{4, 4, 4} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 1, .partition_bits = 5, .endpoint_bits = 8, .delta_bits = .{6, 5, 5} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 1, .partition_bits = 5, .endpoint_bits = 8, .delta_bits = .{5, 6, 5} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 1, .partition_bits = 5, .endpoint_bits = 8, .delta_bits = .{5, 5, 6} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+    .{ .transformed = 0, .partition_bits = 5, .endpoint_bits = 6, .delta_bits = .{6, 6, 6} },
+    .{ .transformed = 0, .partition_bits = 0, .endpoint_bits = 0, .delta_bits = .{0, 0, 0} },
+};
+const bc6h_partition_p2 = [_]u16{
+    0xcccc, 0x8888, 0xeeee, 0xecc8, 0xc880, 0xfeec, 0xfec8, 0xec80, 0xc800, 0xffec, 0xfe80, 0xe800, 0xffe8, 0xff00, 0xfff0, 0xf000, 0xf710, 0x008e, 0x7100, 0x08ce, 0x008c, 0x7310, 0x3100, 0x8cce, 0x088c, 0x3110, 0x6666, 0x366c, 0x17e8, 0x0ff0, 0x718e, 0x399c, 0xaaaa, 0xf0f0, 0x5a5a, 0x33cc, 0x3c3c, 0x55aa, 0x9696, 0xa55a, 0x73ce, 0x13c8, 0x324c, 0x3bdc, 0x6996, 0xc33c, 0x9966, 0x0660, 0x0272, 0x04e4, 0x4e40, 0x2720, 0xc936, 0x936c, 0x39c6, 0x639c, 0x9336, 0x9cc6, 0x817e, 0xe718, 0xccf0, 0x0fcc, 0x7744, 0xee22,
+};
+const bc6h_anchor_p2 = [_]u8{
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 2, 8, 2, 2, 8, 8, 15, 2, 8, 2, 2, 8, 8, 2, 2, 15, 15, 6, 8, 2, 8, 15, 15, 2, 8, 2, 2, 2, 15, 15, 6, 6, 2, 6, 8, 15, 15, 2, 2, 15, 15, 15, 15, 15, 2, 2, 15,
+};
+const bc6h_factors = [_][16]u8{
+    .{ 0, 21, 43, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    .{ 0, 9, 18, 27, 37, 46, 55, 64, 0, 0, 0, 0, 0, 0, 0, 0 },
+    .{ 0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64 },
+};
+/// BC6H (format 24) block decode, ported from texture2ddecoder's bcn.cpp
+/// (the UnityPy reference) so output matches byte-for-byte. BC6H stores
+/// half-float-ish endpoints for HDR color; Unity's BC6H format is the
+/// unsigned variant.
+fn bc6hReadBr(br: *Bc6hReader, num: usize) u32 {
+    const pos = br.pos / 8;
+    const shift = br.pos & 7;
+    var data: u32 = 0;
+    const avail = 16 - pos;
+    const take = @min(avail, 4);
+    @memcpy(@as(*[4]u8, @ptrCast(&data))[0..take], br.block[pos..][0..take]);
+    br.pos += num;
+    return (data >> @intCast(shift)) & ((@as(u32, 1) << @intCast(num)) - 1);
+}
+
+fn bc6hUnquantize(value: u32, signed: bool, bits: u8) u32 {
+    const max_value: u32 = @as(u32, 1) << @intCast(bits - 1);
+    if (signed) {
+        if (bits >= 16) return value;
+        const sign = value & 0x8000 != 0;
+        const v = value & 0x7fff;
+        var unq: u32 = undefined;
+        if (v == 0) unq = 0 else if (v >= max_value - 1) unq = 0x7fff else unq = ((v << 15) + 0x4000) >> @intCast(bits - 1);
+        return if (sign) 0x10000 - unq else unq; // two's complement-ish via wrapping
+    }
+    if (bits >= 15) return value;
+    if (value == 0) return 0;
+    if (value == max_value) return 0xffff;
+    return ((value << 15) + 0x4000) >> @intCast(bits - 1);
+}
+
+fn bc6hFinishUnquantize(value: u32, signed: bool) u32 {
+    if (signed) {
+        const sign = value & 0x8000;
+        return ((value & 0x7fff) * 31 >> 5) | sign;
+    }
+    return (value * 31) >> 6;
+}
+
+fn bc6hSignExtend(value: u32, num_bits: u8) u32 {
+    // C++ keeps endpoints as uint16_t (wrapped); sign extension wraps at 16
+    // bits too, and later arithmetic is 32-bit on values <= 0xffff.
+    const mask: u32 = @as(u32, 1) << @intCast(num_bits - 1);
+    return ((value ^ mask) -% mask) & 0xffff;
+}
+
+fn bc6hHalfToU8(h: u16) u8 {
+    const f: f32 = @floatCast(@as(f16, @bitCast(h)));
+    return @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(f * 255.0))), 0, 255));
+}
+
+const Bc6hModeInfo = struct {
+    transformed: u8,
+    partition_bits: u8,
+    endpoint_bits: u8,
+    delta_bits: [3]u8,
+};
+
+const Bc6hReader = struct {
+    block: []const u8,
+    pos: usize = 0,
+};
+
+/// Decodes one 16-byte BC6H block into 16 RGBA8 pixels.
+fn decodeBc6Block(block: []const u8, dst: *[16][4]u8) void {
+    var br = Bc6hReader{ .block = block };
+    var mode: u8 = @intCast(bc6hReadBr(&br, 2));
+    if (mode & 2 != 0) {
+        mode |= @as(u8, @intCast(bc6hReadBr(&br, 3))) << 2;
+        if (bc6h_mode_info[mode].endpoint_bits == 0) {
+            @memset(@as(*[64]u8, @ptrCast(dst)), 0); // invalid mode: black
+            return;
+        }
+    }
+    var epR = [_]u32{ 0, 0, 0, 0 };
+    var epG = [_]u32{ 0, 0, 0, 0 };
+    var epB = [_]u32{ 0, 0, 0, 0 };
+    switch (mode) {
+        0 => {
+            epG[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 1;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[2] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 2;
+            epR[3] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 3;
+        },
+        1 => {
+            epG[2] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 7)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 1;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 7)) << 0;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 2;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 7)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 3;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[2] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epR[3] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+        },
+        10 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 1;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 2;
+            epR[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 3;
+        },
+        11 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 11;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 11;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 11;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+        },
+        14 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 9)) << 0;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 9)) << 0;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 9)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 1;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[2] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 2;
+            epR[3] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 3;
+        },
+        15 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 15;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 14;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 13;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 12;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 11;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 15;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 14;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 13;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 12;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 11;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 15;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 14;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 13;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 12;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 11;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+        },
+        18 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 2;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 3;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 1;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[2] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epR[3] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+        },
+        2 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 1;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[2] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 2;
+            epR[3] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 3;
+        },
+        22 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 0;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 1;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[2] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 2;
+            epR[3] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 3;
+        },
+        26 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 1;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 8)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[2] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 2;
+            epR[3] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 3;
+        },
+        3 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+        },
+        30 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 1;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 2;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 3;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 5;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[2] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+            epR[3] |= @as(u32, bc6hReadBr(&br, 6)) << 0;
+        },
+        6 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 5)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epG[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 1;
+            epB[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epR[2] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 0;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 2;
+            epR[3] |= @as(u32, bc6hReadBr(&br, 4)) << 0;
+            epG[2] |= @as(u32, bc6hReadBr(&br, 1)) << 4;
+            epB[3] |= @as(u32, bc6hReadBr(&br, 1)) << 3;
+        },
+        7 => {
+            epR[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 10)) << 0;
+            epR[1] |= @as(u32, bc6hReadBr(&br, 9)) << 0;
+            epR[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epG[1] |= @as(u32, bc6hReadBr(&br, 9)) << 0;
+            epG[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+            epB[1] |= @as(u32, bc6hReadBr(&br, 9)) << 0;
+            epB[0] |= @as(u32, bc6hReadBr(&br, 1)) << 10;
+        },
+        else => {},
+    }
+
+    const mi = bc6h_mode_info[mode];
+    const signed_fmt = false; // Unity's BC6H is unsigned
+    if (signed_fmt) {
+        epR[0] = bc6hSignExtend(epR[0], mi.endpoint_bits);
+        epG[0] = bc6hSignExtend(epG[0], mi.endpoint_bits);
+        epB[0] = bc6hSignExtend(epB[0], mi.endpoint_bits);
+    }
+    const num_subsets: usize = if (mi.partition_bits != 0) 2 else 1;
+    for (1..num_subsets * 2) |ii| {
+        if (signed_fmt or mi.transformed != 0) {
+            epR[ii] = bc6hSignExtend(epR[ii], mi.delta_bits[0]);
+            epG[ii] = bc6hSignExtend(epG[ii], mi.delta_bits[1]);
+            epB[ii] = bc6hSignExtend(epB[ii], mi.delta_bits[2]);
+        }
+        if (mi.transformed != 0) {
+            const mask: u32 = (@as(u32, 1) << @intCast(mi.endpoint_bits)) - 1;
+            epR[ii] = (epR[ii] + epR[0]) & mask;
+            epG[ii] = (epG[ii] + epG[0]) & mask;
+            epB[ii] = (epB[ii] + epB[0]) & mask;
+            if (signed_fmt) {
+                epR[ii] = bc6hSignExtend(epR[ii], mi.endpoint_bits);
+                epG[ii] = bc6hSignExtend(epG[ii], mi.endpoint_bits);
+                epB[ii] = bc6hSignExtend(epB[ii], mi.endpoint_bits);
+            }
+        }
+    }
+    for (0..num_subsets * 2) |ii| {
+        epR[ii] = bc6hUnquantize(epR[ii], signed_fmt, mi.endpoint_bits);
+        epG[ii] = bc6hUnquantize(epG[ii], signed_fmt, mi.endpoint_bits);
+        epB[ii] = bc6hUnquantize(epB[ii], signed_fmt, mi.endpoint_bits);
+    }
+    const partition_set_idx: usize = if (mi.partition_bits != 0) @intCast(bc6hReadBr(&br, 5)) else 0;
+    const index_bits: u8 = if (mi.partition_bits != 0) 3 else 4;
+    const factors = &bc6h_factors[index_bits - 2];
+    for (0..4) |yy| {
+        for (0..4) |xx| {
+            const idx = yy * 4 + xx;
+            var subset_index: usize = 0;
+            var index_anchor: usize = 0;
+            if (mi.partition_bits != 0) {
+                subset_index = (bc6h_partition_p2[partition_set_idx] >> @intCast(idx)) & 1;
+                index_anchor = if (subset_index != 0) bc6h_anchor_p2[partition_set_idx] else 0;
+            }
+            const anchor: usize = if (idx == index_anchor) 1 else 0;
+            const num: u8 = index_bits - @as(u8, @intCast(anchor));
+            const index: usize = @intCast(bc6hReadBr(&br, num));
+            const fc: u32 = factors[index];
+            const fca: u32 = 64 - fc;
+            const fcb: u32 = fc;
+            subset_index *= 2;
+            const rr = bc6hFinishUnquantize((epR[subset_index] * fca + epR[subset_index + 1] * fcb + 32) >> 6, signed_fmt);
+            const gg = bc6hFinishUnquantize((epG[subset_index] * fca + epG[subset_index + 1] * fcb + 32) >> 6, signed_fmt);
+            const bb = bc6hFinishUnquantize((epB[subset_index] * fca + epB[subset_index + 1] * fcb + 32) >> 6, signed_fmt);
+            dst[idx][0] = bc6hHalfToU8(@intCast(rr));
+            dst[idx][1] = bc6hHalfToU8(@intCast(gg));
+            dst[idx][2] = bc6hHalfToU8(@intCast(bb));
+            dst[idx][3] = 255;
+        }
+    }
+}
+
+fn decodeBc6(out: []u8, w: usize, h: usize, data: []const u8) void {
+    const nbx = (w + 3) / 4;
+    const nby = (h + 3) / 4;
+    for (0..nby) |by| {
+        for (0..nbx) |bx| {
+            const block = data[(by * nbx + bx) * 16 ..][0..16];
+            var px: [16][4]u8 = undefined;
+            decodeBc6Block(block, &px);
+            for (0..16) |i| {
+                const px_ = bx * 4 + i % 4;
+                const py_ = by * 4 + i / 4;
+                if (px_ >= w or py_ >= h) continue;
+                const dst = out[(py_ * w + px_) * 4 ..][0..4];
+                dst[0] = px[i][0];
+                dst[1] = px[i][1];
+                dst[2] = px[i][2];
+                dst[3] = px[i][3];
+            }
+        }
+    }
+}
+
+
+// --- PVRTC (formats 30-33) ---
+
+// --- PVRTC (formats 30-33) ---
+// Ported from texture2ddecoder's pvrtc.cpp (the UnityPy reference) so
+// output matches byte-for-byte. PVRTC is a 2bpp/4bpp block format where
+// each block stores two 15/16-bit colors plus 2-bit modulation weights,
+// and blocks are morton-ordered in memory.
+
+const PvrtcTexelInfo = struct {
+    a: [4]u8,
+    b: [4]u8,
+    weight: [32]i8,
+    punch_through: u32,
+};
+
+fn pvrtcMortonIndex(x: usize, y: usize, min_dim: usize) usize {
+    var offset: usize = 0;
+    var shift: usize = 0;
+    var mask: usize = 1;
+    while (mask < min_dim) : ({
+        mask <<= 1;
+        shift += 1;
+    }) {
+        offset |= (((y & mask) | ((x & mask) << 1))) << @intCast(shift);
+    }
+    offset |= ((x | y) >> @intCast(shift)) << @intCast(shift * 2);
+    return offset;
+}
+
+fn pvrtcGetTexelColors(data: []const u8, info: *PvrtcTexelInfo) void {
+    const ca = std.mem.readInt(u16, data[4..6], .little);
+    const cb = std.mem.readInt(u16, data[6..8], .little);
+    if (ca & 0x8000 != 0) {
+        info.a[0] = @intCast(ca >> 10 & 0x1f);
+        info.a[1] = @intCast(ca >> 5 & 0x1f);
+        info.a[2] = @intCast((ca & 0x1e) | (ca >> 4 & 1));
+        info.a[3] = 0xf;
+    } else {
+        info.a[0] = @intCast((ca >> 7 & 0x1e) | (ca >> 11 & 1));
+        info.a[1] = @intCast((ca >> 3 & 0x1e) | (ca >> 7 & 1));
+        info.a[2] = @intCast((ca << 1 & 0x1c) | (ca >> 2 & 3));
+        info.a[3] = @intCast(ca >> 11 & 0xe);
+    }
+    if (cb & 0x8000 != 0) {
+        info.b[0] = @intCast(cb >> 10 & 0x1f);
+        info.b[1] = @intCast(cb >> 5 & 0x1f);
+        info.b[2] = @intCast(cb & 0x1f);
+        info.b[3] = 0xf;
+    } else {
+        info.b[0] = @intCast((cb >> 7 & 0x1e) | (cb >> 11 & 1));
+        info.b[1] = @intCast((cb >> 3 & 0x1e) | (cb >> 7 & 1));
+        info.b[2] = @intCast((cb << 1 & 0x1e) | (cb >> 3 & 1));
+        info.b[3] = @intCast(cb >> 11 & 0xe);
+    }
+}
+
+const PVRTC_STANDARD_WEIGHT = [_]i8{ 0, 3, 5, 8 };
+const PVRTC_PUNCHTHROUGH_WEIGHT = [_]i8{ 0, 4, 4, 8 };
+
+fn pvrtcGetTexelWeights4(data: []const u8, info: *PvrtcTexelInfo) void {
+    info.punch_through = 0;
+    const mod_mode = data[4] & 1;
+    var mod_bits = std.mem.readInt(u32, data[0..4], .little);
+    if (mod_mode != 0) {
+        for (0..16) |i| {
+            const m = mod_bits & 3;
+            info.weight[i] = PVRTC_PUNCHTHROUGH_WEIGHT[m];
+            if (m == 2) info.punch_through |= @as(u32, 1) << @intCast(i);
+            mod_bits >>= 2;
+        }
+    } else {
+        for (0..16) |i| {
+            info.weight[i] = PVRTC_STANDARD_WEIGHT[mod_bits & 3];
+            mod_bits >>= 2;
+        }
+    }
+}
+
+fn pvrtcGetTexelWeights2(data: []const u8, info: *PvrtcTexelInfo) void {
+    info.punch_through = 0;
+    const mod_mode = data[4] & 1;
+    var mod_bits = std.mem.readInt(u32, data[0..4], .little);
+    if (mod_mode != 0) {
+        const fillflag: i8 = if (data[0] & 1 != 0)
+            (if (data[2] & 0x10 != 0) -1 else -2)
+        else
+            -3;
+        var i: usize = 1;
+        var y: usize = 0;
+        while (true) {
+            var x: usize = 0;
+            while (x < 4) : (x += 1) {
+                info.weight[i] = fillflag;
+                i += 2;
+            }
+            y += 1;
+            if (y >= 4) break;
+            // C++: ++y & 1 ? --i : ++i  (adjust uses the incremented y)
+            if (y & 1 != 0) i -= 1 else i += 1;
+        }
+        i = 0;
+        y = 0;
+        while (true) {
+            var x: usize = 0;
+            while (x < 4) : (x += 1) {
+                info.weight[i] = PVRTC_STANDARD_WEIGHT[mod_bits & 3];
+                mod_bits >>= 2;
+                i += 2;
+            }
+            y += 1;
+            if (y >= 4) break;
+            if (y & 1 != 0) i += 1 else i -= 1;
+        }
+        info.weight[0] = (info.weight[0] + 3) & 8;
+        if (data[0] & 1 != 0) info.weight[20] = (info.weight[20] + 3) & 8;
+    } else {
+        for (0..32) |i| {
+            info.weight[i] = if (mod_bits & 1 != 0) 8 else 0;
+            mod_bits >>= 1;
+        }
+    }
+}
+
+fn pvrtcApplicate4(data: []const u8, info: [*]*PvrtcTexelInfo, buf: *[32]u32) void {
+    _ = data;
+    const INTERP_WEIGHT = [_][3]i32{ .{ 2, 2, 0 }, .{ 1, 3, 0 }, .{ 0, 4, 0 }, .{ 0, 3, 1 } };
+    var clr_a = [_][4]i32{ .{ 0, 0, 0, 0 } } ** 16;
+    var clr_b = [_][4]i32{ .{ 0, 0, 0, 0 } } ** 16;
+    for (0..4) |y| {
+        for (0..4) |x| {
+            const i = y * 4 + x;
+            for (0..3) |acy| {
+                for (0..3) |acx| {
+                    const ac = acy * 3 + acx;
+                    const w = INTERP_WEIGHT[x][acx] * INTERP_WEIGHT[y][acy];
+                    for (0..4) |c| {
+                        clr_a[i][c] += @as(i32, info[ac].a[c]) * w;
+                        clr_b[i][c] += @as(i32, info[ac].b[c]) * w;
+                    }
+                }
+            }
+            for (0..3) |c| {
+                clr_a[i][c] = (clr_a[i][c] >> 1) + (clr_a[i][c] >> 6);
+                clr_b[i][c] = (clr_b[i][c] >> 1) + (clr_b[i][c] >> 6);
+            }
+            clr_a[i][3] = clr_a[i][3] + (clr_a[i][3] >> 4);
+            clr_b[i][3] = clr_b[i][3] + (clr_b[i][3] >> 4);
+        }
+    }
+    const self_info = info[4];
+    var punch = self_info.punch_through;
+    for (0..16) |i| {
+        const w: i32 = self_info.weight[i];
+        const alpha: u32 = if (punch & 1 != 0)
+            0
+        else
+            @intCast(@divTrunc(clr_a[i][3] * (8 - w) + clr_b[i][3] * w, 8));
+        const r: u32 = @intCast(@divTrunc(clr_a[i][0] * (8 - w) + clr_b[i][0] * w, 8));
+        const g: u32 = @intCast(@divTrunc(clr_a[i][1] * (8 - w) + clr_b[i][1] * w, 8));
+        const b: u32 = @intCast(@divTrunc(clr_a[i][2] * (8 - w) + clr_b[i][2] * w, 8));
+        // texture2ddecoder's color() packs BGRA (byte 0 = B); we produce RGBA
+        buf[i] = b | (g << 8) | (r << 16) | (alpha << 24);
+        punch >>= 1;
+    }
+}
+
+fn pvrtcApplicate2(data: []const u8, info: [*]*PvrtcTexelInfo, buf: *[32]u32) void {
+    _ = data;
+    const INTERP_WEIGHT_X = [_][3]i32{
+        .{ 4, 4, 0 }, .{ 3, 5, 0 }, .{ 2, 6, 0 }, .{ 1, 7, 0 },
+        .{ 0, 8, 0 }, .{ 0, 7, 1 }, .{ 0, 6, 2 }, .{ 0, 5, 3 },
+    };
+    const INTERP_WEIGHT_Y = [_][3]i32{ .{ 2, 2, 0 }, .{ 1, 3, 0 }, .{ 0, 4, 0 }, .{ 0, 3, 1 } };
+    var clr_a = [_][4]i32{ .{ 0, 0, 0, 0 } } ** 32;
+    var clr_b = [_][4]i32{ .{ 0, 0, 0, 0 } } ** 32;
+    for (0..4) |y| {
+        for (0..8) |x| {
+            const i = y * 8 + x;
+            for (0..3) |acy| {
+                for (0..3) |acx| {
+                    const ac = acy * 3 + acx;
+                    const w = INTERP_WEIGHT_X[x][acx] * INTERP_WEIGHT_Y[y][acy];
+                    for (0..4) |c| {
+                        clr_a[i][c] += @as(i32, info[ac].a[c]) * w;
+                        clr_b[i][c] += @as(i32, info[ac].b[c]) * w;
+                    }
+                }
+            }
+            for (0..3) |c| {
+                clr_a[i][c] = (clr_a[i][c] >> 2) + (clr_a[i][c] >> 7);
+                clr_b[i][c] = (clr_b[i][c] >> 2) + (clr_b[i][c] >> 7);
+            }
+            clr_a[i][3] = (clr_a[i][3] >> 1) + (clr_a[i][3] >> 5);
+            clr_b[i][3] = (clr_b[i][3] >> 1) + (clr_b[i][3] >> 5);
+        }
+    }
+    const POSYA = [_][2]i32{ .{ 1, 24 }, .{ 4, -8 }, .{ 4, -8 }, .{ 4, -8 } };
+    const POSYB = [_][2]i32{ .{ 4, 8 }, .{ 4, 8 }, .{ 4, 8 }, .{ 7, -24 } };
+    const POSXL = [_][2]i32{
+        .{ 3, 7 }, .{ 4, -1 }, .{ 4, -1 }, .{ 4, -1 },
+        .{ 4, -1 }, .{ 4, -1 }, .{ 4, -1 }, .{ 4, -1 },
+    };
+    const POSXR = [_][2]i32{
+        .{ 4, 1 }, .{ 4, 1 }, .{ 4, 1 }, .{ 4, 1 },
+        .{ 4, 1 }, .{ 4, 1 }, .{ 4, 1 }, .{ 5, -7 },
+    };
+    var self_info = info[4];
+    var punch = self_info.punch_through;
+    for (0..4) |y| {
+        for (0..8) |x| {
+            const i = y * 8 + x;
+            const w0: i32 = self_info.weight[i];
+            var w: i32 = w0;
+            // 2bpp punchthrough: -1/-2/-3 weights interpolate from
+            // neighboring blocks' weights (positions from POSYA/B/XL/XR)
+            const wi: i64 = @intCast(i);
+            const wA = info[@intCast(POSYA[y][0])].weight[@intCast(wi + POSYA[y][1])];
+            const wB = info[@intCast(POSYB[y][0])].weight[@intCast(wi + POSYB[y][1])];
+            const wL = info[@intCast(POSXL[x][0])].weight[@intCast(wi + POSXL[x][1])];
+            const wR = info[@intCast(POSXR[x][0])].weight[@intCast(wi + POSXR[x][1])];
+            w = switch (w0) {
+                -1 => @divTrunc(@as(i32, wA) + @as(i32, wB) + 1, 2),
+                -2 => @divTrunc(@as(i32, wL) + @as(i32, wR) + 1, 2),
+                -3 => @divTrunc(@as(i32, wA) + @as(i32, wB) + @as(i32, wL) + @as(i32, wR) + 2, 4),
+                else => w0,
+            };
+            // write back like the reference: later texels' fill reads this
+            self_info.weight[i] = @intCast(w);
+            const alpha: u32 = if (punch & 1 != 0)
+                0
+            else
+                @intCast(@divTrunc(clr_a[i][3] * (8 - w) + clr_b[i][3] * w, 8));
+            const r: u32 = @intCast(@divTrunc(clr_a[i][0] * (8 - w) + clr_b[i][0] * w, 8));
+            const g: u32 = @intCast(@divTrunc(clr_a[i][1] * (8 - w) + clr_b[i][1] * w, 8));
+            const b: u32 = @intCast(@divTrunc(clr_a[i][2] * (8 - w) + clr_b[i][2] * w, 8));
+            buf[i] = b | (g << 8) | (r << 16) | (alpha << 24);
+            punch >>= 1;
+        }
+    }
+}
+
+fn decodePvrtc(out: []u8, w: usize, h: usize, data: []const u8, is2bpp: bool) Error!void {
+    const bw: usize = if (is2bpp) 8 else 4;
+    const num_blocks_x = if (is2bpp) (w + 7) / 8 else (w + 3) / 4;
+    const num_blocks_y = (h + 3) / 4;
+    const num_blocks = num_blocks_x * num_blocks_y;
+    const min_num_blocks = @min(num_blocks_x, num_blocks_y);
+    // PVRTC requires each side's block count to be a power of two
+    if (num_blocks_x & (num_blocks_x - 1) != 0 or num_blocks_y & (num_blocks_y - 1) != 0)
+        return error.UnsupportedFormat;
+    if (data.len < num_blocks * 8) return error.BadSize;
+
+    const texel_info = try std.heap.page_allocator.alloc(PvrtcTexelInfo, num_blocks);
+    defer std.heap.page_allocator.free(texel_info);
+    for (0..num_blocks) |i| {
+        pvrtcGetTexelColors(data[i * 8 ..][0..8], &texel_info[i]);
+        if (is2bpp) pvrtcGetTexelWeights2(data[i * 8 ..][0..8], &texel_info[i]) else pvrtcGetTexelWeights4(data[i * 8 ..][0..8], &texel_info[i]);
+    }
+
+    var buffer: [32]u32 = undefined;
+    var pos_x: [3]usize = undefined;
+    var pos_y: [3]usize = undefined;
+    for (0..num_blocks_y) |by| {
+        pos_y[0] = if (by == 0) num_blocks_y - 1 else by - 1;
+        pos_y[1] = by;
+        pos_y[2] = if (by == num_blocks_y - 1) 0 else by + 1;
+        for (0..num_blocks_x) |bx| {
+            pos_x[0] = if (bx == 0) num_blocks_x - 1 else bx - 1;
+            pos_x[1] = bx;
+            pos_x[2] = if (bx == num_blocks_x - 1) 0 else bx + 1;
+            var local_info: [9]*PvrtcTexelInfo = undefined;
+            for (0..3) |cy| {
+                for (0..3) |cx| {
+                    local_info[cy * 3 + cx] = &texel_info[pvrtcMortonIndex(pos_x[cx], pos_y[cy], min_num_blocks)];
+                }
+            }
+            const blk_off = pvrtcMortonIndex(bx, by, min_num_blocks) * 8;
+            if (is2bpp)
+                pvrtcApplicate2(data[blk_off..][0..8], &local_info, &buffer)
+            else
+                pvrtcApplicate4(data[blk_off..][0..8], &local_info, &buffer);
+            // copy block to the image (BGRA u32 -> RGBA bytes)
+            for (0..4) |yy| {
+                const py_ = by * 4 + yy;
+                if (py_ >= h) break;
+                for (0..bw) |xx| {
+                    const px_ = bx * bw + xx;
+                    if (px_ >= w) break;
+                    const v = buffer[yy * bw + xx];
+                    const dst = out[(py_ * w + px_) * 4 ..][0..4];
+                    dst[0] = @truncate(v >> 16);
+                    dst[1] = @truncate(v >> 8);
+                    dst[2] = @truncate(v);
+                    dst[3] = @truncate(v >> 24);
+                }
+            }
+        }
+    }
+}
+
+// --- ATC (formats 35-36) and EAC (formats 41-44) ---
+// Ported from texture2ddecoder's atc.cpp and etc.cpp (the UnityPy
+// reference). ATC is a DXT1-like 4x4 format with its own color
+// interpolation; ATC_RGBA8 prepends a DXT5-style alpha block. EAC is the
+// standalone single/double-channel form of the ETC2 alpha channel.
+
+fn atcExpand(v: u8, bits: u8) u8 {
+    const s: u8 = v << @intCast(8 - bits);
+    return s | (s >> @intCast(bits));
+}
+
+/// Decodes one 8-byte ATC color block into 16 RGBA8 pixels.
+fn decodeAtcBlock(block: []const u8, dst: *[16][4]u8) void {
+    const c0 = std.mem.readInt(u16, block[0..2], .little);
+    const c1 = std.mem.readInt(u16, block[2..4], .little);
+    var colors: [16]u8 = undefined;
+    if (c0 & 0x8000 == 0) {
+        colors[0] = atcExpand(@intCast((c0 >> 0) & 0x1f), 5);
+        colors[1] = atcExpand(@intCast((c0 >> 5) & 0x1f), 5);
+        colors[2] = atcExpand(@intCast((c0 >> 10) & 0x1f), 5);
+        colors[12] = atcExpand(@intCast((c1 >> 0) & 0x1f), 5);
+        colors[13] = atcExpand(@intCast((c1 >> 5) & 0x3f), 6);
+        colors[14] = atcExpand(@intCast((c1 >> 11) & 0x1f), 5);
+        colors[4] = @intCast((5 * @as(u16, colors[0]) + 3 * @as(u16, colors[12])) / 8);
+        colors[5] = @intCast((5 * @as(u16, colors[1]) + 3 * @as(u16, colors[13])) / 8);
+        colors[6] = @intCast((5 * @as(u16, colors[2]) + 3 * @as(u16, colors[14])) / 8);
+        colors[8] = @intCast((3 * @as(u16, colors[0]) + 5 * @as(u16, colors[12])) / 8);
+        colors[9] = @intCast((3 * @as(u16, colors[1]) + 5 * @as(u16, colors[13])) / 8);
+        colors[10] = @intCast((3 * @as(u16, colors[2]) + 5 * @as(u16, colors[14])) / 8);
+    } else {
+        colors[0] = 0;
+        colors[1] = 0;
+        colors[2] = 0;
+        colors[8] = atcExpand(@intCast((c0 >> 0) & 0x1f), 5);
+        colors[9] = atcExpand(@intCast((c0 >> 5) & 0x1f), 5);
+        colors[10] = atcExpand(@intCast((c0 >> 10) & 0x1f), 5);
+        colors[12] = atcExpand(@intCast((c1 >> 0) & 0x1f), 5);
+        colors[13] = atcExpand(@intCast((c1 >> 5) & 0x3f), 6);
+        colors[14] = atcExpand(@intCast((c1 >> 11) & 0x1f), 5);
+        colors[4] = @intCast(@max(0, @as(i32, colors[8]) - @divTrunc(@as(i32, colors[12]), 4)));
+        colors[5] = @intCast(@max(0, @as(i32, colors[9]) - @divTrunc(@as(i32, colors[13]), 4)));
+        colors[6] = @intCast(@max(0, @as(i32, colors[10]) - @divTrunc(@as(i32, colors[14]), 4)));
+    }
+    for (0..16) |i| {
+        const next: usize = 8 * 4 + i * 2; // 2-bit indices packed from bit 32
+        const idx: usize = @as(usize, @intCast((block[next >> 3] >> @intCast(next & 7)) & 3)) * 4;
+        // reference buffer is BGRA (byte 0 = B); colors[] are B,G,R
+        dst[i][0] = colors[idx + 2];
+        dst[i][1] = colors[idx + 1];
+        dst[i][2] = colors[idx + 0];
+        dst[i][3] = 255;
+    }
+}
+
+/// Fills `alphas[16]` from an 8-byte DXT5-style alpha block.
+fn decodeDxt5AlphaBlock(block: []const u8, alphas: *[16]u8) void {
+    const a0 = block[0];
+    const a1 = block[1];
+    const a_bits = std.mem.readInt(u48, block[2..8], .little);
+    for (0..16) |i| {
+        const aidx = (a_bits >> @as(u6, @intCast(3 * i))) & 0x7;
+        alphas[i] = if (a0 > a1)
+            switch (aidx) {
+                0 => a0,
+                1 => a1,
+                2 => interp7(a0, a1, 6, 1),
+                3 => interp7(a0, a1, 5, 2),
+                4 => interp7(a0, a1, 4, 3),
+                5 => interp7(a0, a1, 3, 4),
+                6 => interp7(a0, a1, 2, 5),
+                else => interp7(a0, a1, 1, 6),
+            }
+        else
+            switch (aidx) {
+                0 => a0,
+                1 => a1,
+                2 => interp5(a0, a1, 4, 1),
+                3 => interp5(a0, a1, 3, 2),
+                4 => interp5(a0, a1, 2, 3),
+                5 => interp5(a0, a1, 1, 4),
+                6 => 0,
+                else => 255,
+            };
+    }
+}
+
+fn decodeAtc(out: []u8, w: usize, h: usize, data: []const u8, rgba: bool) Error!void {
+    const bw = (w + 3) / 4;
+    const bh = (h + 3) / 4;
+    const block_size: usize = if (rgba) 16 else 8;
+    for (0..bh) |by| {
+        for (0..bw) |bx| {
+            const block = data[(by * bw + bx) * block_size ..][0..block_size];
+            var px: [16][4]u8 = undefined;
+            if (rgba) {
+                var alphas: [16]u8 = undefined;
+                decodeDxt5AlphaBlock(block[0..8], &alphas);
+                decodeAtcBlock(block[8..16], &px);
+                for (0..16) |i| px[i][3] = alphas[i];
+            } else {
+                decodeAtcBlock(block[0..8], &px);
+            }
+            for (0..16) |i| {
+                const px_ = bx * 4 + i % 4;
+                const py_ = by * 4 + i / 4;
+                if (px_ >= w or py_ >= h) continue;
+                const dst = out[(py_ * w + px_) * 4 ..][0..4];
+                dst[0] = px[i][0];
+                dst[1] = px[i][1];
+                dst[2] = px[i][2];
+                dst[3] = px[i][3];
+            }
+        }
+    }
+}
+
+const EAC_WRITE_ORDER = [_]u8{ 15, 11, 7, 3, 14, 10, 6, 2, 13, 9, 5, 1, 12, 8, 4, 0 };
+
+/// Decodes one 8-byte EAC channel block into `dst`'s `channel` component.
+fn decodeEacChannelBlock(block: []const u8, channel: usize, dst: *[16][4]u8, signed_fmt: bool) void {
+    var mult: u32 = (block[1] >> 1) & 0x78;
+    if (mult == 0) mult = 1;
+    const table = etcAlphaTables[block[1] & 0xf];
+    var l = std.mem.readInt(u64, block[0..8], .big); // EAC blocks are big-endian
+    for (0..16) |i| {
+        const idx = l & 7;
+        const val: i32 = if (signed_fmt)
+            @as(i32, @as(i8, @bitCast(block[0]))) * 8 + @as(i32, @intCast(mult)) * table[idx] + 1023
+        else
+            @as(i32, block[0]) * 8 + @as(i32, @intCast(mult)) * table[idx] + 4;
+        const out: u8 = if (val < 0) 0 else if (val >= 2048) 0xff else @intCast(val >> 3);
+        dst[EAC_WRITE_ORDER[i]][channel] = out;
+        l >>= 3;
+    }
+}
+
+const EacKind = enum { r_unsigned, r_signed, rg_unsigned, rg_signed };
+
+fn decodeEac(out: []u8, w: usize, h: usize, data: []const u8, kind: EacKind) Error!void {
+    const bw = (w + 3) / 4;
+    const bh = (h + 3) / 4;
+    const two_ch = kind == .rg_unsigned or kind == .rg_signed;
+    const signed_fmt = kind == .r_signed or kind == .rg_signed;
+    const block_size: usize = if (two_ch) 16 else 8;
+    for (0..bh) |by| {
+        for (0..bw) |bx| {
+            const block = data[(by * bw + bx) * block_size ..][0..block_size];
+            var px: [16][4]u8 = undefined;
+            for (0..16) |i| px[i] = .{ 0, 0, 0, 255 };
+            decodeEacChannelBlock(block[0..8], 0, &px, signed_fmt);
+            if (two_ch) decodeEacChannelBlock(block[8..16], 1, &px, signed_fmt);
+            for (0..16) |i| {
+                const px_ = bx * 4 + i % 4;
+                const py_ = by * 4 + i / 4;
+                if (px_ >= w or py_ >= h) continue;
+                const dst = out[(py_ * w + px_) * 4 ..][0..4];
+                dst[0] = px[i][0];
+                dst[1] = px[i][1];
+                dst[2] = px[i][2];
+                dst[3] = px[i][3];
+            }
+        }
+    }
+}
+
 
 // --- DXT / BC1-3 ---
 
@@ -713,10 +1727,19 @@ fn decodeDxt3(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
             const rgb0 = expand565(c0);
             const rgb1 = expand565(c1);
             var palette: [4][4]u8 = undefined;
-            palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
-            palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
-            palette[2] = .{ @intCast((@as(u16, 2) * rgb0[0] + rgb1[0]) / 3), @intCast((@as(u16, 2) * rgb0[1] + rgb1[1]) / 3), @intCast((@as(u16, 2) * rgb0[2] + rgb1[2]) / 3), 255 };
-            palette[3] = .{ @intCast((@as(u16, rgb0[0]) + @as(u16, 2) * rgb1[0]) / 3), @intCast((@as(u16, rgb0[1]) + @as(u16, 2) * rgb1[1]) / 3), @intCast((@as(u16, rgb0[2]) + @as(u16, 2) * rgb1[2]) / 3), 255 };
+            // same color semantics as DXT1: c0 > c1 is 4-color mode,
+            // c0 <= c1 is 3-color + black (alpha comes from the alpha block)
+            if (c0 > c1) {
+                palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
+                palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
+                palette[2] = .{ @intCast((@as(u16, 2) * rgb0[0] + rgb1[0]) / 3), @intCast((@as(u16, 2) * rgb0[1] + rgb1[1]) / 3), @intCast((@as(u16, 2) * rgb0[2] + rgb1[2]) / 3), 255 };
+                palette[3] = .{ @intCast((@as(u16, rgb0[0]) + @as(u16, 2) * rgb1[0]) / 3), @intCast((@as(u16, rgb0[1]) + @as(u16, 2) * rgb1[1]) / 3), @intCast((@as(u16, rgb0[2]) + @as(u16, 2) * rgb1[2]) / 3), 255 };
+            } else {
+                palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
+                palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
+                palette[2] = .{ @intCast((@as(u16, rgb0[0]) + rgb1[0]) / 2), @intCast((@as(u16, rgb0[1]) + rgb1[1]) / 2), @intCast((@as(u16, rgb0[2]) + rgb1[2]) / 2), 255 };
+                palette[3] = .{ 0, 0, 0, 255 };
+            }
             for (0..4) |y| {
                 for (0..4) |x| {
                     const px = bx * 4 + x;
@@ -752,10 +1775,19 @@ fn decodeDxt5(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
             const rgb0 = expand565(c0);
             const rgb1 = expand565(c1);
             var palette: [4][4]u8 = undefined;
-            palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
-            palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
-            palette[2] = .{ @intCast((@as(u16, 2) * rgb0[0] + rgb1[0]) / 3), @intCast((@as(u16, 2) * rgb0[1] + rgb1[1]) / 3), @intCast((@as(u16, 2) * rgb0[2] + rgb1[2]) / 3), 255 };
-            palette[3] = .{ @intCast((@as(u16, rgb0[0]) + @as(u16, 2) * rgb1[0]) / 3), @intCast((@as(u16, rgb0[1]) + @as(u16, 2) * rgb1[1]) / 3), @intCast((@as(u16, rgb0[2]) + @as(u16, 2) * rgb1[2]) / 3), 255 };
+            // same color semantics as DXT1: c0 > c1 is 4-color mode,
+            // c0 <= c1 is 3-color + black (alpha comes from the alpha block)
+            if (c0 > c1) {
+                palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
+                palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
+                palette[2] = .{ @intCast((@as(u16, 2) * rgb0[0] + rgb1[0]) / 3), @intCast((@as(u16, 2) * rgb0[1] + rgb1[1]) / 3), @intCast((@as(u16, 2) * rgb0[2] + rgb1[2]) / 3), 255 };
+                palette[3] = .{ @intCast((@as(u16, rgb0[0]) + @as(u16, 2) * rgb1[0]) / 3), @intCast((@as(u16, rgb0[1]) + @as(u16, 2) * rgb1[1]) / 3), @intCast((@as(u16, rgb0[2]) + @as(u16, 2) * rgb1[2]) / 3), 255 };
+            } else {
+                palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
+                palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
+                palette[2] = .{ @intCast((@as(u16, rgb0[0]) + rgb1[0]) / 2), @intCast((@as(u16, rgb0[1]) + rgb1[1]) / 2), @intCast((@as(u16, rgb0[2]) + rgb1[2]) / 2), 255 };
+                palette[3] = .{ 0, 0, 0, 255 };
+            }
             for (0..4) |y| {
                 for (0..4) |x| {
                     const px = bx * 4 + x;
@@ -2241,6 +3273,136 @@ test "raw format argb float" {
 }, out);
 }
 
+test "pvrtc single block (4bpp and 2bpp)" {
+    const a = std.testing.allocator;
+    // hand-crafted: black endpoint A, white endpoint B, all weights 8
+    // (modulation all ones), so every texel decodes to endpoint B.
+    const blk4 = [_]u8{    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff,};
+    const out4 = try decode(a, format.pvrtc_rgb4, 4, 4, &blk4);
+    defer a.free(out4);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 255, 255, 255 }, out4[0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 255, 255, 255 }, out4[15 * 4 ..][0..4]);
+
+    const blk2 = [_]u8{    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff,};
+    const out2 = try decode(a, format.pvrtc_rgb2, 8, 4, &blk2);
+    defer a.free(out2);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 255, 255, 255 }, out2[0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 255, 255, 255 }, out2[31 * 4 ..][0..4]);
+}
+
+test "dxt5 three-color mode (c0 <= c1)" {
+    const a = std.testing.allocator;
+    // random block with c0 <= c1 in the color half; expected output is
+    // texture2ddecoder's decode_bc3 (BGRA in memory, converted to RGBA).
+    // Regression for the palette bug: decodeDxt5 previously used the
+    // 4-color palette unconditionally.
+    const blk = [_]u8{    0x39, 0x0c, 0x8c, 0x7d, 0x72, 0x47, 0x34, 0x2c, 0xd8, 0x10, 0x0f, 0x2f, 0x6f, 0x77, 0x0d, 0x65,};
+    const out = try decode(a, format.dxt5, 4, 4, &blk);
+    defer a.free(out);
+    // expected from the reference (verified 0 diffs on 30 random blocks)
+    const exp = [_]u8{
+    0x00, 0x00, 0x00, 0x25, 0x00, 0x00, 0x00, 0x0c, 0xa0, 0x7d, 0x1c, 0x18, 0x7b, 0xe3, 0x29, 0x18, 0x00, 0x00, 0x00, 0x12, 0x7b, 0xe3, 0x29, 0x25, 0x00, 0x00, 0x00, 0x25, 0x7b, 0xe3, 0x29, 0x2c, 0x7b, 0xe3, 0x29, 0x12, 0x00, 0x00, 0x00, 0x39, 0xc6, 0x18, 0x10, 0x0c, 0xc6, 0x18, 0x10, 0x32, 0x7b, 0xe3, 0x29, 0x2c, 0x7b, 0xe3, 0x29, 0x39, 0xa0, 0x7d, 0x1c, 0x2c, 0x7b, 0xe3, 0x29, 0x0c,
+};
+    for (0..16) |p| {
+        try std.testing.expectEqual(exp[p*4+2], out[p*4+0]);
+        try std.testing.expectEqual(exp[p*4+1], out[p*4+1]);
+        try std.testing.expectEqual(exp[p*4+0], out[p*4+2]);
+        try std.testing.expectEqual(exp[p*4+3], out[p*4+3]);
+    }
+}
+
+test "atc and eac single block" {
+    const a = std.testing.allocator;
+    // ATC block 0 of texture2ddecoder's ATC_RGB4 sample; expected is its
+    // own decode (BGRA in memory, converted to RGBA here).
+    const atc_blk = [_]u8{    0x00, 0x00, 0x9f, 0xa7, 0xff, 0xff, 0xff, 0xff,};
+    const atc_out = try decode(a, format.atc_rgb4, 4, 4, &atc_blk);
+    defer a.free(atc_out);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+    0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff,}, atc_out);
+
+    // EAC_R block from the random cross-validation set, expected matches
+    // texture2ddecoder's decode_eacr.
+    const eac_blk = [_]u8{    0x82, 0xb7, 0x0e, 0xee, 0x7f, 0x1a, 0x50, 0x39,};
+    const eac_out = try decode(a, format.eac_r, 4, 4, &eac_blk);
+    defer a.free(eac_out);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+    0x61, 0x00, 0x00, 0xff, 0xf0, 0x00, 0x00, 0xff, 0x61, 0x00, 0x00, 0xff, 0x61, 0x00, 0x00, 0xff, 0x09, 0x00, 0x00, 0xff, 0x4b, 0x00, 0x00, 0xff, 0xcf, 0x00, 0x00, 0xff, 0x61, 0x00, 0x00, 0xff, 0xae, 0x00, 0x00, 0xff, 0xf0, 0x00, 0x00, 0xff, 0x98, 0x00, 0x00, 0xff, 0xf0, 0x00, 0x00, 0xff, 0xcf, 0x00, 0x00, 0xff, 0xf0, 0x00, 0x00, 0xff, 0xae, 0x00, 0x00, 0xff, 0x4b, 0x00, 0x00, 0xff,}, eac_out);
+}
+
+test "bc6h block decode (HDR)" {
+    const a = std.testing.allocator;
+    // HDR gradient encoded to BC6H by Microsoft DirectXTex (D3DXEncodeBC6HU);
+    // expected output is unityz's decode, verified byte-exact against
+    // texture2ddecoder (UnityPy's reference) on this and five other samples.
+    const data = [_]u8{
+    0x1e, 0x70, 0x00, 0x37, 0x05, 0xdc, 0x83, 0x8d, 0x3d, 0x4f, 0xf0, 0xdf, 0x49, 0x0e, 0xe0, 0x00, 
+    0x3e, 0x54, 0x80, 0xb9, 0x15, 0xd5, 0x8b, 0x8e, 0x45, 0xb0, 0x03, 0x20, 0x49, 0xde, 0xf6, 0xff, 
+    0x7e, 0x4c, 0x80, 0x39, 0x1d, 0xdf, 0xc3, 0xae, 0x49, 0xb1, 0x03, 0x80, 0x24, 0x95, 0xf4, 0xff, 
+    0x9e, 0x5c, 0x80, 0x3b, 0x25, 0xdf, 0xc3, 0xae, 0xc7, 0xb2, 0x03, 0x80, 0x24, 0x95, 0xf4, 0xff, 
+    0x1e, 0xc8, 0xaf, 0x38, 0x05, 0x22, 0x7c, 0xae, 0xc3, 0x4d, 0xe4, 0x69, 0x9d, 0xda, 0xe9, 0x9d, 
+    0x4e, 0xa1, 0x7e, 0xce, 0x01, 0xda, 0x81, 0x91, 0x10, 0x04, 0x80, 0x7f, 0x23, 0xdb, 0xe4, 0x07, 
+    0x2e, 0xa3, 0x7e, 0xd4, 0x01, 0xdc, 0x81, 0xb1, 0x08, 0x02, 0x80, 0x7f, 0x23, 0x5b, 0xe9, 0x07, 
+    0x4e, 0xa4, 0x7e, 0xdc, 0x01, 0xda, 0x05, 0x81, 0x08, 0x02, 0x80, 0x7f, 0x23, 0xdb, 0xe4, 0x07, 
+    0x03, 0x80, 0x11, 0xa1, 0xcb, 0x70, 0x44, 0xea, 0xd0, 0xee, 0xd0, 0xee, 0xd0, 0xee, 0xd0, 0xee, 
+    0x0e, 0xa1, 0x87, 0xd4, 0x61, 0x0a, 0xa8, 0xb1, 0x1c, 0xa0, 0xa1, 0x1e, 0xea, 0xdf, 0xe5, 0x5d, 
+    0x2e, 0xa3, 0x86, 0xdc, 0x01, 0x31, 0x7d, 0x81, 0x0a, 0x02, 0x00, 0x5b, 0x22, 0x59, 0xe9, 0x07, 
+    0x4e, 0xa4, 0x86, 0xe2, 0x01, 0x34, 0x81, 0x91, 0x08, 0x02, 0x80, 0x5f, 0x6a, 0xd9, 0xcd, 0x4f, 
+};
+    const out = try decode(a, format.bc6h, 16, 12, &data);
+    defer a.free(out);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+    0x00, 0x00, 0x54, 0xff, 0xe2, 0x00, 0x54, 0xff, 0xe2, 0x00, 0x54, 0xff, 0xe2, 0x00, 0x54, 0xff, 
+    0xff, 0x00, 0x73, 0xff, 0xff, 0x00, 0x73, 0xff, 0xff, 0x00, 0x73, 0xff, 0xff, 0x00, 0x73, 0xff, 
+    0xff, 0x00, 0x73, 0xff, 0xff, 0x00, 0x73, 0xff, 0xff, 0x00, 0x73, 0xff, 0xff, 0x00, 0x73, 0xff, 
+    0xff, 0x00, 0xa4, 0xff, 0xff, 0x00, 0xa4, 0xff, 0xff, 0x00, 0xa4, 0xff, 0xff, 0x00, 0xa4, 0xff, 
+    0x00, 0x36, 0x54, 0xff, 0xe2, 0x36, 0x6f, 0xff, 0xe2, 0x36, 0x6f, 0xff, 0xe2, 0x36, 0x6f, 0xff, 
+    0xff, 0x54, 0x77, 0xff, 0xff, 0x54, 0x77, 0xff, 0xff, 0x54, 0x77, 0xff, 0xff, 0x54, 0x77, 0xff, 
+    0xff, 0x53, 0x81, 0xff, 0xff, 0x53, 0x81, 0xff, 0xff, 0x53, 0x81, 0xff, 0xff, 0x53, 0x81, 0xff, 
+    0xff, 0x53, 0xa4, 0xff, 0xff, 0x53, 0xa4, 0xff, 0xff, 0x53, 0xa4, 0xff, 0xff, 0x53, 0xa4, 0xff, 
+    0x00, 0xe2, 0x54, 0xff, 0xe2, 0xe2, 0x73, 0xff, 0xe2, 0xe2, 0x73, 0xff, 0xe2, 0xe2, 0x73, 0xff, 
+    0xff, 0xa1, 0x81, 0xff, 0xff, 0xa1, 0x81, 0xff, 0xff, 0xa1, 0x81, 0xff, 0xff, 0xa1, 0x81, 0xff, 
+    0xff, 0xa6, 0x93, 0xff, 0xff, 0xa6, 0x93, 0xff, 0xff, 0xa6, 0x93, 0xff, 0xff, 0xa6, 0x93, 0xff, 
+    0xff, 0xa6, 0xa4, 0xff, 0xff, 0xa6, 0xa4, 0xff, 0xff, 0xa6, 0xa4, 0xff, 0xff, 0xa6, 0xa4, 0xff, 
+    0x00, 0xe2, 0x54, 0xff, 0xe2, 0xe2, 0x73, 0xff, 0xe2, 0xe2, 0x73, 0xff, 0xe2, 0xe2, 0x73, 0xff, 
+    0xff, 0xe2, 0xa4, 0xff, 0xff, 0xe2, 0xa4, 0xff, 0xff, 0xe2, 0xa4, 0xff, 0xff, 0xe2, 0xa4, 0xff, 
+    0xff, 0xe2, 0xa4, 0xff, 0xff, 0xe2, 0xa4, 0xff, 0xff, 0xe2, 0xa4, 0xff, 0xff, 0xe2, 0xa4, 0xff, 
+    0xff, 0xe2, 0xa4, 0xff, 0xff, 0xe2, 0xa4, 0xff, 0xff, 0xe2, 0xa4, 0xff, 0xff, 0xe2, 0xa4, 0xff, 
+    0x00, 0xff, 0x73, 0xff, 0x6e, 0xff, 0x77, 0xff, 0xff, 0xff, 0x8a, 0xff, 0xff, 0xff, 0x93, 0xff, 
+    0xff, 0xff, 0x82, 0xff, 0xff, 0xff, 0x82, 0xff, 0xff, 0xff, 0x91, 0xff, 0xff, 0xff, 0x91, 0xff, 
+    0xff, 0xff, 0x99, 0xff, 0xff, 0xff, 0x99, 0xff, 0xff, 0xff, 0xa8, 0xff, 0xff, 0xff, 0xa8, 0xff, 
+    0xff, 0xff, 0xb8, 0xff, 0xff, 0xff, 0xb8, 0xff, 0xff, 0xff, 0xbf, 0xff, 0xff, 0xff, 0xbf, 0xff, 
+    0x00, 0xff, 0x73, 0xff, 0x91, 0xff, 0x7c, 0xff, 0xff, 0xff, 0x8a, 0xff, 0xff, 0xff, 0x93, 0xff, 
+    0xff, 0xff, 0x8b, 0xff, 0xff, 0xff, 0x8b, 0xff, 0xff, 0xff, 0x98, 0xff, 0xff, 0xff, 0x98, 0xff, 
+    0xff, 0xff, 0xa2, 0xff, 0xff, 0xff, 0xa2, 0xff, 0xff, 0xff, 0xb2, 0xff, 0xff, 0xff, 0xb2, 0xff, 
+    0xff, 0xff, 0xbe, 0xff, 0xff, 0xff, 0xbe, 0xff, 0xff, 0xff, 0xc9, 0xff, 0xff, 0xff, 0xc9, 0xff, 
+    0x00, 0xff, 0x73, 0xff, 0x91, 0xff, 0x7c, 0xff, 0xff, 0xff, 0x8a, 0xff, 0xff, 0xff, 0x93, 0xff, 
+    0xff, 0xff, 0x92, 0xff, 0xff, 0xff, 0x92, 0xff, 0xff, 0xff, 0x9e, 0xff, 0xff, 0xff, 0x9e, 0xff, 
+    0xff, 0xff, 0xa9, 0xff, 0xff, 0xff, 0xa9, 0xff, 0xff, 0xff, 0xb9, 0xff, 0xff, 0xff, 0xb9, 0xff, 
+    0xff, 0xff, 0xc3, 0xff, 0xff, 0xff, 0xc3, 0xff, 0xff, 0xff, 0xd3, 0xff, 0xff, 0xff, 0xd3, 0xff, 
+    0x00, 0xff, 0x73, 0xff, 0x91, 0xff, 0x7c, 0xff, 0xff, 0xff, 0x8a, 0xff, 0xff, 0xff, 0x93, 0xff, 
+    0xff, 0xff, 0x99, 0xff, 0xff, 0xff, 0x99, 0xff, 0xff, 0xff, 0xa0, 0xff, 0xff, 0xff, 0xa0, 0xff, 
+    0xff, 0xff, 0xb0, 0xff, 0xff, 0xff, 0xb0, 0xff, 0xff, 0xff, 0xbf, 0xff, 0xff, 0xff, 0xbf, 0xff, 
+    0xff, 0xff, 0xc7, 0xff, 0xff, 0xff, 0xc7, 0xff, 0xff, 0xff, 0xd7, 0xff, 0xff, 0xff, 0xd7, 0xff, 
+    0x00, 0xff, 0x87, 0xff, 0x7e, 0xff, 0x95, 0xff, 0xff, 0xff, 0x96, 0xff, 0xff, 0xff, 0x96, 0xff, 
+    0xff, 0xff, 0x99, 0xff, 0xff, 0xff, 0x9f, 0xff, 0xff, 0xff, 0xa9, 0xff, 0xff, 0xff, 0xb0, 0xff, 
+    0xff, 0xff, 0xb8, 0xff, 0xff, 0xff, 0xb8, 0xff, 0xff, 0xff, 0xc3, 0xff, 0xff, 0xff, 0xc3, 0xff, 
+    0xff, 0xff, 0xcf, 0xff, 0xff, 0xff, 0xcf, 0xff, 0xff, 0xff, 0xde, 0xff, 0xff, 0xff, 0xde, 0xff, 
+    0x00, 0xff, 0x87, 0xff, 0x7e, 0xff, 0x95, 0xff, 0xff, 0xff, 0x96, 0xff, 0xff, 0xff, 0x96, 0xff, 
+    0xff, 0xff, 0x99, 0xff, 0xff, 0xff, 0x9f, 0xff, 0xff, 0xff, 0xa9, 0xff, 0xff, 0xff, 0xb0, 0xff, 
+    0xff, 0xff, 0xbc, 0xff, 0xff, 0xff, 0xbc, 0xff, 0xff, 0xff, 0xc9, 0xff, 0xff, 0xff, 0xc9, 0xff, 
+    0xff, 0xff, 0xd5, 0xff, 0xff, 0xff, 0xd5, 0xff, 0xff, 0xff, 0xe2, 0xff, 0xff, 0xff, 0xe2, 0xff, 
+    0x00, 0xff, 0x87, 0xff, 0x7e, 0xff, 0x95, 0xff, 0xff, 0xff, 0x96, 0xff, 0xff, 0xff, 0x96, 0xff, 
+    0xff, 0xff, 0xa8, 0xff, 0xff, 0xff, 0xaf, 0xff, 0xff, 0xff, 0xb6, 0xff, 0xff, 0xff, 0xbc, 0xff, 
+    0xff, 0xff, 0xc0, 0xff, 0xff, 0xff, 0xc3, 0xff, 0xff, 0xff, 0xd0, 0xff, 0xff, 0xff, 0xd0, 0xff, 
+    0xff, 0xff, 0xdc, 0xff, 0xff, 0xff, 0xdf, 0xff, 0xff, 0xff, 0xe7, 0xff, 0xff, 0xff, 0xe7, 0xff, 
+    0x00, 0xff, 0x87, 0xff, 0x7e, 0xff, 0x95, 0xff, 0xff, 0xff, 0x96, 0xff, 0xff, 0xff, 0x96, 0xff, 
+    0xff, 0xff, 0xa8, 0xff, 0xff, 0xff, 0xaf, 0xff, 0xff, 0xff, 0xb6, 0xff, 0xff, 0xff, 0xbc, 0xff, 
+    0xff, 0xff, 0xc7, 0xff, 0xff, 0xff, 0xc7, 0xff, 0xff, 0xff, 0xd7, 0xff, 0xff, 0xff, 0xd7, 0xff, 
+    0xff, 0xff, 0xe3, 0xff, 0xff, 0xff, 0xe6, 0xff, 0xff, 0xff, 0xeb, 0xff, 0xff, 0xff, 0xeb, 0xff, 
+}, out);
+}
+
 test "astc hdr 4x4 block (HDR RGBA)" {
     const a = std.testing.allocator;
     // Real HDR ASTC texture (11x11, 4x4 blocks) with HDR alpha, encoded by
@@ -2299,11 +3461,11 @@ test "astc hdr 4x4 block (HDR RGBA)" {
 
 test "unsupported format and bad size" {
     const a = std.testing.allocator;
-    // 32 is a real Unity TextureFormat number this decoder does not map.
-    try std.testing.expectError(error.UnsupportedFormat, decode(a, 32, 4, 4, "abcdefgh"));
-    // BC6H and ETC2_RGBA1 have a format number and a name but no decoder;
-    // pin that they report unsupported rather than decoding as something else.
-    try std.testing.expectError(error.UnsupportedFormat, decode(a, format.bc6h, 4, 4, "abcdefgh"));
+    // 60/61 (ETC-RGB4/RGBA8-3DS) are real Unity TextureFormat numbers
+    // this decoder does not map; pin that they report unsupported rather
+    // than decoding as something else.
+    try std.testing.expectError(error.UnsupportedFormat, decode(a, 60, 4, 4, "abcdefgh"));
+    try std.testing.expectError(error.UnsupportedFormat, decode(a, 61, 4, 4, "abcdefgh"));
     try std.testing.expectError(error.UnsupportedFormat, decode(a, format.etc2_rgba1, 4, 4, "abcdefgh"));
     try std.testing.expectError(error.BadSize, decode(a, format.rgba32, 2, 2, "short"));
     try std.testing.expectError(error.BadSize, decode(a, format.bc7, 4, 4, "short"));
