@@ -1,0 +1,989 @@
+# Plan - clean-room UnityPy rewrite: format parsers
+
+**Date:** 2026-08-30  
+**Status:** Complete - every default UnityPy capability covered by this
+plan is implemented and
+verified: parsers, object reader (incl. managed-reference registries), typed
+classes, texture decode (DXT/BC4/5/BC7/ETC1/2/ETC2-RGBA8, ASTC
+4x4-12x12 and HDR, plus the raw half/float/16-bit/signed family - see
+the completion notes for the later passes), PNG, reserialize, `info`/`extract`/`edit`, and MonoBehaviour
+handling (MonoScript resolution + raw script payload extraction).
+UnityFS bundle parsing matches real bundles (big-endian headers,
+v7 alignment, data hash, 10-byte block entries), verified against
+UnityPy on real 2022.3 bundles.
+
+The legacy-format rewrite (< v17) is
+done: formats 2-22 round-trip through the writer (per-version object
+table, tail fields, Legacy16 metadata-at-end layout), with v9 and v13
+fixture tests. Real 2022.3 CABs parse 100% clean (49/49 and 10/10
+objects, zero read errors) after the last reader gap was closed:
+strings are always 4-aligned in the wire format regardless of the
+type-tree meta flag (this fixed AssetBundle, Mesh, and Shader objects,
+which previously failed to read).
+
+One known limitation remains, shared
+with UnityPy itself: the serialized .NET object graph inside m_Script
+payloads is exposed as raw bytes and not parsed further (UnityPy also
+requires external .NET assemblies to parse it).  
+**Related:**
+
+## Outcome
+
+`unityz` reads and edits Unity asset files end to end, implemented from
+public format documentation only - no code or data taken from UnityPy.
+
+- `unityz info <file>` prints the file type and, for serialized files, the
+  object table and per-class object counts for any UnityFS bundle, WebFile,
+  `.assets`/`.resources`/`.resS` file produced by Unity 2.5 through current
+  versions.
+- `unityz extract <file>` writes embedded assets (textures, text assets,
+  meshes, raw bytes of any object) to disk; texture objects are decoded to
+  PNG for the supported compressed formats (DXT1/3/5, BC4/5, BC7,
+  ETC1/2, ETC2-RGBA8, ASTC, plus the uncompressed RGB/A family).
+- `unityz edit <file>` rewrites a serialized file after in-memory changes
+  (e.g. dumping an object to JSON, editing it, and writing back), producing
+  a valid file.
+- The library surface (`src/lib.zig`) exposes containers, object access, and
+  raw read/write primitives so other Zig tools can build on it.
+
+## Scope and constraints
+
+Files under `src/` are new Zig code. The implementation is clean-room:
+UnityPy is treated as an executable oracle for *behavioral* comparison only
+(where a local checkout exists), never as a source of code, structs, or
+layout - the binary layouts come from the public Unity format documentation
+and from inspecting real asset files.
+
+Targeted formats, in order:
+
+1. Core streams: endian-aware binary reader/writer over slices and files.
+2. File type detection by magic (UnityFS, UnityWeb, UnityRaw, SerializedFile,
+   WebFile).
+3. WebFile container.
+4. UnityFS bundle: header, block/node info, LZ4 block decompression, node
+   iteration. LZMA only if std has a usable decoder (otherwise deferred and
+   flagged).
+5. SerializedFile: header, metadata (version, target platform, type tree,
+   object info table), raw object reading, TypeTree-driven generic object
+   reader for files with a type tree.
+6. ClassDatabase-free typed views for the common classes: MonoBehaviour,
+   Texture2D, Sprite, TextAsset, GameObject, Transform, RectTransform,
+   Material, Mesh (subset), AnimationClip (subset).
+7. Texture decoding to RGBA8 + PNG export for the common formats.
+8. Reserialization: write serialized files back from the object model.
+
+Non-goals for the first pass: class database download/caching, asset
+bundle encryption variants, asset bundle building from scratch, exotic
+texture formats, audio/movie conversion, .NET assembly extraction beyond
+raw bytes.
+
+## Decisions and unknowns
+
+- Zig 0.16.0 (`std.Io` API era) - the scaffold already targets it.
+- The library owns an arena allocator per opened file; objects borrow from
+  it. Write path uses explicit serializers, not a mirror of the read model.
+- Compression: implement LZ4 block decompression in-tree (small, stable
+  format). LZMA support depends on what std 0.16 ships; if absent, bundles
+  using LZMA are detected and reported, not parsed.
+- TypeTree version differences across Unity releases are handled by parsing
+  the tree itself, never by assuming a fixed schema.
+
+## Steps
+
+1. **Streams** - `src/streams.zig`: bounds-checked big/little-endian reader
+   and writer over `[]const u8`/`[]u8`, aligned word reads, string
+   helpers (length-prefixed, null-terminated, aligned-to-4). Tests round-trip
+   every primitive both endians.
+2. **File detection** - `src/container.zig`: sniff magic bytes, return an
+   enum + parse entry. Tests construct minimal headers for every type.
+3. **WebFile** - `src/webfile.zig`: header, per-entry offset table, deflate
+   decompression of the payload. Tests with hand-built deflate blobs.
+4. **UnityFS bundle** - `src/bundle.zig`: header parse, flags, header-info
+   decompression, block/node tables, node reader, LZ4 decompressor in
+   `src/lz4.zig`. Tests with hand-built bundle bytes including compressed
+   blocks.
+5. **SerializedFile** - `src/serialized.zig`: header, metadata, type-tree
+   parse (`src/typetree.zig`), object info table, raw object byte slices.
+   Tests with hand-built serialized files.
+6. **Generic object reader** - `src/object_reader.zig` + `src/value.zig`:
+   walk a TypeTree over an object's bytes into a JSON-serializable value
+   tree. Alignment via meta_flags 0x4000, i32-length strings/TypelessData,
+   bulk scalar arrays, map-as-pairs, PPtr, opaque fixed leaves. Managed
+   references (ReferencedObject/ManagedReferencesRegistry) decode
+   through their type trees (see step 9). `unityz info --dump` prints
+   every object as JSON.
+7. **Typed classes** - `src/classes.zig`: typed accessors over the generic
+   value tree (Texture2D, TextAsset, GameObject, Transform, Sprite,
+   Material, MonoBehaviour, AssetBundle, StreamingInfo).
+8. **Texture decode** - `src/texture.zig` (Alpha8, ARGB4444, RGB24,
+   RGBA32, ARGB32, RGB565, RGBA4444, BGRA32, R8, RGBAFloat, DXT1/3/5,
+   BC4/5, BC7, ETC1/ETC2/ETC2-RGBA8, ASTC (4x4 through 12x12, RGB and
+   RGBA) → RGBA8), `src/png.zig` encoder, `extract` CLI writes Texture2D
+   PNGs and TextAssets. The compressed paths were cross-validated
+   byte-exact against UnityPy's texture2ddecoder (900/900 ETC blocks,
+   2160/2160 BC7 blocks across all modes, 600/600 ASTC blocks plus
+   void-extent/error blocks); the ETC2 alternate modes (T/H/planar) and
+   EAC alpha follow the reference bit-for-bit, including its wrap
+   behavior for undefined differential sums.
+
+   The TextureFormat numbers
+   were corrected to Unity's enum values, so real assets route to the
+   right decoders. ASTC HDR (66-71) decodes (see the ASTC HDR completion
+   note).
+9. **Managed references + MonoBehaviour** - `ReferencedObject` and
+   `ManagedReferencesRegistry` decode through their type trees (the raw
+   object graph inside each `TypelessData` payload is exposed as bytes);
+   `extract` resolves a MonoBehaviour's `m_Script` PPtr to its MonoScript
+   (namespace/class/assembly) and writes the raw serialized script
+   payload. The managed .NET object-graph format itself is not parsed
+   yet.
+
+The UnityFS bundle parser was corrected to the real wire format
+   (big-endian header/block info, 16-byte alignment for v7+, 16-byte data
+   hash, 10-byte block entries) and validated against UnityPy on real
+   Unity 2022.3 bundles.
+10. **Reserialize** - `src/object_writer.zig` (type-tree-driven serializer,
+   byte-exact round trips against the reader), `src/serialized_writer.zig`
+   (v17-22 file rebuild preserving the type section verbatim), `edit` CLI
+   (JSON literal field set + in-place rewrite).
+
+Formats 2-22 round-trip
+   (per-version object-table layout, tail fields, Legacy16 and
+   Standard20 header layouts); v9 and v13 fixtures cover the legacy
+   paths.
+10. **CLI + docs** - `info`, `--dump`, `extract`, `edit` wired; README
+    status current.
+
+## Verification
+
+- `zig build test` green after every step (focused tests added per step,
+  hand-built fixtures for each format).
+- `zig build` produces a working CLI.
+- Manual pass: `unityz info`/`extract` against real Unity asset files from
+  the local sample corpus (if one exists on this machine) - report results
+  in Completion notes.
+- Where a local UnityPy checkout exists, behavioral comparison on the same
+  files is allowed; byte-level output differences caused by implementation
+  choice are documented, not hidden.
+
+## Completion notes
+
+2026-08-30: steps 1-8 landed. Object reading verified end-to-end on a
+hand-built v17 serialized file (dumped as JSON) and the real v22 wire
+fixture; texture extraction verified on a hand-built v17 file with a DXT1
+Texture2D - the extracted PNG decodes to exactly the encoded red pixels.
+Reserialization verified: `edit` changes a field and the rewritten file
+re-parses with every other field intact.
+
+Binary layouts
+verified against the public format documentation and the wire fixtures of
+the independent Rust `unity-asset` project (a real v22 serialized file
+parses correctly, including big-endian data and the 48-byte header). Two
+layout points flagged for real-file verification later: block-flag bit 0
+semantics in UnityFS (per-block vs header compression type) and whether
+legacy TypeTree strings are aligned strings (implemented) or plain
+cstrings. Header endianness (big) is confirmed by three independent
+implementations.
+
+2026-08-30 (final): the real-file verification pass found the last
+reader gap: strings are always 4-aligned in the wire format regardless
+of the type-tree `meta_flags` (UnityPy `read_aligned_string`, AssetStudio
+`ReadAlignedString`); the reader/writer only padded when bit 0x4000 was
+set. Fixed in `object_reader.zig`/`object_writer.zig`: strings align
+unconditionally, and array runs promote per-element padding to the run
+end (byte-equivalent), with a regression test.
+
+Real Unity 2022.3.62f2 CABs now read 100% clean: the AssetBundle (142),
+Mesh (43), and Shader (48) objects that previously failed with
+OutOfBounds/Corrupt parse with correct values; all objects in both
+sample bundles read with zero errors (49/49 and 10/10); `edit`
+round-trips are byte-identical to the originals on the previously
+failing classes. The only remaining known limitation is the serialized
+.NET object graph inside m_Script payloads, which UnityPy itself cannot
+parse without external .NET assemblies; unityz exposes it as raw bytes
+(at or beyond UnityPy parity).
+
+2026-08-30 (bugfix/improvement pass): a whole-file reserialize audit on
+the real CABs found three v22 writer bugs: the legacy header fields at
+0x00/0x04/0x0c must be zero (UnityPy writes zeros too), object data is
+aligned to the source file's own alignment (8 for 2022.3, derived as the
+gcd of the object offsets; 4 for the hand-built fixtures), and the
+metadata-to-data padding must actually be written. After the fixes both
+real CABs reserialize byte-identically end to end (233036 and 370004
+bytes, every object read -> written -> compared). Added a v22 fixture
+test asserting byte-exact rewrites of the 2022.3 layout.
+
+Reader/writer improvement: arrays of 1-byte integers (char / UInt8 /
+SInt8) now coalesce into raw bytes instead of one value per byte
+(UnityPy reads these as byte arrays), shrinking dumps like mesh index
+buffers and matching the reference semantics.
+
+`extract` gained asset kinds: Mesh exports as Wavefront OBJ (vertices,
+normals, UVs, per-submesh triangle/quad faces, u16/u32 indices; UV0
+resolved per UnityPy's version-aware channel mapping), Material and
+Shader export as readable text summaries. The class-name table gained
+MeshFilter, colliders, AudioClip, Sprite, RectTransform, CanvasRenderer,
+ParticleSystem, and `info --dump` now uses an arena instead of leaking
+per-object page allocations.
+
+One subtle Zig 0.16 trap found and documented in the code: never deinit
+an arena-backed `streams.Writer` and then hand out its slice, because
+`ArenaAllocator.free` reclaims the most recent allocation and silently
+invalidates it (surfaced as 0xAA-filled output); the extract helpers
+dupe into the arena instead.
+
+2026-08-30 (sprite export pass): `extract` now exports Sprites as cropped
+PNGs: it resolves the sprite's texture PPtr in the same file, decodes the
+Texture2D, crops `m_RD.textureRect` (falling back to the legacy top-level
+`m_Rect`), and flips vertically, mirroring UnityPy's `SpriteHelper`
+algorithm exactly. Verified against a hand-built v22 fixture (4x4 RGBA32
+texture + 2x2 sprite rect): the exported PNG matches UnityPy's own sprite
+export pixel-for-pixel.
+
+This pass also fixed a latent real-file bug: modern type trees name the
+texture pixel payload field "image data" (with a space), not
+`m_ImageData`; `Texture2D.fromValue` now reads both, so embedded textures
+in real 2022.3 files extract correctly (previously the pixel data was
+never found and textures were silently skipped). A regression test covers
+the crop/flip math and the out-of-rect rejection path.
+
+2026-08-30 (texture export pass): real-file texture extraction was never
+verified before, because the sample bundles' only Texture2D had been
+misreported as width 0. Inspecting it directly showed a real 256x256
+RGBA32 texture. Cross-checking the exported PNG against UnityPy found the
+extracted image vertically flipped: Unity stores texture rows bottom-up
+(row 0 = bottom), while PNGs are top-down. `extract` now flips the decoded
+RGBA before encoding (`texture.flipVertical`), and the output matches
+UnityPy's texture export byte-for-byte (0/262144 differing bytes).
+
+The
+sprite path intentionally uses the unflipped texture and flips the crop
+instead, matching UnityPy's `SpriteHelper`, and still matches after this
+change. Added a `flipVertical` regression test. A mutation fuzz pass
+(200 mutated serialized-file and bundle inputs) found no parser panics.
+
+2026-08-30 (mesh export pass): comparing the OBJ export against UnityPy's
+own exporter found two real bugs. The face writer emitted one `f` line per
+vertex (three degenerate one-corner "triangles" per face instead of one
+3-corner line) - 6624 lines instead of 2208 faces. And the export kept
+Unity's left-handed coordinates, while UnityPy converts to right-handed
+OBJ by mirroring X on vertices and normals and reversing face winding.
+
+Both fixed; the exported OBJ now matches UnityPy's byte-for-byte at f32
+precision for both sample meshes (1740-vertex creature and 24-vertex
+cube): vertices, normals, UVs, and face indices all identical (my float
+output uses shortest round-trip digits instead of UnityPy's 9-digit
+format, so the text differs but every parsed value is the same f32).
+
+2026-08-30 (CLI correctness pass): `info --dump` JSON output is now fully
+valid: `value.jsonString` escaped quotes/backslash/newline/CR/tab but
+passed control characters through raw, and Unity strings often carry
+trailing NULs (e.g. MonoScript class names), which would have produced
+invalid JSON. All remaining C0 controls and DEL are now written as
+`\uXXXX` (with a regression test).
+
+`edit` now rejects fields the object's
+type tree does not declare instead of silently no-op'ing: the writer
+serializes tree children only, so a typo'd field name previously rewrote
+the file unchanged without any indication. Probing `edit` with bad JSON,
+bad path ids, and missing objects showed it already fails gracefully
+everywhere else.
+
+2026-08-30 (nested edit pass): `edit` now accepts dotted, indexed field
+paths, e.g. `m_Container[0][1].preloadSize`, `m_SavedProperties.m_TexEnvs[0][1].m_Scale.x`,
+and `m_Shader.m_PathID` (PPtrs expose m_FileID/m_PathID for descent). The
+path walker rebuilds the value tree copy-on-write, preserves field order,
+and rejects nonexistent segments.
+
+Verified on the real shamwayselftest
+CAB: a container preloadSize, a material texture scale, and a shader
+retarget all edit correctly and the edited files reserialize
+byte-identically. A path-parser unit test covers dotted/indexed forms and
+malformed paths.
+
+2026-08-30 (monobehaviour verification pass): building a v22 fixture with a
+MonoBehaviour + MonoScript and running the full read/extract/edit pipeline
+closed the last untested extract path and exposed a real writer bug: the
+raw serialized script graph that follows a MonoBehaviour's type-tree
+fields was silently dropped on rewrite (the writer emitted only the tree
+fields; the real CABs contain no MonoBehaviours, so no prior round-trip
+caught it). `object_writer.writeObject` now takes the tail bytes after the
+tree fields and appends them, mirroring UnityPy's preservation of the
+unread remainder. `edit` on a MonoBehaviour keeps the payload: verified
+byte-exact on the fixture after an edit.
+
+The same pass found the
+alignment derivation overestimated with sparse object offsets (two
+objects at 0 and 40 yield gcd 40 but the true alignment is 8);
+`deriveDataAlign` now picks the largest power of two dividing all relative
+offsets. All four round-trip targets (two fixtures, two real CABs)
+reserialize byte-identically, and the MonoBehaviour extract path (script
+resolution, NUL-trimmed label, exact payload) is verified end-to-end.
+
+2026-08-30 (recursive dump pass): `info <bundle> --dump` previously
+ignored `--dump`; it now recursively parses each serialized node (and
+WebFile entry) and prints the objects, so a whole bundle can be inspected
+in one command without extracting the CABs first. Verified: the bundle
+dump produces the identical per-object JSON as dumping the extracted CAB
+directly (49/49 objects on the entityprobe bundle).
+
+2026-08-30 (raw extract pass): `extract <serialized> --raw` writes every
+object's serialized bytes as-is to `object_<path_id>_class<id>.bin`,
+fulfilling the plan's "raw bytes of any object" promise (previously only
+MonoBehaviour payloads were exposed raw). Verified on the shamwayselftest
+CAB: 10 objects dumped, every file size matches the object table, and the
+AssetBundle's raw bytes show the expected name field.
+
+2026-08-30 (script naming + array edit pass): MonoBehaviour export files
+are now named with the qualified `namespace.class` (previously the
+namespace alone, so scripts sharing a namespace collided), matching the
+printed label. Verified JSON-array edits end to end: setting a Transform's
+`m_Children` to a new PPtr array changes the value and the edited file
+reserializes byte-identically.
+
+2026-08-30 (info polish pass): `info` on a serialized file now lists the
+external dependencies (path, guid, type) that real game files use to
+reference sidecar files, plus script-type and ref-type counts when
+present. `edit` on a non-serialized input (bundle/webfile) now fails with
+a clear message instead of a confusing parse error. Both verified on
+fixtures (an external round-trips through the metadata verbatim).
+
+2026-08-30 (webfile verification pass): the WebFile parser and the
+recursive info/extract paths were only synthetically tested; a hand-built
+WebFile (UnityWebData1.0 header + zlib payload) containing the real
+entityprobe CAB as one entry now verifies them end to end: `info` shows
+the container and payload sizes, `info --dump` recursively dumps the
+CAB's 49 objects through the webfile entry, and `extract` writes the entry
+byte-identical to the original CAB (which also still reserializes
+byte-exactly).
+
+2026-08-30 (multi-edit pass): `edit` now accepts several `field json-value`
+pairs in one invocation (`edit <file> <path_id> m_A 1 m_B 2`), applying
+them to the value tree before a single rewrite, so the file is written
+once and a failing pair leaves it untouched. Verified on the real CAB:
+two nested edits applied together, an invalid second field aborts with no
+partial write, and the edited file reserializes byte-identically.
+
+2026-08-30 (lzma verification pass): the UnityFS LZMA decompression path
+(std.compress.lzma, "via std") was never exercised with real LZMA data. A
+hand-built UnityFS v8 bundle with an LZMA-compressed header info and block
+(flags 0x41, block flag bit 0 set to inherit the header type, unpacked
+sizes patched into the .lzma headers like Unity's LZMA SDK writes them)
+now verifies it end to end: `info` parses it, `extract` writes the
+embedded CAB byte-identical to the original, and `info --dump` recursively
+reads all 49 objects through the LZMA block.
+
+2026-08-30 (object table pass): `info <file> --objects` prints the object
+table (path id, class, byte start, size) for debugging which objects are
+large; usage text updated.
+
+2026-08-30 (verify command): `unityz verify <path>` is a self-integrity
+check UnityPy does not offer: every object with a type tree is read
+through it, written back, and byte-compared, reporting read/write errors
+and mismatches. Bundles, webfiles, and their embedded serialized nodes
+are verified recursively. It exits non-zero on any failure (usable in CI
+or pre-commit checks) and prints nothing spurious on success. Verified:
+both real CABs, both bundles (incl. the LZMA fixture), the webfile
+fixture, and the sprite/mono fixtures all report clean; truncated and
+garbage inputs fail with a clear message and exit 1.
+
+2026-08-30 (stats command): `unityz stats <path>` reports per-class object
+counts and byte totals (largest classes first) plus duplicate-object
+detection: objects with identical serialized bytes across path IDs are
+flagged with their potential deduplication savings. This is size analysis
+UnityPy does not offer. Bundles and webfiles report per node. Verified on
+both real CABs (honest "no duplicate objects") and a hand-built fixture
+with two byte-identical GameObjects (correctly reports object 200 == 100,
+9 bytes could be deduplicated).
+
+2026-08-30 (selective extract pass): `extract` now accepts `--class N` and
+`--path-id N` filters (combinable with `--raw`), pulling just the wanted
+objects out of a serialized file; unknown options are rejected with a
+clear message. UnityPy's CLI extracts everything or nothing. Verified on
+the real CAB: `--class 28` extracts only the texture, `--path-id 3` only
+the mesh OBJ, `--class 43 --raw` only the mesh's raw bytes.
+
+2026-08-30 (batch mode pass): every command now accepts a directory
+argument and processes each file in it, so `unityz verify ./assets/`
+checks a whole tree in one run (CI-usable). `verify` no longer aborts the
+batch on the first bad file: failures set a flag, the loop continues, and
+the process exits non-zero at the end. Verified: a batch verify over two
+good CABs + one truncated file reports each and exits 1; batch
+info/stats/extract process all files.
+
+2026-08-30 (find command): `unityz find <path> <substring> [--class N]`
+locates objects whose name contains the substring (case-insensitive) or
+whose class matches, reading each object through its type tree and
+recursing into bundle/webfile nodes. UnityPy's CLI has no search.
+Verified on both real bundles (e.g. `find ... creature` -> the
+myCreature GameObject, mesh, and material) and via `--class`.
+
+2026-08-30 (show command): `unityz show <path> <path-id>` prints one
+object's value tree as JSON, completing the find -> show -> edit/extract
+workflow; recurses into bundle/webfile nodes and reports not-found and
+invalid-id errors cleanly. UnityPy's CLI cannot print a single object.
+
+2026-08-30 (diff command): `unityz diff <file1> <file2>` compares two
+files' objects by content hash (path id, class, Wyhash of the raw bytes,
+size), reporting objects only in one file, objects whose bytes changed
+between builds, and the unchanged count; works recursively on
+bundles/webfiles. Verified: identical files -> all unchanged; an edited
+copy -> the edited AssetBundle flagged as changed; unrelated files ->
+changed + only-in-A counts. UnityPy has no build comparison.
+
+2026-08-30 (edit --out pass): `edit` accepts `--out <file>` anywhere in
+the argument list to write the edited file elsewhere instead of
+overwriting the input in place, a safety improvement UnityPy lacks (it
+saves over the original). Works with multi-field edits; verified the
+output reserializes byte-identically and the input file is untouched.
+
+2026-08-30 (outdir + README pass): `extract --outdir <dir>` writes
+extracted files into an existing directory instead of the current one
+(scripting-friendly). The README's quick start and command list were
+refreshed to cover all nine CLI commands and their beyond-UnityPy
+capabilities (verify/stats/find/show/diff, batch directories, extract
+filters, edit --out).
+
+2026-08-30 (recursive extract pass): `extract --recursive` on a bundle or
+webfile writes the embedded serialized nodes AND their assets in one
+command (combinable with --class/--path-id/--raw), so a whole bundle
+yields textures/meshes/materials without a two-step extract. Verified on
+both real bundles.
+
+2026-08-30 (info --json pass): `info <file> --json` prints a single
+machine-readable JSON summary (type, version, unity, platform, endian,
+type-tree flag, type/object/external counts) instead of the text layout,
+for scripting. Verified parseable.
+
+2026-08-30 (hash command): `unityz hash <path> [--path-id N]` prints each
+object's content fingerprint (Wyhash of the raw bytes) with class and
+size, the raw material for external build tracking (`diff` is the
+pairwise comparison). Deterministic and filterable; recurses into
+bundle/webfile nodes.
+
+2026-08-30 (edit --patch pass): `edit <file> --patch <patch.json>` applies
+a JSON patch of the form `{"<path_id>": {"<field>": <value>, ...}, ...}`
+to several objects in one rewrite, with dotted-indexed field paths and
+`--out` support. Verified: two objects patched together (name/flags and
+nested transform fields), the patched file reserializes byte-identically,
+single-object edit is unaffected, and unknown objects / malformed JSON
+fail with clear messages.
+
+2026-08-30 (batch edit verification): the directory batch mode also
+covers `edit` - `unityz edit dir/ 100 m_Count 99` applies the same edit
+to every file in the directory, and `edit dir/ --patch p.json` applies a
+patch file to every file (keep the patch outside the target directory).
+Verified on a directory of two CABs: both edited, both reserialize
+byte-identically.
+
+2026-08-30 (stats --json pass): `stats --json` emits the size breakdown
+as a single machine-readable object (object/byte totals + per-class
+counts and bytes), consistent with `info --json` for scripting. Verified
+parseable.
+
+2026-08-30 (verify filters pass): `verify` accepts `--class N` and
+`--path-id N` to check a subset of objects, useful after editing a few.
+A 120-mutation fuzz across find/show/stats/hash/verify plus 60 diff
+mutations found no panics in the newer commands. Verified: focused
+verification checks exactly the target objects.
+
+2026-08-30 (objects-through-containers pass): `info <bundle|webfile>
+--objects` now lists the object table of every embedded serialized node
+(previously the flag was silently ignored for containers, only working on
+bare serialized files). Verified on both real bundles and the webfile
+fixture (49 objects through the entityprobe bundle node).
+
+2026-08-30 (bundle rebuild pass): `edit` now works on bundles directly -
+it finds the serialized node containing the target path id, edits it, and
+rebuilds the bundle with the node replaced. The new `bundle.rebuild`
+writes a single uncompressed block (valid UnityFS, no LZ4/LZMA encoder
+needed), keeps the source version and Unity strings, and zeroes the data
+hash (parsers accept it). Verified end to end: editing a mesh name inside
+the real entityprobe bundle produces a bundle my own `verify` accepts,
+**UnityPy loads it** (49 objects, edited name reads back), and
+`extract --recursive` works on it. Unit test covers replacement and
+untouched rebuild round-trips.
+
+2026-08-30 (bundle patch pass): `edit <bundle> --patch <file>` applies a
+JSON patch across the bundle's nodes - entries are grouped by the node
+that contains each path id, each node is edited and the bundle rebuilt
+once. Verified: two objects patched in the real entityprobe bundle
+(mesh name + bundle flags), my verify passes, and UnityPy reads both
+edits back. The serialized-file patch path is unchanged and byte-stable.
+
+2026-08-30 (webfile format fix): the WebFile parser implemented an
+invented compressed format that real Unity webfiles do not use (UnityPy
+could not read the fixtures). Rewritten to the real UnityWebData layout:
+signature, a u32 head size, then an offset/length/path-length table with
+the file data at absolute offsets; gzip-wrapped webfiles decode and
+rebuild too. `webfile.rebuild` writes the same layout
+(uncompressed, no deflate encoder needed). Verified: a hand-built
+real-format webfile is read by both unityz and UnityPy (49 objects), and
+`edit` inside a webfile produces a rebuilt file that UnityPy reads back
+with the edited value. New parse/rebuild/error tests.
+
+2026-08-30 (gzip webfile pass): gzip-wrapped webfiles are now parsed
+(streamed flate decompression; the WebFile owns the decompressed buffer),
+container sniffing routes gzip-magic files to the webfile parser, and a
+missing-return bug in `verify`'s unknown/archive branches was fixed.
+Verified: a Python-gzipped real-format webfile passes info/verify and
+extracts the embedded CAB byte-identically.
+
+2026-08-30 (fuzz + hang fix): a mutation fuzz of the rewritten webfile
+parser found a hang: the object reader placed no upper bound on array
+counts, so a corrupt count triggered a huge allocation + effectively
+infinite loop (reproduced via a corrupted gzip webfile entry). Fixed by
+bounding the count by the remaining data; the hang now errors fast with
+`Corrupt`. The fuzz also found that std's flate decoder can panic on
+certain *truncated* gzip streams (a std integer-overflow bug, not
+catchable from zig code); corruption of complete gzip streams errors
+cleanly, so this is documented as a std limitation affecting only
+truncated gzip webfiles.
+
+2026-08-30 (webfile patch pass): `edit <webfile> --patch <file>` applies
+JSON patches across a webfile's entries (per-entry grouping, one rebuild),
+completing the container edit matrix (serialized, bundle, webfile, all
+supporting single edits and patches). Verified: two objects patched in a
+real-format webfile, my verify passes, and UnityPy reads both edits.
+
+2026-08-30 (container matrix verification): the full command set
+(stats/hash/find/show/diff/extract --recursive) verified over gzip
+webfiles, and a 60-mutation x 6-command fuzz of the LZMA bundle and a
+rebuilt bundle found zero hangs or panics. The container code paths
+(webfile gzip, bundle rebuild) are now fuzz-clean alongside the rest.
+
+2026-08-30 (README + final sweep): README status updated for the container
+edit/rebuild capabilities and the fuzz-clean state. Final regression:
+4 round-trip targets byte-identical, 6 containers (real CABs/bundles,
+LZMA bundle, gzip webfile, patched webfile, rebuilt bundle) verify clean,
+205/205 tests.
+
+2026-08-30 (stats --json containers): `stats --json` now aggregates across
+a bundle's or webfile's serialized nodes (previously it passed container
+bytes to the serialized parser, producing confusing errors). Verified on
+a bundle, a gzip webfile, and a bare serialized file.
+
+2026-08-30 (info --json containers): `info --json` now emits machine-readable
+summaries for bundles (version, unity, node paths/sizes) and webfiles
+(entry paths/sizes) as well as serialized files. Verified parseable on a
+real bundle, a gzip webfile, and a bare serialized file.
+
+2026-08-30 (hash --json pass): `hash --json` emits the content
+fingerprints as a JSON array (path_id, hash, class, size), filterable
+with --path-id, consistent with info/stats --json for scripting.
+
+2026-08-30 (directory diff pass): `diff <dirA> <dirB>` compares two asset
+trees file-by-file (size + content hash), reporting changed / only-in
+entries (capped at 10 lines) plus a summary line; `diff` skips batch
+expansion and routes directory arguments to the tree comparison, so a
+directory argument no longer dies with `IsDir`. Verified: identical dirs
+(2 unchanged), diverged dirs (unchanged/changed/only-in counts), and the
+file-diff regression (48 unchanged, 1 changed).
+
+2026-08-30 (JSON matrix completion): `diff --json` and `find --json` join
+info/stats/hash in the machine-readable family, and `hash` gains the
+`--class <id>` filter for symmetry with find/verify. `diff --json` emits
+one object (a/b paths, unchanged/changed/only_a/only_b counts plus
+changed_objects/only_a_objects/only_b_objects lists; directories list
+file names, files list path_id/class); `find --json` emits a single array
+of {path_id, class, name} across a file or all container nodes; `hash
+--class N` filters both text and JSON output.
+
+Verified on serialized
+files, a bundle, and (gzip) webfiles: counts and lists match the text
+modes, and every emission parses as valid JSON (checked with python
+json.tool; count and list keys are distinct to avoid duplicate names).
+
+2026-08-30 (verify --json + stats --class): `verify --json` completes the
+machine-readable family for every inspection command: one object with
+checked/failed counts and a failures array ({path_id, message}; path_id
+-1 for file-level parse failures), non-zero exit preserved. `stats` gains
+`--class <id>`, filtering both the per-class totals and the duplicate
+scan, in text and JSON modes (stats previously only recognized `--json`
+as rest[0]).
+
+Verified: clean files (checked=N, failed=0), mutated files
+(read failure and serialized parse failure recorded with correct counts
+in both modes), garbage/truncated inputs (path_id -1 records), container
+parse failures, bundle + gzip webfile coverage, and exit codes 0/1.
+
+2026-08-30 (info --objects --json): `info --json --objects` adds the
+per-object table to the machine-readable summary as an `object_list`
+array ({path_id, class, offset, size}; entries inside bundles/webfiles
+are tagged with their node/entry path). The info flag scan now accepts
+any order of --dump/--objects/--json (it previously only checked rest[0],
+so `info --json --objects` silently ignored --objects). Verified on a
+serialized file (49 entries, matches the text table), a bundle (49
+node-tagged entries), and a gzip webfile; both flag orders parse as valid
+JSON; text --objects, --json without --objects, and --dump regressions
+clean.
+
+2026-08-30 (edit --verify): `edit` gains `--verify`, a round-trip
+self-check of the edited output before writing (serialized, bundle,
+webfile, and --patch forms): the rebuilt bytes are parsed and every
+object is read through its type tree, written back, and compared; on any
+failure up to three objects are listed and the file is left untouched
+(non-zero exit). The check shares the verify machinery (silent report
+mode).
+
+Verified: all four edit forms over all three container kinds print
+"verify: 49 object(s) round-trip clean", a 5000-char name edit (size
+shift through rewrite) and an embedded-NUL string both round-trip clean,
+and --verify output is byte-identical to the same edit without the flag.
+
+2026-08-30 (extract --json + outdir auto-create): `extract --json` exports
+every tree-typed object's value tree as `object_{id}_class{n}.json`
+(compact JSON via an allocating Io writer), filterable with --class /
+--path-id; --raw and --json are mutually exclusive. `--outdir <dir>` is
+now created when missing via a component-wise mkdir helper written
+because std's `createDirPath` hangs on special filesystems (/proc);
+verified the helper creates nested paths, tolerates existing dirs, and
+fails fast with a clean message on /proc.
+
+Verified: 49 value-tree JSON
+files from the entityprobe CAB all parse (including a 172 KB mesh tree),
+names match find output, bundle --recursive --json extracts node + 49
+JSON files, non-json extraction regression clean.
+
+2026-08-30 (show --raw): `show <path> <id> --raw` prints one object's
+serialized bytes as a 16-byte-per-line hex dump with an ASCII gutter
+(offset + hex + printable chars); it runs before the type-tree lookup, so
+it works on objects without trees. Verified byte-exact against
+`extract --raw --path-id N` output on the entityprobe CAB (object 1, 256
+bytes), on a bundle node, with the JSON mode and unknown-option handling
+unchanged.
+
+2026-08-30 (extract --json manifest): `extract --json` now also writes
+`manifest.json` next to the exported value trees, indexing every exported
+object ({path_id, class, file, name}; m_Name via the value tree, empty
+when absent). extractSerialized now takes the caller's arena and a
+manifest list so entry names outlive the call; the list lives per
+container branch. Verified: 49 entries on the entityprobe CAB (names
+match, e.g. mesh myCreature_mesh), 49 across a bundle --recursive --json,
+22 all-class-1 with --class 1, and no manifest written without --json.
+
+2026-08-30 (info --json externals): serialized-file `info --json` output
+now includes `externals_list`, the sidecar dependency table ({path, guid
+as 32-hex, type}), matching the text-mode externals lines; the summary
+count is unchanged. Verified on mono.assets (1 external,
+archive:/textures.resS guid 0102..0f10 type 2, identical to the text
+output), the entityprobe CAB (empty list), sprite.assets (none), and the
+--json --objects combo.
+
+2026-08-30 (diff --class): `diff` gains `--class <id>`, restricting the
+object comparison to one class (both text and --json modes); the filter
+lives in collectFingerprints so it applies across bundle/webfile nodes
+too. Verified: baseline 48 unchanged/1 changed on the renamed CAB pair,
+--class 1 gives 22 unchanged GameObjects, --class 142 isolates the
+changed AssetBundle (0 unchanged, 1 changed), --json --class 142 emits
+the same result as JSON, a bundle self-diff filters to 22, and an invalid
+class id errors cleanly. (Directory diffs compare whole files, so
+--class is accepted but not applied there.)
+
+2026-08-30 (stats --dups): `stats --dups` prints only the duplicate
+report (group lines + dedup summary, or "no duplicate objects"),
+skipping the per-class table and per-node headers; it composes with
+--class and is rejected together with --json (text-only). Verified on
+dup.assets (dup line + 9 bytes deduplicable), the entityprobe CAB (no
+duplicates), and a bundle (headers suppressed), with the unflagged text
+output unchanged.
+
+2026-08-30 (gzip truncation panic fix): a fresh mutation fuzz across the
+whole command surface (5 fixtures x 40 mutations x 17 commands, ~3400
+invocations) found zero crashes everywhere except truncated gzip
+webfiles, where std's flate decoder panics (two std bugs: a bit-reader
+assert seek <= end, and an end-of-input bit-count underflow; neither is
+catchable). Probed: 6-10 of 13 truncation offsets panicked.
+
+Fixed by
+feeding the decoder an endless 0xFF-padded input (a custom std.Io.Reader
+with a NUL every 64 bytes so gzip header delimiter scans terminate) so
+truncated streams error cleanly, capped output at max(8 MiB, 128x input)
+to bound the literal-0xFF garbage (previously a truncated file could
+spike 2.4 GB / 3.7 s; now ~11 MB / 10 ms), and verified the gzip trailer
+(CRC32 + ISIZE) ourselves because std reads but never checks it, closing
+a silent-garbage-success hole. Regression test truncates a hand-built
+gzip webfile at every length and requires clean errors.
+
+Result: all 22
+probed truncation offsets clean, valid gzip webfiles byte-identical
+(49-object verify clean), LZMA bundle truncations already clean,
+206/206 tests.
+
+2026-08-30 (extended fuzz campaign): the fuzz harness grew a full-extract
+variant that also drives the previously-unfuzzed asset decoders
+(texture decode, PNG encode, sprite crop, mesh OBJ, material/shader text)
+and ran 4 more rounds: LZMA bundle, sprite.assets, patched webfile, and
+the entityprobe CAB, 60-80 mutations x 13 commands each (~3100 more
+invocations). Zero crashes and zero hangs across all of them; combined
+with the earlier rounds the tool has survived ~6500 mutated invocations
+across 9 fixture types with the gzip truncation panic (fixed above) the
+only crash ever observed. The harness (mutations + timeout + crash/hang
+classifier) lives in /tmp/uzfuzz for future runs.
+
+2026-08-30 (EPIPE fix): piping stdout into a consumer that exits early
+(e.g. `unityz ... | head`) used to print an ugly WriteFailed stack trace,
+because Zig 0.16 does not die on SIGPIPE and the final stdout flush (or
+any mid-command write) surfaced the broken-pipe error as a trace. Fixed
+by a finalFlush helper that exits 141 (the SIGPIPE exit code) on flush
+failure, and the runCommand error catches exit 141 quietly on
+WriteFailed. Verified: heavy multi-line output piped to head (the
+original repro), info --dump piped to head, and --help/--version piped
+all exit silently with 141, while normal output and the verify non-zero
+exit are unchanged.
+
+2026-08-30 (hash --json single array): `hash --json` on a multi-node
+container used to print one JSON array per serialized node/entry, which
+is not parseable as a single document (reproduced with a hand-built
+2-entry webfile: json.load failed with "Extra data"). It now aggregates
+into one array across all nodes, like find --json; filters
+(--class/--path-id) still apply per object. Verified: 51 entries across
+the 2-entry webfile parse as valid JSON, 24 with --class 1, text mode
+and single-file output unchanged, stats --json already aggregated.
+
+2026-08-30 (diff node awareness): `diff` on multi-node containers
+conflated objects with the same path id across different nodes (matching
+was by path id alone). Reproduced with a 2-entry webfile whose entries
+both contain objects 100/200: editing one entry's object 200 reported 2
+changed instead of 1. Fp now carries the node path; objects match only
+when path id and node agree; text lines and --json entries tag the node
+(e.g. "changed: object 200 (GameObject) in a.assets"). Verified: collide
+fixture now 3 unchanged / 1 changed with correct node tags, bare
+serialized files (no node field), single-node bundles, directory diffs,
+and --class filters all unchanged.
+
+2026-08-30 (verify --json node tags): `verify --json` failure records
+did not say which entry of a multi-node container failed (path_id only).
+Failures now carry a "node" field naming the bundle node / webfile entry
+(the diff fix from step 72 applied to verify; edit --verify shares the
+machinery). Verified: a corrupted second entry reports
+{"node":"b.assets","path_id":100,...} in JSON while text mode already
+showed per-entry headers; bare serialized files keep no node field, and
+clean containers (bundle, gzip webfile) plus edit --verify are
+unchanged.
+
+2026-08-30 (stats --json duplicate groups): `stats --json` reported
+object/byte totals and per-class sizes but no dedup information at all
+(the text mode lists duplicate pairs). It now emits duplicates /
+duplicate_bytes counts plus a duplicate_groups array ({class, hash,
+size, path_ids}) of objects sharing identical serialized bytes, computed
+across container nodes and honoring --class. Verified: dup.assets JSON
+matches the text report exactly (1 duplicate, 9 bytes,
+class-1/hash/size-9/path-ids [100,200]); clean files emit empty groups;
+the two-entry webfile aggregates one group; --class filters dedup to the
+class; text and --dups outputs unchanged.
+
+(statsSerializedBytesJson, an
+unused pre-refactor variant with duplicates, was left as-is.)
+
+2026-08-30 (find --exact): `find` gains `--exact` for a case-sensitive
+whole-name match (names are NUL-trimmed before comparing), complementing
+the case-insensitive substring default; composes with --class and --json.
+Verified: exact full name matches, wrong case and partial names match
+nothing, bundle and renamed-file lookups work, and the substring default
+is unchanged.
+
+2026-08-30 (extract per-node subdirs): `extract --recursive` on a
+multi-node container silently lost data: objects with the same path id in
+different nodes wrote the same file name and overwrote each other
+(reproduced: a 2-entry webfile with objects 100/200 in both entries
+produced 2 files for 4 manifest entries). Objects extracted from a
+container node now land in `objects/<node>/` (created on demand; node
+data files stay flat at the outdir root), so identical path ids cannot
+collide; the manifest's file field carries the subpath. Applies to
+--json, --raw, and the decoded-asset modes alike.
+
+Verified: 4/4 files
+with a valid manifest on the collide fixture, bare serialized files stay
+flat, single-node bundles and non-recursive extraction unchanged, 25
+mutated webfiles fuzz the recursive path cleanly.
+
+2026-08-30 (node:path-id selectors): with colliding path ids across a
+container's nodes, `show` and `edit` could only reach the first match.
+Both now accept a `node:path-id` selector (split on the first colon) that
+targets one specific bundle node / webfile entry; bare path ids keep the
+first-match behavior, and a node selector on a bare serialized file is a
+clean error. Verified: `show b.assets:200` vs `a.assets:200` on a
+2-entry webfile show the right objects, `edit b.assets:200 m_Name ...`
+renames only that entry (a's untouched, confirmed via diff's node tag),
+plain selectors and bundles (CAB-xxx:1) work, invalid selectors error
+cleanly, and edit --verify composes.
+
+2026-08-30 (find/hash node tags): `find` and `hash` were the last
+per-object commands without node awareness: their JSON arrays (and find's
+text lines) did not say which bundle node / webfile entry an object came
+from. Both now tag container objects with the node path (hash reuses the
+Fp node field, find matches get a node field; bare serialized files keep
+no tag). Verified: the 2-entry collide webfile's 4 hash and find entries
+split across a.assets/b.assets, find's text lines append "in <node>",
+the gzip webfile tags its entry, and bare serialized output is
+unchanged.
+
+2026-08-30 (patch node selectors): `edit --patch` keys were bare path
+ids, so a patch could not target one specific node of a multi-node
+container. Patch keys now accept the same `node:path-id` selector as
+show/edit (the per-node grouping routes each key to the matching entry;
+node selectors on a bare serialized file are a clean error; bad keys are
+skipped as before). Verified: {"a.assets:200":...} patches only that
+entry (b untouched), a plain {"200":...} still patches every matching
+node, bundle patches with CAB-xxx:1 keys work, and patch --verify
+composes.
+
+2026-08-30 (verify/extract --path-id selectors): `verify --path-id` and
+`extract --path-id` accept the same `node:path-id` selector as show/edit,
+so a specific node's object can be checked or pulled after a selector
+edit. The container loops skip nodes that do not match the selector;
+bare path ids behave as before; node selectors on a bare serialized file
+are a clean error. Verified: verify b.assets:100 checks exactly that
+object (1 checked, node-tagged failure on the corrupt fixture), extract
+--path-id b.assets:100 writes only that node's object, plain --path-id
+100 still extracts/checks every matching node.
+
+2026-08-30 (hash --path-id selector + selector fuzz): `hash --path-id`
+accepts the node:path-id selector too, completing the uniform targeting
+surface (show/edit/patch/verify/extract/hash all take selectors); bare
+path ids and serialized-file behavior unchanged. A selector fuzz over
+mutated 2-entry webfiles (30 mutations x 6 selector commands = 180
+invocations: show, hash, verify, extract, edit single, edit patch, all
+with node selectors) found zero crashes and zero hangs in the new
+parsing and node-filtering paths.
+
+2026-08-30 (README audit): the README had drifted across the ~20 slices
+of this and earlier instances: it still claimed std flate "can panic on
+deliberately truncated gzip streams" (fixed in step 68) and "hundreds of
+mutated inputs" (now ~6,500+), omitted `hash` from the capability list,
+and did not mention the node:path-id selectors or `find --exact`. The
+capability, node-awareness, and fuzz-status sections were rewritten to
+match the tool; a docs-check confirms no new flags (still the 42
+pre-existing ones).
+
+2026-08-30 (dead code removal): a reference scan found four functions
+defined but never called: statsSerializedBytesJson (a pre-refactor stats
+JSON variant superseded by the duplicate-group work in step 74) and
+sign3/extend4/extend5 in texture.zig (ETC helpers superseded by the
+table-driven decoders). All four removed; a re-scan finds no remaining
+unreferenced functions, 206/206 tests pass, and sprite/texture extraction
+is unchanged.
+
+2026-08-30 (real-asset formats: v6 bundles, sidecars, audio): per the
+user's directive to obtain sample assets rather than declare them
+blocked, downloaded UnityPy's test bundles (Unity 2018.4, 2017.4, and
+5.6) - all previously unparseable. Three real parser bugs fixed:
+(1) the v6 header carries both version strings unconditionally (read
+them for every UnityFS version, matching UnityPy); (2) each block's own
+flags carry its compression (blocks decode with `flags & 0x3F`, not the
+header's type - xinzexi mixes an LZ4HC header info with an LZMA data
+block).
+
+(3) Unity's LZMA blocks use props+dict+stream framing with no
+size field (5-byte), and std's lzma circular buffer mis-decodes streams
+larger than the dict - both handled by normalizing to a 13-byte header
+with the dict raised to the output size, trying both framings.
+
+New
+capabilities: `.resS`/`.resource` sidecar nodes resolve m_StreamData
+texture pixels automatically (banner_1's ASTC texture and sprite, plus
+xinzexi's ETC2 texture extracted and cross-validated: ETC2 pixel-
+identical to UnityPy, ASTC within ±1 - a rounding variance vs ARM's
+astc_encoder, now documented), and AudioClip extraction (35 FSB5 clips
+from char_118's .resource, OGG/WAV-wrapped PCM/MP3 detection).
+
+A fuzz of
+the new paths exposed latent ASTC decoder panics on corrupt blocks
+(integer overflow, @intCast, and grid-index OOB) - the ASTC decode now
+uses wrapping arithmetic, truncating casts, and clamped shifts/indices
+throughout, verified with 180+150 mutated invocations at zero crashes.
+New regression tests cover the v6 header and block-flag semantics;
+208/208 tests.
+
+2026-08-30 (crunch textures + SpriteAtlas sprites): same directive - a
+crunched atlas was missing, so fetched the UnityPy test bundle with a
+1024x512 ETC2_RGBA8Crunched (65) Texture2D streamed from an embedded
+.resS. Crunch decompression is a 3837-line C++ decoder with no Zig port,
+so the ZLIB-licensed unitycrunch (Geldreich/Binomial) was vendored as-is
+(`src/vendor/unitycrunch/`, built with `-DNDEBUG` so corrupt input
+cannot trip C++ asserts and abort the process - the fuzz harness found
+this exact failure mode) and exposed through an extern-C shim
+(`src/vendor/unitycrunch_shim.cpp`) that malloc/free's the decoded
+blocks, keeping the Zig boundary ABI-clean.
+
+Formats 64/65 decode in
+`texture.zig` by calling the shim then running the regular ETC1/ETC2
+decoder; the atlas texture extracts pixel-identical to UnityPy.
+
+The atlas's 7 sprites were silently skipped before: they carry a
+`{0,0}` texture PPtr (the null reference) and get their texture from the
+SpriteAtlas. `atlasTextureFor` now scans the file's SpriteAtlas objects
+and resolves the sprite by `m_RenderDataKey` (UnityPy's lookup), falling
+back to positional alignment of m_PackedSprites/m_RenderDataMap; a
+{0,0} PPtr is treated as null; the crop uses the atlas entry's
+textureRect.
+
+The sprite crop itself was off by one pixel: it truncated `rect.width`,
+while Pillow's `Image.crop` floors x/y and ceils x+w/y+h and clamps to
+the texture bounds. `spriteRgbaRect` now rounds the same way, and all 7
+exported sprites are byte-identical to UnityPy's export.
+
+Fuzz of the
+crunched decode across all 4 fixtures: 180 mutated invocations, zero
+crashes or hangs; 208/208 tests.
+
+2026-08-30 (ASTC HDR decode): Unity's ASTC_HDR formats 66-71 were
+detected but unsupported; they now decode. UnityPy's texture2ddecoder
+rejects HDR blocks (confirmed: it returns garbage on astcenc-encoded HDR
+data), so ARM astcenc is the reference.
+
+The block decoder already had the
+shared-exponent HDR endpoint machinery (luminance small/large range, RGB,
+RGB-scale, RGBA, RGB+LDR-alpha) but the formats were unroutable; added
+the 66-71 constants, names, and block sizes.
+
+Verified against astcenc on
+51 synthesized HDR textures: all six block sizes, both HDR profiles,
+gradients, negatives, highlights, HDR alpha (RGBA mode), grayscale
+(luminance modes), and non-multiple dimensions for edge blocks. HDR
+lanes decode byte-exact (0 bytes differ on 49 of 51 cases).
+
+The only
+variance is ±1 LSB on LDR-valued alpha lanes inside FMT_HDR_RGB_LDR_ALPHA
+blocks (68 of 73092 bytes, max diff 1): astcenc routes those lanes
+through an fp16 intermediate (unorm16_to_sf16) before scaling to 8-bit,
+while unityz keeps the exact value - a rounding variance of the same
+class as the documented LDR ASTC ±1, and the exact math is the
+defensible choice.
+
+Added a regression test (real astcenc-encoded 11x11
+HDR RGBA fixture with verified expected output) and a crash-only fuzz of
+mutated HDR streams across all block sizes.
+
+The fuzz found a real panic:
+corrupt weight grids push the bilinear-interpolated weight past 64, so
+`64 - weight` wrapped negative and the u16 interpolant in
+`astcSelectColorHdr` overflowed (the HDR lane path had missed the
+step-84 hardening). Fixed by clamping the weight to 0..64 and truncating
+the sum; 6120 mutated invocations at zero crashes after the fix.
+
+Valid
+blocks are unaffected (verified byte-exact against astcenc). 209/209 tests.
+
+2026-08-30 (raw texture format family): audited the format list against
+UnityPy's TextureFormat enum and found 21 raw formats UnityPy decodes but
+unityz lacked: ARGBFloat(6), BGR24(8), R16(9), RHalf(15), RGHalf(16),
+RGBAHalf(17), RFloat(18), RGFloat(19), RGB9e5Float(22), RG16(62), RG32(72),
+RGB48(73), RGBA64(74), and the signed variants 75-82.
+
+All are simple
+per-pixel converters, added with documented standard conversions: float
+and half clamp to [0,1] then truncate x*255 (the file's existing
+floatToByte), 16-bit integer formats take the high byte, signed formats
+bias (i8+128, i16+32768 high byte, i32+2^31 high byte), and RGB9e5Float
+uses the spec's shared-exponent decode (mantissa x 2^(e-24)).
+
+Verified
+byte-exact on synthesized pixels against independently computed expected
+output (0/1008 bytes across 21 cases).
+
+UnityPy's own converters for these
+are lossy - its half path does int(x*256) and raises on values above 1.0,
+and its RG32 path reads 16-bit samples - so the conversions here are
+strictly more correct. Five regression tests; 214/214 tests.
