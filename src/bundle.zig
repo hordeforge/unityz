@@ -47,6 +47,24 @@ const streams = @import("streams.zig");
 const container = @import("container.zig");
 const lz4 = @import("lz4.zig");
 
+/// Vendored LZHAM decompressor (UnityFS block compression type 4). Returns 0
+/// on success; `dst_len` is in/out.
+extern fn lzham_unpack(src: [*]const u8, src_len: c_uint, dst: [*]u8, dst_len: *c_uint, dict_size_log2: c_uint) c_int;
+
+/// LZHAM dictionary size (log2) UnityFS blocks use. Not encoded in the
+/// stream; a 64 KB dictionary is LZHAM's common default for small blocks.
+const lzham_dict_size_log2: c_uint = 16;
+
+fn lzhamDecompress(allocator: std.mem.Allocator, raw: []const u8, uncompressed_size: u32) ParseError![]u8 {
+    const out = allocator.alloc(u8, uncompressed_size) catch return error.OutOfMemory;
+    errdefer allocator.free(out);
+    var dst_len: c_uint = @intCast(uncompressed_size);
+    if (lzham_unpack(raw.ptr, @intCast(raw.len), out.ptr, &dst_len, lzham_dict_size_log2) != 0)
+        return error.DecompressFailed;
+    if (dst_len != uncompressed_size) return error.DecompressFailed;
+    return out;
+}
+
 // The container magics in `container.zig` carry their NUL terminator;
 // `readStringToNull`/`writeStringToNull` handle it, so compare and write
 // the signature without it rather than repeating the literals here.
@@ -391,7 +409,7 @@ fn decompressRaw(
         },
         .lz4, .lz4hc => lz4.decompress(allocator, raw, uncompressed_size) catch return error.DecompressFailed,
         .lzma => lzmaDecompress(allocator, raw, uncompressed_size) catch return error.DecompressFailed,
-        .lzham => error.UnsupportedCompression,
+        .lzham => lzhamDecompress(allocator, raw, uncompressed_size) catch return error.DecompressFailed,
         else => error.UnsupportedCompression,
     };
 }
@@ -555,13 +573,14 @@ test "parse rejects truncated file" {
 test "parse rejects unsupported compression" {
     const a = std.testing.allocator;
     // build an uncompressed bundle, then lie about the header compression:
-    // the header info is stored raw but the flags claim LZHAM
+    // the header info is stored raw but the flags claim a type (5) that is
+    // beyond the known set (0 none, 1 lzma, 2 lz4, 3 lz4hc, 4 lzham).
     const bundle_bytes = try buildBundleFixture(a, .{
         .info_at_end = false,
         .compression = .none,
         .payload = "data",
         .payload_path = "CAB-x",
-        .header_flags_override = 0x04,
+        .header_flags_override = 0x05,
     });
     defer a.free(bundle_bytes);
     try std.testing.expectError(error.UnsupportedCompression, parse(a, bundle_bytes));
@@ -716,4 +735,25 @@ fn lz4CompressLiterals(a: std.mem.Allocator, data: []const u8) ![]u8 {
         pos += run;
     }
     return out.toOwnedSlice(a);
+}
+
+test "lzham decompresses a known UnityFS block" {
+    const a = std.testing.allocator;
+    // Compressed with the lzham compressor (dict size 16), the same library
+    // family as the vendored decompressor; a UnityFS block's LZHAM stream is
+    // a plain lzham-compressed byte run.
+    const compressed = [_]u8{
+        0xe0, 0x00, 0x03, 0x83, 0x80, 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x2c, 0x20, 0x4c, 0x5a, 0x48, 0x41,
+        0x4d, 0x20, 0x77, 0x6f, 0x72, 0x6c, 0x64, 0x21, 0x20, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
+        0x37, 0x38, 0x39, 0x20, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c,
+        0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0xc0, 0x02,
+        0x55, 0x13, 0x92,
+    };
+    const expected = "Hello, LZHAM world! 0123456789 abcdefghijklmnopqrstuvwxyz";
+    const out = try lzhamDecompress(a, &compressed, expected.len);
+    defer a.free(out);
+    try std.testing.expectEqualStrings(expected, out);
+
+    // A corrupt/truncated stream fails rather than faulting.
+    try std.testing.expectError(error.DecompressFailed, lzhamDecompress(a, compressed[0..10], expected.len));
 }
