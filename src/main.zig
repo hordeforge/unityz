@@ -28,14 +28,17 @@ const usage =
     \\                  name filter; --recursive for bundles/webfiles;
     \\                  --format png|tga|bmp|raw image output (default
     \\                  png); --outdir <dir> to write into, created if
-    \\                  missing)
+    \\                  missing; --trees <file.json> supplies the class
+    \\                  trees Mono builds omit, making typeless files
+    \\                  decodable)
     \\  edit <path>     Apply edits to a Unity asset file
     \\                 (bundles: finds and edits the embedded node, then
     \\                  rebuilds the bundle)
     \\  verify <path>   Verify every object round-trips byte-exactly
     \\                 (--class N / --path-id N to check a subset,
     \\                  N may be node:path-id; --json for a machine-readable
-    \\                  report)
+    \\                  report; --trees <file.json> for typeless Mono files,
+    \\                  as in extract)
     \\  stats <path>    Per-class sizes + duplicate-object detection
     \\                 (--json for a machine-readable summary;
     \\                  --class <id> to filter; --dups for only the
@@ -49,7 +52,9 @@ const usage =
     \\  show <path> <id> Print one object as JSON
     \\                 (--raw for a hex dump of its serialized bytes;
     \\                  <id> may be node:path-id to target a container entry;
-    \\                  a Shader object also carries a decoded "shaderBlob")
+    \\                  a Shader object also carries a decoded "shaderBlob";
+    \\                  --trees <file.json> for typeless Mono files,
+    \\                  as in extract)
     \\  shader <path> <id>  Print a Shader's decoded sub-program blob table
     \\                 (same as `show` on a Shader; <id> may be node:path-id)
     \\  diff <a> <b>     Compare two files' objects by content hash;
@@ -314,6 +319,202 @@ fn encodeImage(arena: std.mem.Allocator, format: ExtractFormat, w: u32, h: u32, 
     };
 }
 
+/// External typetree table (`--trees <file.json>`): the class trees Mono
+/// serialized files omit. Unity strips the trees from Mono builds, so this
+/// is what makes typeless `.assets` files decodable at all.
+///
+/// The JSON shape is the one `TypeTreeGeneratorAPI.get_nodes_as_json()`
+/// emits (plus three meta keys):
+///
+/// ```json
+/// {
+///   "__meta__": { "unity": "2021.3.45f2", ... },
+///   "__class_ids__": { "Texture2D": 28, "MonoBehaviour": 114, ... },
+///   "__monoscripts__": [ { "file": "globalgamemanagers.assets",
+///                          "path_id": 128, "class": "Item_Base" }, ... ],
+///   "Item_Base": [ { "m_Type": "Item_Base", "m_Name": "Base",
+///                    "m_Level": 0, "m_MetaFlag": 0 }, ... ],
+///   "Texture2D": [ ... ]
+/// }
+/// ```
+///
+/// Built-in classes resolve by class name (via `__class_ids__`);
+/// MonoBehaviours resolve by their script: the object's `m_Script` PPtr is
+/// matched against `__monoscripts__` (keyed "basename:path_id", where the
+/// basename is the file the script object lives in, e.g.
+/// `globalgamemanagers.assets`), yielding the script class name whose full
+/// tree (standard MonoBehaviour header + serialized .NET fields) decodes
+/// the object.
+const InjectedTrees = struct {
+    trees: std.StringHashMapUnmanaged(*const unityz.typetree.TypeTree) = .empty,
+    class_ids: std.AutoHashMapUnmanaged(i32, []const u8) = .empty,
+    monoscripts: std.StringHashMapUnmanaged([]const u8) = .empty,
+    mono_header: ?*const unityz.typetree.TypeTree = null,
+};
+
+/// Reads and parses a `--trees` file into an InjectedTrees table (arena
+/// owned). Prints a diagnostic and returns null when the file is unreadable
+/// or contains no class trees.
+fn parseInjectedTrees(arena: std.mem.Allocator, path: []const u8, stdout: *Io.Writer) !?*const InjectedTrees {
+    const io = io_global.io;
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch |err| {
+        try stdout.print("unityz: cannot read trees file: {s}\n", .{@errorName(err)});
+        return null;
+    };
+    const v = parseJsonLiteral(text) catch |err| {
+        try stdout.print("unityz: bad trees JSON: {s}\n", .{@errorName(err)});
+        return null;
+    };
+    const fields = switch (v) {
+        .obj => |f| f,
+        else => {
+            try stdout.print("unityz: trees file must be a JSON object\n", .{});
+            return null;
+        },
+    };
+    var out: InjectedTrees = .{};
+    for (fields) |f| {
+        if (std.mem.eql(u8, f.name, "__meta__")) continue;
+        if (std.mem.eql(u8, f.name, "__class_ids__")) {
+            const ids = switch (f.value) {
+                .obj => |ff| ff,
+                else => continue,
+            };
+            for (ids) |idf| {
+                const cid = idf.value.asInt() orelse continue;
+                if (cid >= 0 and cid <= std.math.maxInt(i32)) {
+                    try out.class_ids.put(arena, @intCast(cid), idf.name);
+                }
+            }
+        } else if (std.mem.eql(u8, f.name, "__monoscripts__")) {
+            const arr = switch (f.value) {
+                .array => |a| a,
+                else => continue,
+            };
+            for (arr) |e| {
+                const ef = switch (e) {
+                    .obj => |ff| ff,
+                    else => continue,
+                };
+                var file: []const u8 = "";
+                var pid: i64 = 0;
+                var cls: []const u8 = "";
+                for (ef) |ff| {
+                    if (std.mem.eql(u8, ff.name, "file")) {
+                        if (ff.value == .string) file = ff.value.string;
+                    } else if (std.mem.eql(u8, ff.name, "path_id")) {
+                        pid = ff.value.asInt() orelse 0;
+                    } else if (std.mem.eql(u8, ff.name, "class")) {
+                        if (ff.value == .string) cls = ff.value.string;
+                    }
+                }
+                if (file.len == 0 or cls.len == 0 or pid == 0) continue;
+                var key_buf: [1024]u8 = undefined;
+                const key = try arena.dupe(u8, try std.fmt.bufPrint(&key_buf, "{s}:{d}", .{ file, pid }));
+                try out.monoscripts.put(arena, key, cls);
+            }
+        } else {
+            // A class tree: flat wire-style node list.
+            const arr = switch (f.value) {
+                .array => |a| a,
+                else => continue,
+            };
+            const nodes = try arena.alloc(unityz.typetree.Node, arr.len);
+            for (arr, 0..) |e, i| {
+                var node = unityz.typetree.Node{ .level = 0 };
+                const ef = switch (e) {
+                    .obj => |ff| ff,
+                    else => continue,
+                };
+                for (ef) |ff| {
+                    if (std.mem.eql(u8, ff.name, "m_Type")) {
+                        if (ff.value == .string) node.type_name = ff.value.string;
+                    } else if (std.mem.eql(u8, ff.name, "m_Name")) {
+                        if (ff.value == .string) node.name = ff.value.string;
+                    } else if (std.mem.eql(u8, ff.name, "m_Level")) {
+                        const lv = ff.value.asInt() orelse continue;
+                        if (lv < 0 or lv > unityz.typetree.max_depth) continue;
+                        node.level = @intCast(lv);
+                    } else if (std.mem.eql(u8, ff.name, "m_MetaFlag")) {
+                        const mf = ff.value.asInt() orelse continue;
+                        if (mf >= std.math.minInt(i32) and mf <= std.math.maxInt(i32)) {
+                            node.meta_flags = @intCast(mf);
+                        }
+                    }
+                }
+                nodes[i] = node;
+            }
+            const tree = unityz.typetree.fromFlatNodes(arena, nodes) catch |err| {
+                try stdout.print("unityz: trees entry '{s}': {s}\n", .{ f.name, @errorName(err) });
+                return null;
+            };
+            const tp = try arena.create(unityz.typetree.TypeTree);
+            tp.* = tree;
+            try out.trees.put(arena, f.name, tp);
+            if (std.mem.eql(u8, f.name, "MonoBehaviour")) out.mono_header = tp;
+        }
+    }
+    if (out.trees.count() == 0) {
+        try stdout.print("unityz: trees file has no class trees\n", .{});
+        return null;
+    }
+    const tp = try arena.create(InjectedTrees);
+    tp.* = out;
+    return tp;
+}
+
+/// Resolves `path_id` against the injected mono-script table. The key is
+/// "basename:path_id", where the basename is the file the MonoScript object
+/// lives in: the external named by `m_Script.m_FileID` (via `sf.externals`),
+/// or the file being decoded when `m_FileID == 0`.
+fn injectedScriptClass(
+    inj: *const InjectedTrees,
+    sf: *const unityz.serialized.SerializedFile,
+    own_basename: []const u8,
+    ptr: unityz.value.PPtr,
+) ?[]const u8 {
+    if (ptr.path_id == 0) return null;
+    var fname: []const u8 = undefined;
+    if (ptr.file_id == 0) {
+        fname = own_basename;
+    } else if (ptr.file_id > 0) {
+        const idx: usize = @intCast(ptr.file_id - 1);
+        if (idx >= sf.externals.len) return null;
+        fname = basename(sf.externals[idx].path);
+    } else {
+        return null;
+    }
+    var key_buf: [1024]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "{s}:{d}", .{ fname, ptr.path_id }) catch return null;
+    return inj.monoscripts.get(key);
+}
+
+/// Picks the injected tree for a typeless file's object. MonoBehaviours
+/// (class 114) resolve their script's full tree via the `m_Script` header
+/// PPtr; every other class resolves by built-in class name. `data` is the
+/// object's raw bytes; the header-only decode uses the standard
+/// "MonoBehaviour" tree so alignment matches the real object reader.
+fn injectedTreeFor(
+    arena: std.mem.Allocator,
+    inj: *const InjectedTrees,
+    sf: *const unityz.serialized.SerializedFile,
+    own_basename: []const u8,
+    class_id: i32,
+    data: []const u8,
+) ?*const unityz.typetree.TypeTree {
+    if (class_id == 114) {
+        const hdr = inj.mono_header orelse return null;
+        var r = unityz.streams.Reader.init(data);
+        r.endian = sf.endian;
+        const v = unityz.object_reader.readObject(arena, &r, &hdr.roots[0]) catch return null;
+        const script = unityz.classes.pptrField(v, "m_Script") orelse return null;
+        const cls = injectedScriptClass(inj, sf, own_basename, script) orelse return null;
+        return inj.trees.get(cls);
+    }
+    const name = inj.class_ids.get(class_id) orelse return null;
+    return inj.trees.get(name);
+}
+
 fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     var raw = false;
     var recursive = false;
@@ -322,6 +523,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
     var path_filter: ?Selector = null;
     var name_filter: ?[]const u8 = null;
     var format: ExtractFormat = .png;
+    var trees_path: ?[]const u8 = null;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         const arg = rest[i];
@@ -355,6 +557,9 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 return;
             };
             i += 1;
+        } else if (std.mem.eql(u8, arg, "--trees") and i + 1 < rest.len) {
+            trees_path = rest[i + 1];
+            i += 1;
         } else {
             try stdout.print("unityz: unknown extract option '{s}'\n", .{arg});
             return;
@@ -379,6 +584,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             const arena = arena_state.allocator();
             var manifest: std.ArrayList(ManifestEntry) = .empty;
             var sidecars: std.ArrayList(Sidecar) = .empty;
+            const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
                 try stdout.print("unityz: {s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
                 return;
@@ -400,7 +606,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 try writeFileToCwd(base_name, e.data);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ base_name, e.data.len });
                 if (recursive and unityz.container.sniff(e.data).container == .serialized) {
-                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, stdout);
+                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, injected, stdout);
                 }
             }
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
@@ -411,6 +617,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             const arena = arena_state.allocator();
             var manifest: std.ArrayList(ManifestEntry) = .empty;
             var sidecars: std.ArrayList(Sidecar) = .empty;
+            const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
                 try stdout.print("unityz: {s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
                 return;
@@ -432,7 +639,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 try writeFileToCwd(base_name, n.data);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ base_name, n.data.len });
                 if (recursive and unityz.container.sniff(n.data).container == .serialized) {
-                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, stdout);
+                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, injected, stdout);
                 }
             }
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
@@ -448,7 +655,8 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             defer arena_state.deinit();
             const arena = arena_state.allocator();
             var manifest: std.ArrayList(ManifestEntry) = .empty;
-            try extractSerialized(arena, path, bytes, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, null, &.{}, &manifest, format, name_filter, stdout);
+            const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+            try extractSerialized(arena, path, bytes, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, null, &.{}, &manifest, format, name_filter, injected, stdout);
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
         },
         else => {
@@ -697,7 +905,7 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
     return try list.toOwnedSlice(arena);
 }
 
-fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, name_filter: ?[]const u8, stdout: *Io.Writer) !void {
+fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, name_filter: ?[]const u8, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("unityz: {s}: serialized file parse failed: {s}\n", .{ path, @errorName(err) });
         return;
@@ -729,8 +937,16 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
         }
         const type_index = o.type_index orelse continue;
         if (type_index >= sf.types.len) continue;
-        const tree = sf.types[type_index].type_tree;
-        if (tree.roots.len == 0) continue;
+        var tree = sf.types[type_index].type_tree;
+        if (tree.roots.len == 0) {
+            // Mono builds ship no embedded trees; decode from the injected
+            // table when one was supplied (`--trees`).
+            if (injected) |inj| {
+                if (injectedTreeFor(arena, inj, &sf, basename(path), o.class_id, data)) |it| {
+                    tree = it.*;
+                } else continue;
+            } else continue;
+        }
 
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
@@ -2482,6 +2698,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
     var class_filter: ?i32 = null;
     var path_filter: ?Selector = null;
     var json = false;
+    var trees_path: ?[]const u8 = null;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
@@ -2498,6 +2715,9 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
             i += 1;
         } else if (std.mem.eql(u8, rest[i], "--json")) {
             json = true;
+        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
+            trees_path = rest[i + 1];
+            i += 1;
         } else {
             try stdout.print("unityz: unknown verify option '{s}'\n", .{rest[i]});
             return;
@@ -2507,6 +2727,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
 
     var report: VerifyReport = .{};
     switch (unityz.container.sniff(bytes).container) {
@@ -2521,6 +2742,14 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                 verify_failed_flag = true;
                 return;
             };
+            // Non-serialized sibling nodes are the sidecar data streamed
+            // references point into (mirrors extract's resolution domain).
+            var sidecars: std.ArrayList(Sidecar) = .empty;
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) {
+                    try sidecars.append(arena, .{ .path = n.path, .data = n.data });
+                }
+            }
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 if (path_filter) |pf| {
@@ -2529,7 +2758,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                     }
                 }
                 if (!json) try stdout.print("node {s}:\n", .{n.path});
-                _ = try verifySerializedBytes(arena, n.data, n.path, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout);
+                _ = try verifySerializedBytesSidecars(arena, n.data, n.path, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars.items, basename(n.path), injected);
             }
         },
         .webfile => {
@@ -2543,6 +2772,12 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                 verify_failed_flag = true;
                 return;
             };
+            var sidecars: std.ArrayList(Sidecar) = .empty;
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) {
+                    try sidecars.append(arena, .{ .path = e.path, .data = e.data });
+                }
+            }
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
                 if (path_filter) |pf| {
@@ -2551,7 +2786,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                     }
                 }
                 if (!json) try stdout.print("entry {s}:\n", .{e.path});
-                _ = try verifySerializedBytes(arena, e.data, e.path, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout);
+                _ = try verifySerializedBytesSidecars(arena, e.data, e.path, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars.items, basename(e.path), injected);
             }
         },
         .serialized => {
@@ -2561,7 +2796,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                     return;
                 }
             }
-            _ = try verifySerializedBytes(arena, bytes, null, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout);
+            _ = try verifySerializedBytes(arena, bytes, null, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, basename(path), injected);
         },
         .archive => {
             if (json) {
@@ -2599,7 +2834,15 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
 /// Reads every object of a serialized file through its type tree, writes
 /// it back, and compares bytes. Text mode prints per-object failures and
 /// a per-node summary; JSON mode records failures in the report instead.
-fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, class_filter: ?i32, path_filter: ?i64, json: bool, report: *VerifyReport, stdout: *Io.Writer) !void {
+fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, class_filter: ?i32, path_filter: ?i64, json: bool, report: *VerifyReport, stdout: *Io.Writer, own_name: []const u8, injected: ?*const InjectedTrees) !void {
+    try verifySerializedBytesSidecars(arena, bytes, node, class_filter, path_filter, json, report, stdout, &.{}, own_name, injected);
+}
+
+/// `verifySerializedBytes` plus the sibling sidecar nodes (`sidecars`),
+/// so streamed references (`m_StreamData`/`m_Resource`) can be checked
+/// against the data they point into. Without sidecars (a bare serialized
+/// file) only path-less same-file references are checked.
+fn verifySerializedBytesSidecars(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, class_filter: ?i32, path_filter: ?i64, json: bool, report: *VerifyReport, stdout: *Io.Writer, sidecars: []const Sidecar, own_name: []const u8, injected: ?*const InjectedTrees) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         if (json) {
             try recordFailure(report, arena, node, -1, "serialized parse failed: {s}", .{@errorName(err)});
@@ -2630,9 +2873,15 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
         }
         const type_index = o.type_index orelse continue;
         if (type_index >= sf.types.len) continue;
-        const tree = sf.types[type_index].type_tree;
-        if (tree.roots.len == 0) continue;
         const data = sf.objectData(o) orelse continue;
+        var tree = sf.types[type_index].type_tree;
+        if (tree.roots.len == 0) {
+            if (injected) |inj| {
+                if (injectedTreeFor(obj_arena, inj, &sf, own_name, o.class_id, data)) |it| {
+                    tree = it.*;
+                } else continue;
+            } else continue;
+        }
         checked += 1;
         report.checked += 1;
 
@@ -2681,8 +2930,98 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
                 failed += 1;
             }
         }
+        // Streaming references must resolve: a path-less range must fit in
+        // this file, a named range must fit inside the sibling sidecar
+        // node it points into. An edit that breaks a reference (a cleared
+        // m_StreamData whose pixels are still streamed, a too-small sidecar
+        // patch) shows up here instead of failing at extract time.
+        // Failure messages go to the outer `arena`, like the other records:
+        // they are held by `report` and must outlive the per-object reset.
+        failed += try scanStreamingRefs(arena, v, node, o.path_id, bytes.len, sidecars, report, stdout, json);
     }
     if (!json) try stdout.print("  {d} object(s) checked, {d} failed\n", .{ checked, failed });
+}
+
+/// Walks a value tree and checks every streaming reference
+/// (`m_StreamData` in modern files, `m_Resource` in 5.x files) against
+/// the data it points into. Returns how many failed.
+fn scanStreamingRefs(arena: std.mem.Allocator, v: unityz.value.Value, node: ?[]const u8, path_id: i64, file_len: usize, sidecars: []const Sidecar, report: *VerifyReport, stdout: *Io.Writer, json: bool) !usize {
+    var failures: usize = 0;
+    switch (v) {
+        .obj => |fields| {
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "m_StreamData") or std.mem.eql(u8, f.name, "m_Resource")) {
+                    if (try checkStreamRef(arena, f.value, node, path_id, file_len, sidecars, report, stdout, json)) failures += 1;
+                } else {
+                    failures += try scanStreamingRefs(arena, f.value, node, path_id, file_len, sidecars, report, stdout, json);
+                }
+            }
+        },
+        .array => |items| {
+            for (items) |item| failures += try scanStreamingRefs(arena, item, node, path_id, file_len, sidecars, report, stdout, json);
+        },
+        else => {},
+    }
+    return failures;
+}
+
+/// Checks one StreamingInfo value against the data it references. Returns
+/// true when the reference is broken; false when it is fine or not a
+/// streaming reference (no size, or a zero size: embedded or cleared).
+/// Mirrors extract's resolution rule: the first sidecar whose basename
+/// matches decides, and the range must fit inside it.
+fn checkStreamRef(arena: std.mem.Allocator, info: unityz.value.Value, node: ?[]const u8, path_id: i64, file_len: usize, sidecars: []const Sidecar, report: *VerifyReport, stdout: *Io.Writer, json: bool) !bool {
+    const fields = switch (info) {
+        .obj => |f| f,
+        else => return false,
+    };
+    var offset: u64 = 0;
+    var size: u64 = 0;
+    var path: []const u8 = "";
+    var have_size = false;
+    for (fields) |f| {
+        if (std.mem.eql(u8, f.name, "offset") or std.mem.eql(u8, f.name, "m_Offset")) {
+            offset = std.math.cast(u64, f.value.asInt() orelse continue) orelse continue;
+        } else if (std.mem.eql(u8, f.name, "size") or std.mem.eql(u8, f.name, "m_Size")) {
+            size = std.math.cast(u64, f.value.asInt() orelse continue) orelse continue;
+            have_size = true;
+        } else if (std.mem.eql(u8, f.name, "path") or std.mem.eql(u8, f.name, "m_Source")) {
+            path = switch (f.value) {
+                .string => |s| s,
+                else => continue,
+            };
+        }
+    }
+    if (!have_size or size == 0) return false;
+    if (path.len == 0) {
+        if (offset + size <= file_len) return false;
+        if (json) {
+            try recordFailure(report, arena, node, path_id, "streamed range {d}+{d} exceeds file length {d}", .{ offset, size, file_len });
+        } else {
+            try stdout.print("  object {d}: streamed range {d}+{d} exceeds file length {d}\n", .{ path_id, offset, size, file_len });
+            report.failed += 1;
+        }
+        return true;
+    }
+    const base = basename(path);
+    for (sidecars) |sc| {
+        if (!std.mem.eql(u8, basename(sc.path), base)) continue;
+        if (offset + size <= sc.data.len) return false;
+        if (json) {
+            try recordFailure(report, arena, node, path_id, "streamed range {d}+{d} exceeds sidecar {s} ({d} bytes)", .{ offset, size, sc.path, sc.data.len });
+        } else {
+            try stdout.print("  object {d}: streamed range {d}+{d} exceeds sidecar {s} ({d} bytes)\n", .{ path_id, offset, size, sc.path, sc.data.len });
+            report.failed += 1;
+        }
+        return true;
+    }
+    if (json) {
+        try recordFailure(report, arena, node, path_id, "no sidecar node named {s}", .{base});
+    } else {
+        try stdout.print("  object {d}: no sidecar node named {s}\n", .{ path_id, base });
+        report.failed += 1;
+    }
+    return true;
 }
 
 /// One Shader's skinning summary, as reported by `skin <path>`.
@@ -4294,11 +4633,16 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         return;
     };
     var raw = false;
-    for (rest[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--raw")) {
+    var trees_path: ?[]const u8 = null;
+    var i: usize = 1;
+    while (i < rest.len) : (i += 1) {
+        if (std.mem.eql(u8, rest[i], "--raw")) {
             raw = true;
+        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
+            trees_path = rest[i + 1];
+            i += 1;
         } else {
-            try stdout.print("unityz: unknown show option '{s}'\n", .{arg});
+            try stdout.print("unityz: unknown show option '{s}'\n", .{rest[i]});
             return;
         }
     }
@@ -4306,6 +4650,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
 
     var found = false;
     switch (unityz.container.sniff(bytes).container) {
@@ -4319,7 +4664,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                 if (sel.node) |sn| {
                     if (!std.mem.eql(u8, n.path, sn)) continue;
                 }
-                if (try showSerializedBytes(arena, n.data, sel.path_id, raw, shader_only, stdout)) found = true;
+                if (try showSerializedBytes(arena, n.data, sel.path_id, raw, shader_only, stdout, basename(n.path), injected)) found = true;
             }
         },
         .webfile => {
@@ -4332,7 +4677,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                 if (sel.node) |sn| {
                     if (!std.mem.eql(u8, e.path, sn)) continue;
                 }
-                if (try showSerializedBytes(arena, e.data, sel.path_id, raw, shader_only, stdout)) found = true;
+                if (try showSerializedBytes(arena, e.data, sel.path_id, raw, shader_only, stdout, basename(e.path), injected)) found = true;
             }
         },
         .serialized => {
@@ -4340,7 +4685,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                 try stdout.print("unityz: node selector not valid for a serialized file\n", .{});
                 return;
             }
-            found = try showSerializedBytes(arena, bytes, sel.path_id, raw, shader_only, stdout);
+            found = try showSerializedBytes(arena, bytes, sel.path_id, raw, shader_only, stdout, basename(path), injected);
         },
         else => {
             try stdout.print("{s}: show requires a serialized file, bundle, or webfile\n", .{path});
@@ -4353,7 +4698,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
 /// with `raw`; true when found. A Shader (class 48) object additionally
 /// carries a decoded `shaderBlob` field describing its sub-program records;
 /// with `shader_only`, non-Shader objects are reported as not found.
-fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, raw: bool, shader_only: bool, stdout: *Io.Writer) !bool {
+fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, raw: bool, shader_only: bool, stdout: *Io.Writer, own_name: []const u8, injected: ?*const InjectedTrees) !bool {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
         return false;
@@ -4369,9 +4714,15 @@ fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64
         if (shader_only and o.class_id != 48) return false;
         const type_index = o.type_index orelse return false;
         if (type_index >= sf.types.len) return false;
-        const tree = sf.types[type_index].type_tree;
-        if (tree.roots.len == 0) return false;
         const data = sf.objectData(o) orelse return false;
+        var tree = sf.types[type_index].type_tree;
+        if (tree.roots.len == 0) {
+            if (injected) |inj| {
+                if (injectedTreeFor(arena, inj, &sf, own_name, o.class_id, data)) |it| {
+                    tree = it.*;
+                } else return false;
+            } else return false;
+        }
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
         const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch |err| {
@@ -5222,7 +5573,7 @@ fn verifyEditResult(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Wri
             };
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                try verifySerializedBytes(arena, n.data, null, null, null, true, &report, stdout);
+                try verifySerializedBytes(arena, n.data, null, null, null, true, &report, stdout, "", null);
             }
         },
         .webfile => {
@@ -5232,10 +5583,10 @@ fn verifyEditResult(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Wri
             };
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try verifySerializedBytes(arena, e.data, null, null, null, true, &report, stdout);
+                try verifySerializedBytes(arena, e.data, null, null, null, true, &report, stdout, "", null);
             }
         },
-        .serialized => try verifySerializedBytes(arena, bytes, null, null, null, true, &report, stdout),
+        .serialized => try verifySerializedBytes(arena, bytes, null, null, null, true, &report, stdout, "", null),
         else => {
             try stdout.print("verify failed: result is not a recognized asset file\n", .{});
             return false;
@@ -6304,4 +6655,78 @@ test "applyNodeBytes replaces a raw node range from base64" {
     try std.testing.expect(isRawNodeKey("CAB-abc123.resource"));
     try std.testing.expect(!isRawNodeKey("44"));
     try std.testing.expect(!isRawNodeKey("CAB-abc:44"));
+}
+
+test "checkStreamRef flags broken streaming references" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const sidecars = [_]Sidecar{
+        .{ .path = "CAB-abc.resS", .data = &[_]u8{0} ** 100 },
+    };
+    const mk_info = struct {
+        fn modern(al: std.mem.Allocator, offset: i64, size: i64, path: []const u8) !unityz.value.Value {
+            const fields = try al.alloc(unityz.value.Field, 3);
+            fields[0] = .{ .name = "offset", .value = .{ .int = offset } };
+            fields[1] = .{ .name = "size", .value = .{ .int = size } };
+            fields[2] = .{ .name = "path", .value = .{ .string = path } };
+            return .{ .obj = fields };
+        }
+        fn legacy(al: std.mem.Allocator, offset: i64, size: i64, source: []const u8) !unityz.value.Value {
+            const fields = try al.alloc(unityz.value.Field, 3);
+            fields[0] = .{ .name = "m_Offset", .value = .{ .int = offset } };
+            fields[1] = .{ .name = "m_Size", .value = .{ .int = size } };
+            fields[2] = .{ .name = "m_Source", .value = .{ .string = source } };
+            return .{ .obj = fields };
+        }
+    };
+
+    const run = struct {
+        fn go(arena: std.mem.Allocator, info: unityz.value.Value, sc: []const Sidecar) !VerifyReport {
+            var report: VerifyReport = .{};
+            _ = try checkStreamRef(arena, info, "CAB-abc", 7, 1000, sc, &report, undefined, true);
+            return report;
+        }
+    }.go;
+
+    // A reference that fits inside its sidecar is fine (both shapes).
+    var ok = try run(a, try mk_info.modern(a, 10, 90, "archive:/CAB-abc/CAB-abc.resS"), &sidecars);
+    try std.testing.expectEqual(@as(usize, 0), ok.failed);
+    ok = try run(a, try mk_info.legacy(a, 10, 90, "archive:/CAB-abc/CAB-abc.resS"), &sidecars);
+    try std.testing.expectEqual(@as(usize, 0), ok.failed);
+    // zero size: embedded or cleared, not streamed
+    ok = try run(a, try mk_info.modern(a, 0, 0, ""), &sidecars);
+    try std.testing.expectEqual(@as(usize, 0), ok.failed);
+
+    // Out of range and missing sidecar are flagged with the reason.
+    var bad = try run(a, try mk_info.modern(a, 0, 999999, "archive:/CAB-abc/CAB-abc.resS"), &sidecars);
+    try std.testing.expectEqual(@as(usize, 1), bad.failed);
+    try std.testing.expect(std.mem.indexOf(u8, bad.failures.items[0].message, "exceeds sidecar") != null);
+    bad = try run(a, try mk_info.legacy(a, 0, 10, "archive:/CAB-abc/CAB-abc.nope.resS"), &sidecars);
+    try std.testing.expectEqual(@as(usize, 1), bad.failed);
+    try std.testing.expect(std.mem.indexOf(u8, bad.failures.items[0].message, "no sidecar node") != null);
+    // path-less references must fit in the file itself
+    bad = try run(a, try mk_info.modern(a, 990, 20, ""), &sidecars);
+    try std.testing.expectEqual(@as(usize, 1), bad.failed);
+    try std.testing.expect(std.mem.indexOf(u8, bad.failures.items[0].message, "exceeds file length") != null);
+    // a non-object is not a streaming reference
+    ok = try run(a, .{ .int = 5 }, &sidecars);
+    try std.testing.expectEqual(@as(usize, 0), ok.failed);
+
+    // The recursive scan finds references nested in arrays/objects. The
+    // tree is arena-built: value trees with runtime values cannot use
+    // stack-temporary array literals (they dangle once the expression
+    // ends, and the pointer escapes the function that built them).
+    const clip_fields = try a.alloc(unityz.value.Field, 1);
+    clip_fields[0] = .{ .name = "m_Resource", .value = try mk_info.legacy(a, 0, 999999, "archive:/CAB-abc/CAB-abc.resS") };
+    const clips = try a.alloc(unityz.value.Value, 1);
+    clips[0] = .{ .obj = clip_fields };
+    const root_fields = try a.alloc(unityz.value.Field, 1);
+    root_fields[0] = .{ .name = "m_Clips", .value = .{ .array = clips } };
+    const tree = unityz.value.Value{ .obj = root_fields };
+    var scan_report: VerifyReport = .{};
+    const fails = try scanStreamingRefs(a, tree, "CAB-abc", 42, 1000, &sidecars, &scan_report, undefined, true);
+    try std.testing.expectEqual(@as(usize, 1), fails);
+    try std.testing.expectEqual(@as(usize, 1), scan_report.failed);
 }
