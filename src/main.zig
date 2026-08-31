@@ -672,13 +672,16 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
     var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
     const w = &aw.writer;
     try w.print("{{\"version\":", .{});
-    try w.print("{d},\"mode\":{d},\"samples\":[", .{ bank.version, bank.mode });
+    try w.print("{d},\"mode\":{d},\"codec\":\"{s}\",\"samples\":[", .{ bank.version, bank.mode, unityz.audio.modeName(bank.mode) });
     for (bank.samples, 0..) |s, i| {
         if (i != 0) try w.writeByte(',');
         const dur_ms: u64 = if (s.frequency != 0) @as(u64, s.sample_count) * 1000 / s.frequency else 0;
         try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d},\"durationMs\":{d}", .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count, dur_ms });
         if (s.loop_start) |ls| {
             try w.print(",\"loopStart\":{d},\"loopEnd\":{d}", .{ ls, s.loop_end orelse 0 });
+        }
+        if (s.vorbis_crc) |crc| {
+            try w.print(",\"setupCrc\":{d}", .{crc});
         }
         try w.writeByte('}');
     }
@@ -5815,7 +5818,14 @@ fn isBone(bones: []const i64, path_id: i64) bool {
     return false;
 }
 
+/// Traversal depth limit for `printHierarchyNode`. Children lists are
+/// file-supplied and may be cyclic or nest beyond any scene graph, so the
+/// recursion must terminate: the bound stops it the way `max_json_depth`
+/// and `typetree.max_depth` bound their parsers.
+const max_hierarchy_depth: usize = 512;
+
 fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, bones: []const i64, path_id: i64, depth: usize, json: bool, stdout: *Io.Writer) !void {
+    if (depth > max_hierarchy_depth) return error.TooDeep;
     const tn = findNode(nodes, path_id) orelse return;
     const go = findGo(gos, tn.go);
     const bone = isBone(bones, path_id);
