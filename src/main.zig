@@ -1595,44 +1595,57 @@ fn writeMeshObj(
     // most recent allocation, invalidating it). Dupe into the arena so the
     // result outlives the function.
     var w: unityz.streams.Writer = .init(arena);
-    try w.print("o {s}\n", .{std.mem.trimEnd(u8, mesh.name, "\x00")});
+    // UnityPy's OBJ layout: `g` group names (not `o`), per-submesh group
+    // lines, and floats with 9 significant digits.
+    const name = std.mem.trimEnd(u8, mesh.name, "\x00");
+    try w.print("g {s}\n", .{name});
     for (0..vcount) |i| {
         const x = meshF32(mesh, 0, i, 0, sf.endian) orelse return &.{};
         const y = meshF32(mesh, 0, i, 1, sf.endian) orelse return &.{};
         const z = meshF32(mesh, 0, i, 2, sf.endian) orelse return &.{};
         // Unity is left-handed; OBJ convention is right-handed, so mirror X
         // (UnityPy's exporter does the same, negating vertices and normals).
-        try w.print("v {d} {d} {d}\n", .{ -x, y, z });
-    }
-    if (nrm) |n| {
-        if (n.format == 0 and n.dimension >= 3 and meshF32(mesh, 1, 0, 0, sf.endian) != null) {
-            for (0..vcount) |i| {
-                try w.print("vn {d} {d} {d}\n", .{
-                    -(meshF32(mesh, 1, i, 0, sf.endian) orelse 0),
-                    meshF32(mesh, 1, i, 1, sf.endian) orelse 0,
-                    meshF32(mesh, 1, i, 2, sf.endian) orelse 0,
-                });
-            }
-        }
+        try w.print("v ", .{});
+        try writeObjFloat(&w, -@as(f64, x));
+        try w.print(" ", .{});
+        try writeObjFloat(&w, @as(f64, y));
+        try w.print(" ", .{});
+        try writeObjFloat(&w, @as(f64, z));
+        try w.print("\n", .{});
     }
     if (uv) |t| {
         if (t.format == 0 and t.dimension >= 2 and meshF32(mesh, uv_index, 0, 0, sf.endian) != null) {
             for (0..vcount) |i| {
-                try w.print("vt {d} {d}\n", .{
-                    meshF32(mesh, uv_index, i, 0, sf.endian) orelse 0,
-                    meshF32(mesh, uv_index, i, 1, sf.endian) orelse 0,
-                });
+                try w.print("vt ", .{});
+                try writeObjFloat(&w, @as(f64, meshF32(mesh, uv_index, i, 0, sf.endian) orelse 0));
+                try w.print(" ", .{});
+                try writeObjFloat(&w, @as(f64, meshF32(mesh, uv_index, i, 1, sf.endian) orelse 0));
+                try w.print("\n", .{});
+            }
+        }
+    }
+    if (nrm) |n| {
+        if (n.format == 0 and n.dimension >= 3 and meshF32(mesh, 1, 0, 0, sf.endian) != null) {
+            for (0..vcount) |i| {
+                try w.print("vn ", .{});
+                try writeObjFloat(&w, -@as(f64, meshF32(mesh, 1, i, 0, sf.endian) orelse 0));
+                try w.print(" ", .{});
+                try writeObjFloat(&w, @as(f64, meshF32(mesh, 1, i, 1, sf.endian) orelse 0));
+                try w.print(" ", .{});
+                try writeObjFloat(&w, @as(f64, meshF32(mesh, 1, i, 2, sf.endian) orelse 0));
+                try w.print("\n", .{});
             }
         }
     }
 
-    // faces, grouped by submesh (triangles and quads)
+    // faces, grouped by submesh (triangles and quads); each submesh gets
+    // its own `g <name>_<N>` group line, matching UnityPy
     const has_n = nrm != null and nrm.?.format == 0 and nrm.?.dimension >= 3;
     const has_t = uv != null and uv.?.format == 0 and uv.?.dimension >= 2;
     var index_cursor: usize = 0;
     if (unityz.classes.fieldOf(v, "m_SubMeshes")) |subs| {
         if (subs == .array) {
-            for (subs.array) |sub| {
+            for (subs.array, 0..) |sub, si| {
                 const topology = unityz.classes.intField(sub, "topology") orelse 0;
 
                 const index_count = unityz.classes.intField(sub, "indexCount") orelse 0;
@@ -1652,6 +1665,8 @@ fn writeMeshObj(
                     else => continue,
                 };
                 const faces = (end - start) / per_face;
+                if (faces == 0) continue;
+                try w.print("g {s}_{d}\n", .{ name, si });
                 for (0..faces) |f| {
                     const face_start = start + f * per_face;
                     try writeFace(&w, mesh.index_buffer, idx_bytes, face_start, per_face, has_n, has_t, sf.endian);
@@ -1667,6 +1682,31 @@ fn writeMeshObj(
         }
     }
     return arena.dupe(u8, w.getWritten());
+}
+
+/// Prints `v` with 9 significant digits, normal form, trailing zeros
+/// trimmed - C's `%.9g`, the exact format UnityPy's OBJ exporter uses, so
+/// mesh exports match theirs byte for byte. Values outside the normal-form
+/// range (|v| >= 1e9 or < 1e-4) would use exponent form in C; mesh
+/// coordinates and UVs never reach those, and they still print as a valid
+/// decimal here.
+fn writeObjFloat(w: *unityz.streams.Writer, v: f64) !void {
+    if (v == 0) {
+        // UnityPy prints the negated zero as "-0"; match it.
+        const sign: []const u8 = if (std.math.signbit(v)) "-0" else "0";
+        return w.print("{s}", .{sign});
+    }
+    const e = @floor(@log10(@abs(v)));
+    const scale = std.math.pow(f64, 10.0, 8 - e); // 10^(8-e)
+    const scaled = v * scale;
+    var rounded = @round(scaled); // half away from zero
+    // Python's %.9g rounds half-to-even (f32-derived values are dyadic, so
+    // the 9-digit boundary lands on exact midpoints); Zig's @round does
+    // half-away. Pull ties toward the even result.
+    if (@abs(scaled - rounded) == 0.5 and @mod(@abs(rounded), 2.0) == 1.0) {
+        rounded = if (scaled < 0) rounded + 1.0 else rounded - 1.0;
+    }
+    try w.print("{d}", .{rounded / scale});
 }
 
 /// Writes one face as an `f` line: `per_face` vertex references starting at
@@ -5785,6 +5825,32 @@ test "parseCommand recognizes known subcommands" {
     try std.testing.expectEqual(Command.hash, parseCommand("hash"));
     try std.testing.expect(parseCommand("bogus") == null);
     try std.testing.expect(parseCommand("--version") == null);
+}
+
+test "writeObjFloat matches Python's %.9g" {
+    // The golden mesh UVs from UnityPy's test assets: f32-derived values
+    // whose 9-significant-digit rounding lands on dyadic midpoints, so the
+    // half-even tie rule decides the last digit.
+    const cases = [_]struct { v: f64, want: []const u8 }{
+        .{ .v = 0.6895492076873779, .want = "0.689549208" },
+        .{ .v = 0.00048828125, .want = "0.00048828125" },
+        .{ .v = 0.04736328125, .want = "0.0473632812" }, // half-even tie -> 2, not 3
+        .{ .v = -1152.0, .want = "-1152" },
+        .{ .v = 2047.99999999, .want = "2048" },
+        .{ .v = 1.5, .want = "1.5" },
+        .{ .v = 0.0, .want = "0" },
+        .{ .v = -0.0, .want = "-0" },
+        .{ .v = 0.4999999999, .want = "0.5" },
+        .{ .v = 0.9999999995, .want = "1" },
+    };
+    for (cases) |c| {
+        var buf: [64]u8 = undefined;
+        var w: unityz.streams.Writer = .init(std.testing.allocator);
+        defer w.deinit();
+        try writeObjFloat(&w, c.v);
+        const got = try std.fmt.bufPrint(&buf, "{s}", .{w.getWritten()});
+        try std.testing.expectEqualStrings(c.want, got);
+    }
 }
 
 test "parseFieldPath splits dotted and indexed paths" {
