@@ -120,8 +120,9 @@ ATC (RGB4/RGBA8), EAC (R/RG, signed and unsigned), ETC1/ETC2/ETC2-RGBA8,
 ASTC, ASTC HDR (66-71), plus the crunch-crunched formats (ETC_RGB4,
 ETC2_RGBA8, DXT1, DXT5) through a vendored ZLIB-licensed unitycrunch
 decompressor (hardened against corrupt streams). The 3DS ETC variants
-(TextureFormat 60/61) and ETC2_RGBA1 are not decoded; `decode` reports
-them as `error.UnsupportedFormat`.
+(TextureFormat 60/61) decode as ETC1, matching UnityPy (which routes both
+to its ETC1 decoder), and ETC2_RGBA1 (46) decodes its punch-through alpha,
+matching UnityPy's texture2ddecoder pixel-for-pixel.
 
 ETC2, the BC family, and the crunch variants decode pixel-identical to
 UnityPy (ASTC decodes within ±1 per channel on a small fraction of
@@ -158,6 +159,12 @@ normals, UVs, faces), Materials and Shaders export as readable text;
 additionally, each Shader's compiled sub-program blob is decoded and
 reported as skinning or not (its vertex stage applies per-vertex bone
 matrices), read off the bind-channel block and parameter-blob bindings;
+`show`/`shader <path> <node:path-id>` on a Shader decodes the full
+sub-program blob: the 12-byte record table, per-record parameter blobs
+(constant buffers with member offsets, texture/cbuffer/UAV/sampler
+entries) and code blobs (the 38-byte program-data header, the DXBC
+chunk set, ISGN input signature, RDEF member offsets, and the trailing
+ParserBindChannels block with its (source,target) channel pairs);
 AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
 MP3) with an FSB5 metadata sidecar (sample rate, channels, loop points,
 format - UnityPy never surfaces these), and objects reserialize
@@ -202,9 +209,12 @@ interpolation.
 - `src/classes.zig` - typed views for the common classes
 - `src/fsb5.zig` - FSB5 audio bank metadata parser (sample rate, channels,
   loop points, format)
-- `src/shader.zig` - Shader (class 48) sub-program blob parsing; reports
-  whether a shader's vertex stage skins (BLENDINDICES/BLENDWEIGHT inputs +
-  a bone-matrix binding)
+- `src/shader.zig` - Shader (class 48) sub-program blob decoding: the LZ4
+  per-platform blobs, record table, parameter blobs (constant buffers with
+  member offsets, texture/cbuffer/UAV/sampler entries), code blobs (38-byte
+  program-data header, DXBC chunk analysis incl. ISGN/RDEF, ParserBindChannels),
+  plus skinning detection (BLENDINDICES/BLENDWEIGHT inputs + a bone-matrix
+  binding)
 - `src/texture.zig` - texture format decoding to RGBA8 (uncompressed
   RGB/RGBA layouts, half/float/16-bit/signed raw formats, DXT1/3/5,
   BC4/5, BC6H, BC7, PVRTC, ATC, EAC, ETC1/ETC2/ETC2-RGBA8, ASTC,
