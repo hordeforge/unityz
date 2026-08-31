@@ -27,6 +27,10 @@ Nothing in flight.
   route through the same vendored unitycrunch machinery as the ETC crunch
   formats, worth fixing a latent 565→888 truncation so the whole DXT
   family matches UnityPy byte-exact.
+- Shader sub-program blobs parse: the per-platform LZ4 blob decodes to its
+  parameter and code records, and a shader's vertex stage is reported as
+  skinning or not (`info --json`, plus a `skin` command that exits non-zero
+  when a SkinnedMeshRenderer references a shader that does not skin).
 - Sprite export covers packed sprites: separate alpha textures merge in
   (RGB from the main texture, alpha from the alpha texture's R channel),
   packing rotation is applied, and tight/polygon sprites render through
