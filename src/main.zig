@@ -76,7 +76,9 @@ const usage =
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
     \\  <path_id> may be node:path-id to target a specific container entry
     \\  (add --out <file> to write elsewhere instead of in place;
-    \\   --verify round-trip-checks the result and refuses to write on failure)
+    \\   --verify round-trip-checks the result and refuses to write on failure;
+    \\   a base64 string value patches a byte-array field, e.g.
+    \\   edit f.unity3d CAB-..:44 m_IndexBuffer '"AwD/AA=="' replaces raw bytes)
     \\
     \\Patch example: {"2": {"m_Name": "renamed"}, "7": {"m_LocalPosition.y": 1.25}}
     \\  (edit --patch <file> applies every entry in one atomic rewrite;
@@ -4965,7 +4967,7 @@ fn editSerializedObject(arena: std.mem.Allocator, bytes: []const u8, path_id: i6
     while (pair + 1 < pairs.len) : (pair += 2) {
         const new_value = try parseJsonLiteral(pairs[pair + 1]);
         const segs = try parseFieldPath(pairs[pair]);
-        edited = setFieldPath(edited, segs, 0, new_value) catch |err| {
+        edited = setFieldPath(arena, edited, segs, 0, new_value) catch |err| {
             std.heap.page_allocator.free(segs);
             return err;
         };
@@ -5210,7 +5212,7 @@ fn editSerializedPatches(arena: std.mem.Allocator, bytes: []const u8, entries: [
         var edited = try unityz.object_reader.readObject(arena, &r, root);
         for (fields) |f| {
             const segs = try parseFieldPath(f.name);
-            edited = setFieldPath(edited, segs, 0, f.value) catch |err| {
+            edited = setFieldPath(arena, edited, segs, 0, f.value) catch |err| {
                 std.heap.page_allocator.free(segs);
                 return err;
             };
@@ -5328,7 +5330,7 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             try stdout.print("unityz: bad field path '{s}'\n", .{field});
             return;
         };
-        edited = setFieldPath(edited, segs, 0, new_value) catch {
+        edited = setFieldPath(arena, edited, segs, 0, new_value) catch {
             std.heap.page_allocator.free(segs);
             try stdout.print("unityz: object {d} has no field '{s}'\n", .{ sel.path_id, field });
             return;
@@ -5431,8 +5433,10 @@ fn replaceArrayIndex(arr: []const unityz.value.Value, index: usize, new_value: u
 }
 
 /// Walks the edit path, rebuilding the tree copy-on-write, and replaces the
-/// leaf. `error.BadPath` means a segment did not exist.
-fn setFieldPath(v: unityz.value.Value, segs: []const PathSeg, i: usize, new_value: unityz.value.Value) !unityz.value.Value {
+/// leaf. `error.BadPath` means a segment did not exist. A base64 string
+/// literal on a byte-array leaf is decoded, so raw binary fields (mesh
+/// index/vertex buffers, image data, audio payloads) are patchable.
+fn setFieldPath(allocator: std.mem.Allocator, v: unityz.value.Value, segs: []const PathSeg, i: usize, new_value: unityz.value.Value) !unityz.value.Value {
     const seg = segs[i];
     const is_last = i + 1 == segs.len;
     if (seg.name.len != 0) {
@@ -5461,7 +5465,7 @@ fn setFieldPath(v: unityz.value.Value, segs: []const PathSeg, i: usize, new_valu
             }
             break :blk null;
         } orelse return error.BadPath;
-        const new_child = if (is_last) new_value else try setFieldPath(child, segs, i + 1, new_value);
+        const new_child = if (is_last) try asTargetValue(allocator, child, new_value) else try setFieldPath(allocator, child, segs, i + 1, new_value);
         return replaceObjField(fields, seg.name, new_child, is_last);
     }
     const arr = switch (v) {
@@ -5470,8 +5474,22 @@ fn setFieldPath(v: unityz.value.Value, segs: []const PathSeg, i: usize, new_valu
     };
     const idx = seg.index orelse return error.BadPath;
     if (idx >= arr.len) return error.BadPath;
-    const new_child = if (is_last) new_value else try setFieldPath(arr[idx], segs, i + 1, new_value);
+    const new_child = if (is_last) try asTargetValue(allocator, arr[idx], new_value) else try setFieldPath(allocator, arr[idx], segs, i + 1, new_value);
     return replaceArrayIndex(arr, idx, new_child);
+}
+
+/// Converts `new_value` to the shape of the target `old`: a base64 string
+/// literal becomes bytes when the field is a byte array.
+fn asTargetValue(allocator: std.mem.Allocator, old: unityz.value.Value, new_value: unityz.value.Value) !unityz.value.Value {
+    if (old == .bytes and new_value == .string) {
+        const s = new_value.string;
+        const size = try std.base64.standard.Decoder.calcSizeForSlice(s);
+        const buf = try allocator.alloc(u8, size);
+        errdefer allocator.free(buf);
+        try std.base64.standard.Decoder.decode(buf, s);
+        return .{ .bytes = buf };
+    }
+    return new_value;
 }
 
 /// Nesting limit for `parseJsonLiteral`. The parser recurses once per
@@ -5985,21 +6003,31 @@ test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments"
     } };
 
     const set = struct {
-        fn apply(v: unityz.value.Value, path: []const u8, new_value: unityz.value.Value) !unityz.value.Value {
-            return setFieldPath(v, try parseFieldPath(path), 0, new_value);
+        fn apply(a: std.mem.Allocator, v: unityz.value.Value, path: []const u8, new_value: unityz.value.Value) !unityz.value.Value {
+            return setFieldPath(a, v, try parseFieldPath(path), 0, new_value);
         }
     }.apply;
 
     // A nested scalar is replaced and the siblings survive untouched.
-    const nested = try set(original, "m_Sub.count", .{ .int = 7 });
+    const nested = try set(std.testing.allocator, original, "m_Sub.count", .{ .int = 7 });
     try std.testing.expectEqual(@as(i64, 7), testFieldOf(testFieldOf(nested, "m_Sub").?, "count").?.int);
     try std.testing.expectEqualStrings("Old", testFieldOf(nested, "m_Name").?.string);
     try std.testing.expectEqual(@as(usize, 4), nested.obj.len);
     // copy-on-write: the source tree is not mutated
     try std.testing.expectEqual(@as(i64, 1), testFieldOf(testFieldOf(original, "m_Sub").?, "count").?.int);
 
+    // A base64 string literal patches a byte-array field (raw binary data).
+    const with_bytes = unityz.value.Value{ .obj = &[_]unityz.value.Field{
+        .{ .name = "m_IndexBuffer", .value = .{ .bytes = &[_]u8{ 0x02, 0x00, 0x01, 0x00 } } },
+    } };
+    const patched = try set(std.testing.allocator, with_bytes, "m_IndexBuffer", .{ .string = "AwD/AA==" });
+    try std.testing.expectEqualSlices(u8, &.{ 0x03, 0x00, 0xff, 0x00 }, patched.obj[0].value.bytes);
+    std.testing.allocator.free(patched.obj[0].value.bytes);
+    // a bad base64 literal is rejected
+    try std.testing.expectError(error.InvalidCharacter, set(std.testing.allocator, with_bytes, "m_IndexBuffer", .{ .string = "!!!not-base64!!!" }));
+
     // An indexed segment replaces one element and preserves order.
-    const indexed = try set(original, "m_Values[1]", .{ .int = 99 });
+    const indexed = try set(std.testing.allocator, original, "m_Values[1]", .{ .int = 99 });
     const arr = testFieldOf(indexed, "m_Values").?.array;
     try std.testing.expectEqual(@as(usize, 3), arr.len);
     try std.testing.expectEqual(@as(i64, 10), arr[0].int);
@@ -6008,22 +6036,22 @@ test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments"
 
     // PPtrs are stored compactly but expose m_FileID / m_PathID for descent;
     // the untouched half of the pair carries over.
-    const repointed = try set(original, "m_Script.m_PathID", .{ .int = 1234 });
+    const repointed = try set(std.testing.allocator, original, "m_Script.m_PathID", .{ .int = 1234 });
     try std.testing.expectEqual(@as(i64, 1234), testFieldOf(repointed, "m_Script").?.pptr.path_id);
     try std.testing.expectEqual(@as(i32, 0), testFieldOf(repointed, "m_Script").?.pptr.file_id);
-    const refiled = try set(original, "m_Script.m_FileID", .{ .int = 3 });
+    const refiled = try set(std.testing.allocator, original, "m_Script.m_FileID", .{ .int = 3 });
     try std.testing.expectEqual(@as(i32, 3), testFieldOf(refiled, "m_Script").?.pptr.file_id);
     try std.testing.expectEqual(@as(i64, 42), testFieldOf(refiled, "m_Script").?.pptr.path_id);
 
     // Every way a path can fail to name an existing leaf is BadPath, so a
     // typo never silently appends a field or drops the edit.
-    try std.testing.expectError(error.BadPath, set(original, "nope", .{ .int = 1 }));
-    try std.testing.expectError(error.BadPath, set(original, "m_Sub.nope", .{ .int = 1 }));
-    try std.testing.expectError(error.BadPath, set(original, "m_Values[3]", .{ .int = 1 })); // past the end
-    try std.testing.expectError(error.BadPath, set(original, "m_Name.x", .{ .int = 1 })); // scalar has no fields
-    try std.testing.expectError(error.BadPath, set(original, "m_Sub[0]", .{ .int = 1 })); // obj is not an array
-    try std.testing.expectError(error.BadPath, set(original, "m_Script.m_Other", .{ .int = 1 }));
-    try std.testing.expectError(error.BadPath, set(original, "m_Script.m_PathID.x", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "nope", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Sub.nope", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Values[3]", .{ .int = 1 })); // past the end
+    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Name.x", .{ .int = 1 })); // scalar has no fields
+    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Sub[0]", .{ .int = 1 })); // obj is not an array
+    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Script.m_Other", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Script.m_PathID.x", .{ .int = 1 }));
     // a PPtr half only accepts an integer-like value
-    try std.testing.expectError(error.BadPath, set(original, "m_Script.m_PathID", .{ .string = "x" }));
+    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Script.m_PathID", .{ .string = "x" }));
 }
