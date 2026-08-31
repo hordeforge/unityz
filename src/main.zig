@@ -919,13 +919,24 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = clip_name, .subdir = subdir });
                 extracted += 1;
             },
-            21 => { // Material -> readable text
+            21 => { // Material -> readable text + structured JSON
                 const mat = try writeMaterialText(arena, v);
                 var name_buf: [160]u8 = undefined;
                 const name = try std.fmt.bufPrint(&name_buf, "material_{d}.txt", .{o.path_id});
                 try extractFile(subdir, name, mat);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ name, mat.len });
                 extracted += 1;
+                // Structured export: shader reference + saved properties
+                // (texture bindings with scale/offset, floats, colors,
+                // ints). UnityPy reads materials generically; this is the
+                // "what does this material reference" answer in one file.
+                if (try materialJson(arena, v)) |mj| {
+                    var jbuf: [160]u8 = undefined;
+                    const jname = try std.fmt.bufPrint(&jbuf, "material_{d}.json", .{o.path_id});
+                    try extractFile(subdir, jname, mj);
+                    try stdout.print("extracted {s} ({d} bytes)\n", .{ jname, mj.len });
+                    extracted += 1;
+                }
             },
             48 => { // Shader -> readable text
                 const shd = try writeShaderText(arena, v);
@@ -1671,6 +1682,120 @@ fn writeMaterialText(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u
         }
     }
     return arena.dupe(u8, w.getWritten());
+}
+
+/// Structured Material export: name, shader reference, render queue, and
+/// the saved properties (texture bindings with scale/offset, floats,
+/// colors, ints). Null when the material has no saved-properties block.
+fn materialJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
+    const props = unityz.classes.fieldOf(v, "m_SavedProperties") orelse return null;
+    var buf: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    const w = &aw.writer;
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, fieldStr(v, "m_Name"));
+    try w.writeAll(",\"shader\":");
+    try w.print("{d}", .{if (unityz.classes.pptrField(v, "m_Shader")) |p| p.path_id else 0});
+    if (unityz.classes.intField(v, "m_CustomRenderQueue")) |q| {
+        try w.print(",\"render_queue\":{d}", .{q});
+    }
+    try w.writeAll(",\"textures\":[");
+    if (unityz.classes.fieldOf(props, "m_TexEnvs")) |texenvs| {
+        if (texenvs == .array) {
+            var count: usize = 0;
+            for (texenvs.array) |entry| {
+                if (entry != .array or entry.array.len < 2) continue;
+                const prop_name = switch (entry.array[0]) {
+                    .string => |s| s,
+                    else => "",
+                };
+                const val = entry.array[1];
+                const tex = if (unityz.classes.pptrField(val, "m_Texture")) |t| t.path_id else 0;
+                if (count != 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, prop_name);
+                try w.print(",\"texture\":{d}", .{tex});
+                if (unityz.classes.fieldOf(val, "m_Scale")) |sc| {
+                    try w.print(",\"scale\":[{d},{d}]", .{
+                        if (unityz.classes.floatField(sc, "x")) |x| x else 1,
+                        if (unityz.classes.floatField(sc, "y")) |y| y else 1,
+                    });
+                }
+                if (unityz.classes.fieldOf(val, "m_Offset")) |off| {
+                    try w.print(",\"offset\":[{d},{d}]", .{
+                        unityz.classes.floatField(off, "x") orelse 0,
+                        unityz.classes.floatField(off, "y") orelse 0,
+                    });
+                }
+                try w.writeByte('}');
+                count += 1;
+            }
+        }
+    }
+    try w.writeAll("],\"floats\":[");
+    if (unityz.classes.fieldOf(props, "m_Floats")) |floats| {
+        if (floats == .array) {
+            var count: usize = 0;
+            for (floats.array) |entry| {
+                if (entry != .array or entry.array.len < 2) continue;
+                const prop_name = switch (entry.array[0]) {
+                    .string => |s| s,
+                    else => "",
+                };
+                if (count != 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, prop_name);
+                try w.print(",\"value\":{d}}}", .{entry.array[1].asFloat() orelse 0});
+                count += 1;
+            }
+        }
+    }
+    try w.writeAll("],\"colors\":[");
+    if (unityz.classes.fieldOf(props, "m_Colors")) |colors| {
+        if (colors == .array) {
+            var count: usize = 0;
+            for (colors.array) |entry| {
+                if (entry != .array or entry.array.len < 2) continue;
+                const prop_name = switch (entry.array[0]) {
+                    .string => |s| s,
+                    else => "",
+                };
+                if (count != 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, prop_name);
+                try w.writeAll(",\"value\":[");
+                const val = entry.array[1];
+                try w.print("{d},{d},{d},{d}]}}", .{
+                    unityz.classes.floatField(val, "r") orelse 0,
+                    unityz.classes.floatField(val, "g") orelse 0,
+                    unityz.classes.floatField(val, "b") orelse 0,
+                    unityz.classes.floatField(val, "a") orelse 1,
+                });
+                count += 1;
+            }
+        }
+    }
+    try w.writeAll("],\"ints\":[");
+    if (unityz.classes.fieldOf(props, "m_Ints")) |ints| {
+        if (ints == .array) {
+            var count: usize = 0;
+            for (ints.array) |entry| {
+                if (entry != .array or entry.array.len < 2) continue;
+                const prop_name = switch (entry.array[0]) {
+                    .string => |s| s,
+                    else => "",
+                };
+                if (count != 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, prop_name);
+                try w.print(",\"value\":{d}}}", .{entry.array[1].asInt() orelse 0});
+                count += 1;
+            }
+        }
+    }
+    try w.writeAll("]}\n");
+    const out = aw.toArrayList();
+    return try arena.dupe(u8, out.items);
 }
 
 /// Readable text summary of a Shader (name, properties, pass names).
