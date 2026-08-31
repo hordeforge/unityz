@@ -879,6 +879,52 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = atlas_name, .subdir = subdir });
                 extracted += 1;
             },
+            142 => { // AssetBundle -> asset manifest JSON
+                const ab_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const container = unityz.classes.fieldOf(v, "m_Container") orelse continue;
+                if (container != .array) continue;
+                var buf: std.ArrayList(u8) = .empty;
+                var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+                const w = &aw.writer;
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, ab_name);
+                const main_id = if (unityz.classes.fieldOf(v, "m_MainAsset")) |m| blk: {
+                    if (unityz.classes.fieldOf(m, "asset")) |a| break :blk pptrPathId(a) orelse 0;
+                    break :blk 0;
+                } else 0;
+                try w.print(",\"main_asset\":{d},\"assets\":[", .{main_id});
+                // m_Container is a map rendered as [name, AssetInfo] pairs
+                var count: usize = 0;
+                for (container.array) |pair| {
+                    if (pair != .array or pair.array.len < 2) continue;
+                    const asset_name = switch (pair.array[0]) {
+                        .string => |s| s,
+                        else => continue,
+                    };
+                    const path_id = if (unityz.classes.fieldOf(pair.array[1], "asset")) |a|
+                        pptrPathId(a) orelse 0
+                    else
+                        0;
+                    if (count != 0) try w.writeByte(',');
+                    try w.writeAll("{\"path\":");
+                    try writeJsonString(w, asset_name);
+                    try w.print(",\"path_id\":{d}}}", .{path_id});
+                    count += 1;
+                }
+                try w.writeAll("]}\n");
+                const out = aw.toArrayList();
+                var clean_buf: [192]u8 = undefined;
+                const clean_name = if (ab_name.len != 0)
+                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{ab_name}))
+                else
+                    "";
+                var name_buf: [192]u8 = undefined;
+                const fname = try std.fmt.bufPrint(&name_buf, "assetbundle_{d}_{s}.json", .{ o.path_id, if (clean_name.len != 0) clean_name else "unnamed" });
+                try extractFile(subdir, fname, out.items);
+                try stdout.print("extracted {s} ({d} assets)\n", .{ fname, count });
+                try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = ab_name, .subdir = subdir });
+                extracted += 1;
+            },
             114 => { // MonoBehaviour
                 const mb = unityz.classes.MonoBehaviour.fromValue(v);
                 // the raw serialized script graph follows the type tree
