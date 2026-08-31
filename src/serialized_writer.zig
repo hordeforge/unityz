@@ -84,15 +84,18 @@ pub fn rewrite(allocator: std.mem.Allocator, sf: *const serialized.SerializedFil
     defer table.deinit();
     table.endian = sf.endian;
     try table.writeInt(i32, @intCast(sf.objects.len));
-    // Formats 14+ 4-align the first path ID relative to the metadata
-    // start, so the padding here accounts for the verbatim prefix length.
-    if (version >= 14) {
-        const pos = prefix.len + 4;
-        const pad = (4 - (pos % 4)) % 4;
-        const zeros = [_]u8{0} ** 4;
-        try table.writeBytes(zeros[0..pad]);
-    }
     for (sf.objects, 0..) |*o, i| {
+        // Formats 14+ 4-align *every* path ID relative to the metadata
+        // start, so the padding accounts for the verbatim prefix length.
+        // Formats 15 and 16 have entry sizes that are not multiples of 4
+        // (25 and 23 bytes), so this pads between entries as well as
+        // before the first one.
+        if (version >= 14) {
+            const pos = prefix.len + table.getWritten().len;
+            const pad = (4 - (pos % 4)) % 4;
+            const zeros = [_]u8{0} ** 4;
+            try table.writeBytes(zeros[0..pad]);
+        }
         switch (version) {
             2...6 => try table.writeInt(i32, @intCast(o.path_id)),
             7...13 => {
@@ -110,17 +113,17 @@ pub fn rewrite(allocator: std.mem.Allocator, sf: *const serialized.SerializedFil
             try table.writeInt(u32, @intCast(rel_starts[i]));
         }
         try table.writeInt(u32, new_sizes[i]);
-        if (version < 15) {
+        if (version < 16) {
             // raw type id + class bits (zero-extended u16 as stored)
             const type_index = o.type_index orelse return error.MissingTypeIndex;
             if (type_index >= sf.types.len) return error.MissingTypeIndex;
             try table.writeInt(i32, sf.types[type_index].class_id);
             try table.writeInt(u16, @intCast(sf.types[type_index].class_id & 0xFFFF));
         } else if (version == 16) {
+            // Only the type index here; the script identity and stripped
+            // flag are the shared tail fields written below.
             const type_index = o.type_index orelse return error.MissingTypeIndex;
             try table.writeInt(i32, @intCast(type_index));
-            try table.writeInt(i16, o.script_type_index);
-            try table.writeByte(if (o.stripped) 1 else 0);
         } else {
             const type_index = o.type_index orelse return error.MissingTypeIndex;
             try table.writeInt(u32, type_index);
@@ -631,4 +634,94 @@ fn writeV22MonoTree(w: *streams.Writer, a: std.mem.Allocator) !void {
     try w.writeInt(i32, 0);
     try w.writeInt(u64, 0);
     try w.writeBytes(buf);
+}
+
+test "rewrite v15 and v16 files (entry sizes that are not multiples of 4)" {
+    // Formats 15 and 16 are the only ones whose object-table entry is not a
+    // multiple of 4 bytes (25 and 23), so the reader's per-entry 4-alignment
+    // has to be reproduced between entries, not just before the first one.
+    for ([_]u32{ 15, 16 }) |version| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const bytes = try buildLegacyTailFixture(a, version);
+        var sf = try serialized.parse(a, bytes);
+        try std.testing.expectEqual(version, sf.version);
+        try std.testing.expectEqual(@as(usize, 2), sf.objects.len);
+        try std.testing.expectEqual(@as(i32, 114), sf.objects[0].class_id);
+        try std.testing.expectEqual(@as(i16, -1), sf.objects[0].script_type_index);
+
+        const new_payload = "REPLACED-PAYLOAD";
+        const out = try rewrite(a, &sf, &.{.{ .path_id = 100, .data = new_payload }});
+        defer a.free(out);
+
+        var sf2 = try serialized.parse(a, out);
+        try std.testing.expectEqual(version, sf2.version);
+        try std.testing.expectEqual(@as(usize, 2), sf2.objects.len);
+        try std.testing.expectEqualStrings(new_payload, sf2.objectData(sf2.findObject(100).?).?);
+        try std.testing.expectEqualStrings("DATAONE2", sf2.objectData(sf2.findObject(200).?).?);
+        try std.testing.expectEqual(@as(i32, 114), sf2.objects[0].class_id);
+        try std.testing.expectEqual(@as(?u32, 0), sf2.objects[0].type_index);
+    }
+}
+
+/// A MonoBehaviour-only fixture in format 15 or 16: the two versions that
+/// carry both the legacy script identity and the stripped flag as object
+/// tail fields.
+fn buildLegacyTailFixture(a: std.mem.Allocator, version: u32) ![]u8 {
+    var meta: streams.Writer = .init(a);
+    defer meta.deinit();
+    try meta.writeStringToNull("5.3.0f1");
+    try meta.writeInt(i32, 5); // target platform
+    try meta.writeByte(1); // enable type tree
+    try meta.writeInt(i32, 1); // type count
+    try meta.writeInt(i32, 114); // class MonoBehaviour
+    if (version >= 16) {
+        try meta.writeByte(0); // is_stripped
+        try meta.writeBytes(&[_]u8{0} ** 16); // script id (class 114)
+    }
+    try meta.writeBytes(&[_]u8{0} ** 16); // old type hash
+    try writeMonoTree(&meta, a);
+
+    try meta.writeInt(i32, 2); // object count
+    const path_ids = [_]i64{ 100, 200 };
+    const sizes = [_]u32{ 5, 8 };
+    const starts = [_]u32{ 0, 8 };
+    for (path_ids, 0..) |path_id, i| {
+        try meta.alignTo4();
+        try meta.writeInt(i64, path_id);
+        try meta.writeInt(u32, starts[i]);
+        try meta.writeInt(u32, sizes[i]);
+        if (version < 16) {
+            try meta.writeInt(i32, 114); // type id, matched by class id
+            try meta.writeInt(u16, 114); // class bits
+        } else {
+            try meta.writeInt(i32, 0); // type index
+        }
+        try meta.writeInt(i16, -1); // script type index
+        try meta.writeByte(0); // stripped
+    }
+    try meta.writeInt(i32, 0); // script types
+    try meta.writeInt(i32, 0); // externals
+    try meta.writeStringToNull("user info here");
+
+    const header_size: usize = 20;
+    const meta_len: u32 = @intCast(meta.getWritten().len);
+    const data_offset: u64 = header_size + meta_len;
+    const data = "DATA0" ++ "\x00\x00\x00" ++ "DATAONE2";
+    const file_size: u64 = data_offset + data.len;
+
+    var out: streams.Writer = .init(a);
+    defer out.deinit();
+    const be = std.builtin.Endian.big;
+    try out.writeIntWith(u32, meta_len, be);
+    try out.writeIntWith(u32, @intCast(file_size), be);
+    try out.writeIntWith(u32, version, be);
+    try out.writeIntWith(u32, @intCast(data_offset), be);
+    try out.writeByte(0); // little endian
+    try out.writeBytes(&[_]u8{ 0, 0, 0 });
+    try out.writeBytes(meta.getWritten());
+    try out.writeBytes(data);
+    return a.dupe(u8, out.getWritten());
 }

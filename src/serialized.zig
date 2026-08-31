@@ -403,10 +403,11 @@ fn readObjectInfo(
         type_index = try resolveLegacyTypeIndex(types, type_id);
     } else if (version == 16) {
         const raw = try r.readInt(i32);
-        const stripped = blk: {
-            _ = try r.readInt(i16); // script_type_index
-            break :blk try r.readByte() != 0;
-        };
+        // The script identity (i16) and stripped flag (u8) that follow are
+        // consumed once, by the tail-field switch below. Peek at the
+        // stripped flag here without advancing, because the type-ID
+        // fallback lookup is keyed by it.
+        const stripped = (try r.peek(3))[2] != 0;
         if (raw >= 0 and raw < types.len) {
             class_id = types[@intCast(raw)].class_id;
             type_index = @intCast(raw);
