@@ -2445,6 +2445,128 @@ fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
     }
 }
 
+/// `diff --pixels`: decodes a Texture2D object in both files and reports
+/// pixel-level differences (per-channel differing-byte counts and the
+/// maximum per-channel delta). Node-aware: `fa.node` selects the container
+/// entry. Pixels may be embedded in the object or streamed inside the same
+/// serialized file; externally-streamed (.resS sidecar) pixels are not
+/// resolved here.
+fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !void {
+    const rgba_a = try findTextureRgba(arena, a_bytes, fa);
+    const rgba_b = try findTextureRgba(arena, b_bytes, fa);
+    if (rgba_a == null or rgba_b == null) {
+        try stdout.print("    (pixels: texture could not be decoded in one or both files)\n", .{});
+        return;
+    }
+    const a = rgba_a.?;
+    const b = rgba_b.?;
+    if (a.width != b.width or a.height != b.height) {
+        try stdout.print("    (pixels: size differs {d}x{d} vs {d}x{d})\n", .{ a.width, a.height, b.width, b.height });
+        return;
+    }
+    var per_channel = [_]usize{ 0, 0, 0, 0 };
+    var max_delta = [_]u32{ 0, 0, 0, 0 };
+    var diff_pixels: usize = 0;
+    var i: usize = 0;
+    while (i < a.rgba.len) : (i += 4) {
+        var any = false;
+        for (0..4) |c| {
+            const d: u32 = @abs(@as(i32, a.rgba[i + c]) - @as(i32, b.rgba[i + c]));
+            if (d != 0) {
+                per_channel[c] += 1;
+                any = true;
+            }
+            max_delta[c] = @max(max_delta[c], d);
+        }
+        if (any) diff_pixels += 1;
+    }
+    try stdout.print("    (pixels: {d}x{d}, {d} pixels differ; max delta R{d} G{d} B{d} A{d})\n", .{ a.width, a.height, diff_pixels, max_delta[0], max_delta[1], max_delta[2], max_delta[3] });
+}
+
+const TexPixels = struct { rgba: []const u8, width: u32, height: u32 };
+
+/// Decodes a Texture2D object's pixels from a file (container-aware,
+/// resolving `.resS` / `.resource` sidecar nodes inside the same
+/// container), or returns null when the object is absent or cannot be
+/// decoded.
+fn findTextureRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?TexPixels {
+    var out: ?TexPixels = null;
+    switch (unityz.container.sniff(bytes).container) {
+        .bundle => {
+            const b = try unityz.bundle.parse(arena, bytes);
+            // collect sidecars first: the serialized node usually precedes
+            // its .resS node in the container
+            var sidecars: std.ArrayList(Sidecar) = .empty;
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) {
+                    try sidecars.append(arena, .{ .path = n.path, .data = n.data });
+                }
+            }
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) continue;
+                if (fa.node) |sn| {
+                    if (!std.mem.eql(u8, n.path, sn)) continue;
+                }
+                out = try findTextureInSerialized(arena, n.data, fa.path_id, sidecars.items);
+                if (out != null) return out;
+            }
+        },
+        .webfile => {
+            const wf = try unityz.webfile.parse(arena, bytes);
+            var sidecars: std.ArrayList(Sidecar) = .empty;
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) {
+                    try sidecars.append(arena, .{ .path = e.path, .data = e.data });
+                }
+            }
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) continue;
+                if (fa.node) |sn| {
+                    if (!std.mem.eql(u8, e.path, sn)) continue;
+                }
+                out = try findTextureInSerialized(arena, e.data, fa.path_id, sidecars.items);
+                if (out != null) return out;
+            }
+        },
+        .serialized => {
+            if (fa.node != null) return null;
+            out = try findTextureInSerialized(arena, bytes, fa.path_id, &.{});
+        },
+        else => {},
+    }
+    return out;
+}
+
+fn findTextureInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar) !?TexPixels {
+    const sf = unityz.serialized.parse(arena, bytes) catch return null;
+    const o = for (sf.objects) |*oo| {
+        if (oo.class_id == 28 and oo.path_id == path_id) break oo;
+    } else return null;
+    const data = sf.objectData(o) orelse return null;
+    const ti = o.type_index orelse return null;
+    if (ti >= sf.types.len) return null;
+    const tree = sf.types[ti].type_tree;
+    if (tree.roots.len == 0) return null;
+    var r = unityz.streams.Reader.init(data);
+    r.endian = sf.endian;
+    const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return null;
+    const t = unityz.classes.Texture2D.fromValue(v);
+    if (t.width == 0 or t.height == 0) return null;
+    var pixels: []const u8 = t.image_data;
+    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
+        const start: usize = @intCast(sf.data_offset + t.stream.offset);
+        const end = start + t.stream.size;
+        if (end <= sf.source.len) pixels = sf.source[start..end];
+    }
+    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
+        pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
+    }
+    if (pixels.len == 0) return null;
+    const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
+    return .{ .rgba = rgba, .width = t.width, .height = t.height };
+}
+
+
 /// `diff <file1> <file2>` — compare two files' objects by content hash:
 /// reports objects only in one file, objects whose bytes changed between
 /// them (same path id, different hash), and the unchanged count. Useful
@@ -2456,11 +2578,14 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         return;
     }
     var json = false;
+    var pixels = false;
     var class_filter: ?i32 = null;
     var i: usize = 1;
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--json")) {
             json = true;
+        } else if (std.mem.eql(u8, rest[i], "--pixels")) {
+            pixels = true;
         } else if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
                 try stdout.print("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
@@ -2530,6 +2655,12 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                         try stdout.print("  changed: object {d} ({s})\n", .{ fa.path_id, name });
                     }
                     reported += 1;
+                }
+                if (pixels and fa.class_id == 28) {
+                    // Texture2D: decode both and report pixel-level
+                    // differences (beyond UnityPy, whose comparisons never
+                    // look at pixels)
+                    try diffTexturePixels(arena, bytes, other_bytes, fa, stdout);
                 }
             } else {
                 unchanged += 1;
@@ -3927,42 +4058,284 @@ fn skipWs(text: []const u8, pos: *usize) void {
     }
 }
 
-/// Best-effort class name for the common Unity class IDs; null otherwise.
+/// Class name for a Unity class ID, mirroring UnityPy's `ClassIDType`
+/// enum (the full runtime + editor table). `null` for IDs the enum does
+/// not define, e.g. 100 (unassigned) and 238 (NavMeshData).
 fn className(class_id: i32) ?[]const u8 {
     const names = [_]struct { id: i32, name: []const u8 }{
+        .{ .id = 0, .name = "Object" },
         .{ .id = 1, .name = "GameObject" },
         .{ .id = 2, .name = "Component" },
+        .{ .id = 3, .name = "LevelGameManager" },
         .{ .id = 4, .name = "Transform" },
+        .{ .id = 5, .name = "TimeManager" },
+        .{ .id = 6, .name = "GlobalGameManager" },
+        .{ .id = 8, .name = "Behaviour" },
+        .{ .id = 9, .name = "GameManager" },
+        .{ .id = 11, .name = "AudioManager" },
+        .{ .id = 12, .name = "ParticleAnimator" },
+        .{ .id = 13, .name = "InputManager" },
+        .{ .id = 15, .name = "EllipsoidParticleEmitter" },
+        .{ .id = 17, .name = "Pipeline" },
+        .{ .id = 18, .name = "EditorExtension" },
+        .{ .id = 19, .name = "Physics2DSettings" },
+        .{ .id = 20, .name = "Camera" },
         .{ .id = 21, .name = "Material" },
         .{ .id = 23, .name = "MeshRenderer" },
         .{ .id = 25, .name = "Renderer" },
+        .{ .id = 26, .name = "ParticleRenderer" },
+        .{ .id = 27, .name = "Texture" },
         .{ .id = 28, .name = "Texture2D" },
+        .{ .id = 29, .name = "OcclusionCullingSettings" },
+        .{ .id = 30, .name = "GraphicsSettings" },
         .{ .id = 33, .name = "MeshFilter" },
+        .{ .id = 41, .name = "OcclusionPortal" },
         .{ .id = 43, .name = "Mesh" },
+        .{ .id = 45, .name = "Skybox" },
+        .{ .id = 47, .name = "QualitySettings" },
         .{ .id = 48, .name = "Shader" },
         .{ .id = 49, .name = "TextAsset" },
+        .{ .id = 50, .name = "Rigidbody2D" },
+        .{ .id = 51, .name = "Physics2DManager" },
+        .{ .id = 53, .name = "Collider2D" },
+        .{ .id = 54, .name = "Rigidbody" },
+        .{ .id = 55, .name = "PhysicsManager" },
+        .{ .id = 56, .name = "Collider" },
+        .{ .id = 57, .name = "Joint" },
+        .{ .id = 58, .name = "CircleCollider2D" },
+        .{ .id = 59, .name = "HingeJoint" },
+        .{ .id = 60, .name = "PolygonCollider2D" },
+        .{ .id = 61, .name = "BoxCollider2D" },
+        .{ .id = 62, .name = "PhysicsMaterial2D" },
         .{ .id = 64, .name = "MeshCollider" },
         .{ .id = 65, .name = "BoxCollider" },
+        .{ .id = 66, .name = "CompositeCollider2D" },
+        .{ .id = 68, .name = "EdgeCollider2D" },
+        .{ .id = 70, .name = "CapsuleCollider2D" },
+        .{ .id = 72, .name = "ComputeShader" },
         .{ .id = 74, .name = "AnimationClip" },
+        .{ .id = 75, .name = "ConstantForce" },
+        .{ .id = 76, .name = "WorldParticleCollider" },
+        .{ .id = 78, .name = "TagManager" },
+        .{ .id = 81, .name = "AudioListener" },
+        .{ .id = 82, .name = "AudioSource" },
         .{ .id = 83, .name = "AudioClip" },
-        .{ .id = 100, .name = "AnimatorController" },
+        .{ .id = 84, .name = "RenderTexture" },
+        .{ .id = 86, .name = "CustomRenderTexture" },
+        .{ .id = 87, .name = "MeshParticleEmitter" },
+        .{ .id = 88, .name = "ParticleEmitter" },
+        .{ .id = 89, .name = "Cubemap" },
+        .{ .id = 90, .name = "Avatar" },
+        .{ .id = 91, .name = "AnimatorController" },
+        .{ .id = 92, .name = "GUILayer" },
+        .{ .id = 93, .name = "RuntimeAnimatorController" },
+        .{ .id = 94, .name = "ScriptMapper" },
+        .{ .id = 95, .name = "Animator" },
+        .{ .id = 96, .name = "TrailRenderer" },
+        .{ .id = 98, .name = "DelayedCallManager" },
+        .{ .id = 102, .name = "TextMesh" },
+        .{ .id = 104, .name = "RenderSettings" },
+        .{ .id = 108, .name = "Light" },
+        .{ .id = 109, .name = "CGProgram" },
+        .{ .id = 110, .name = "BaseAnimationTrack" },
+        .{ .id = 111, .name = "Animation" },
         .{ .id = 114, .name = "MonoBehaviour" },
         .{ .id = 115, .name = "MonoScript" },
+        .{ .id = 116, .name = "MonoManager" },
+        .{ .id = 117, .name = "Texture3D" },
+        .{ .id = 118, .name = "NewAnimationTrack" },
+        .{ .id = 119, .name = "Projector" },
+        .{ .id = 120, .name = "LineRenderer" },
+        .{ .id = 121, .name = "Flare" },
+        .{ .id = 122, .name = "Halo" },
+        .{ .id = 123, .name = "LensFlare" },
+        .{ .id = 124, .name = "FlareLayer" },
+        .{ .id = 125, .name = "HaloLayer" },
+        .{ .id = 126, .name = "NavMeshProjectSettings" },
+        .{ .id = 127, .name = "HaloManager" },
         .{ .id = 128, .name = "Font" },
+        .{ .id = 129, .name = "PlayerSettings" },
+        .{ .id = 130, .name = "NamedObject" },
+        .{ .id = 131, .name = "GUITexture" },
+        .{ .id = 132, .name = "GUIText" },
+        .{ .id = 133, .name = "GUIElement" },
+        .{ .id = 134, .name = "PhysicMaterial" },
         .{ .id = 135, .name = "SphereCollider" },
         .{ .id = 136, .name = "CapsuleCollider" },
         .{ .id = 137, .name = "SkinnedMeshRenderer" },
+        .{ .id = 138, .name = "FixedJoint" },
+        .{ .id = 140, .name = "RaycastCollider" },
+        .{ .id = 141, .name = "BuildSettings" },
         .{ .id = 142, .name = "AssetBundle" },
+        .{ .id = 143, .name = "CharacterController" },
+        .{ .id = 144, .name = "CharacterJoint" },
+        .{ .id = 145, .name = "SpringJoint" },
+        .{ .id = 146, .name = "WheelCollider" },
+        .{ .id = 147, .name = "ResourceManager" },
+        .{ .id = 148, .name = "NetworkView" },
+        .{ .id = 149, .name = "NetworkManager" },
+        .{ .id = 150, .name = "PreloadData" },
+        .{ .id = 152, .name = "MovieTexture" },
+        .{ .id = 153, .name = "ConfigurableJoint" },
+        .{ .id = 154, .name = "TerrainCollider" },
+        .{ .id = 155, .name = "MasterServerInterface" },
+        .{ .id = 156, .name = "TerrainData" },
+        .{ .id = 157, .name = "LightmapSettings" },
+        .{ .id = 158, .name = "WebCamTexture" },
+        .{ .id = 159, .name = "EditorSettings" },
+        .{ .id = 160, .name = "InteractiveCloth" },
+        .{ .id = 161, .name = "ClothRenderer" },
+        .{ .id = 162, .name = "EditorUserSettings" },
+        .{ .id = 163, .name = "SkinnedCloth" },
+        .{ .id = 164, .name = "AudioReverbFilter" },
+        .{ .id = 165, .name = "AudioHighPassFilter" },
+        .{ .id = 166, .name = "AudioChorusFilter" },
+        .{ .id = 167, .name = "AudioReverbZone" },
+        .{ .id = 168, .name = "AudioEchoFilter" },
+        .{ .id = 169, .name = "AudioLowPassFilter" },
+        .{ .id = 170, .name = "AudioDistortionFilter" },
+        .{ .id = 171, .name = "SparseTexture" },
+        .{ .id = 180, .name = "AudioBehaviour" },
+        .{ .id = 181, .name = "AudioFilter" },
+        .{ .id = 182, .name = "WindZone" },
+        .{ .id = 183, .name = "Cloth" },
+        .{ .id = 184, .name = "SubstanceArchive" },
+        .{ .id = 185, .name = "ProceduralMaterial" },
+        .{ .id = 186, .name = "ProceduralTexture" },
         .{ .id = 187, .name = "Texture2DArray" },
+        .{ .id = 188, .name = "CubemapArray" },
+        .{ .id = 191, .name = "OffMeshLink" },
+        .{ .id = 192, .name = "OcclusionArea" },
+        .{ .id = 193, .name = "Tree" },
+        .{ .id = 194, .name = "NavMeshObsolete" },
+        .{ .id = 195, .name = "NavMeshAgent" },
+        .{ .id = 196, .name = "NavMeshSettings" },
+        .{ .id = 197, .name = "LightProbesLegacy" },
+        .{ .id = 198, .name = "ParticleSystem" },
+        .{ .id = 199, .name = "ParticleSystemRenderer" },
+        .{ .id = 200, .name = "ShaderVariantCollection" },
+        .{ .id = 205, .name = "LODGroup" },
+        .{ .id = 206, .name = "BlendTree" },
+        .{ .id = 207, .name = "Motion" },
+        .{ .id = 208, .name = "NavMeshObstacle" },
+        .{ .id = 210, .name = "SortingGroup" },
+        .{ .id = 212, .name = "SpriteRenderer" },
         .{ .id = 213, .name = "Sprite" },
+        .{ .id = 214, .name = "CachedSpriteAtlas" },
+        .{ .id = 215, .name = "ReflectionProbe" },
+        .{ .id = 216, .name = "ReflectionProbes" },
+        .{ .id = 218, .name = "Terrain" },
+        .{ .id = 220, .name = "LightProbeGroup" },
+        .{ .id = 221, .name = "AnimatorOverrideController" },
         .{ .id = 222, .name = "CanvasRenderer" },
+        .{ .id = 223, .name = "Canvas" },
         .{ .id = 224, .name = "RectTransform" },
-        .{ .id = 238, .name = "ParticleSystem" },
+        .{ .id = 225, .name = "CanvasGroup" },
+        .{ .id = 226, .name = "BillboardAsset" },
+        .{ .id = 227, .name = "BillboardRenderer" },
+        .{ .id = 228, .name = "SpeedTreeWindAsset" },
+        .{ .id = 229, .name = "AnchoredJoint2D" },
+        .{ .id = 230, .name = "Joint2D" },
+        .{ .id = 231, .name = "SpringJoint2D" },
+        .{ .id = 232, .name = "DistanceJoint2D" },
+        .{ .id = 233, .name = "HingeJoint2D" },
+        .{ .id = 234, .name = "SliderJoint2D" },
+        .{ .id = 235, .name = "WheelJoint2D" },
+        .{ .id = 236, .name = "ClusterInputManager" },
+        .{ .id = 237, .name = "BaseVideoTexture" },
+        .{ .id = 238, .name = "NavMeshData" },
+        .{ .id = 240, .name = "AudioMixer" },
+        .{ .id = 241, .name = "AudioMixerController" },
+        .{ .id = 243, .name = "AudioMixerGroupController" },
+        .{ .id = 244, .name = "AudioMixerEffectController" },
+        .{ .id = 245, .name = "AudioMixerSnapshotController" },
+        .{ .id = 246, .name = "PhysicsUpdateBehaviour2D" },
+        .{ .id = 247, .name = "ConstantForce2D" },
+        .{ .id = 248, .name = "Effector2D" },
+        .{ .id = 249, .name = "AreaEffector2D" },
+        .{ .id = 250, .name = "PointEffector2D" },
+        .{ .id = 251, .name = "PlatformEffector2D" },
+        .{ .id = 252, .name = "SurfaceEffector2D" },
+        .{ .id = 253, .name = "BuoyancyEffector2D" },
+        .{ .id = 254, .name = "RelativeJoint2D" },
+        .{ .id = 255, .name = "FixedJoint2D" },
+        .{ .id = 256, .name = "FrictionJoint2D" },
+        .{ .id = 257, .name = "TargetJoint2D" },
+        .{ .id = 258, .name = "LightProbes" },
+        .{ .id = 259, .name = "LightProbeProxyVolume" },
+        .{ .id = 271, .name = "SampleClip" },
+        .{ .id = 272, .name = "AudioMixerSnapshot" },
+        .{ .id = 273, .name = "AudioMixerGroup" },
+        .{ .id = 280, .name = "NScreenBridge" },
+        .{ .id = 290, .name = "AssetBundleManifest" },
+        .{ .id = 292, .name = "UnityAdsManager" },
+        .{ .id = 300, .name = "RuntimeInitializeOnLoadManager" },
+        .{ .id = 301, .name = "CloudWebServicesManager" },
+        .{ .id = 303, .name = "UnityAnalyticsManager" },
+        .{ .id = 304, .name = "CrashReportManager" },
+        .{ .id = 305, .name = "PerformanceReportingManager" },
+        .{ .id = 310, .name = "UnityConnectSettings" },
+        .{ .id = 319, .name = "AvatarMask" },
+        .{ .id = 320, .name = "PlayableDirector" },
+        .{ .id = 328, .name = "VideoPlayer" },
+        .{ .id = 329, .name = "VideoClip" },
+        .{ .id = 330, .name = "ParticleSystemForceField" },
+        .{ .id = 331, .name = "SpriteMask" },
+        .{ .id = 362, .name = "WorldAnchor" },
+        .{ .id = 363, .name = "OcclusionCullingData" },
+        .{ .id = 1000, .name = "SmallestEditorClassID" },
+        .{ .id = 1001, .name = "PrefabInstance" },
+        .{ .id = 1002, .name = "EditorExtensionImpl" },
+        .{ .id = 1003, .name = "AssetImporter" },
+        .{ .id = 1004, .name = "AssetDatabaseV1" },
+        .{ .id = 1005, .name = "Mesh3DSImporter" },
+        .{ .id = 1006, .name = "TextureImporter" },
+        .{ .id = 1007, .name = "ShaderImporter" },
+        .{ .id = 1008, .name = "ComputeShaderImporter" },
+        .{ .id = 1020, .name = "AudioImporter" },
+        .{ .id = 1026, .name = "HierarchyState" },
+        .{ .id = 1027, .name = "GUIDSerializer" },
+        .{ .id = 1028, .name = "AssetMetaData" },
+        .{ .id = 1029, .name = "DefaultAsset" },
+        .{ .id = 1030, .name = "DefaultImporter" },
+        .{ .id = 1031, .name = "TextScriptImporter" },
+        .{ .id = 1032, .name = "SceneAsset" },
+        .{ .id = 1034, .name = "NativeFormatImporter" },
+        .{ .id = 1035, .name = "MonoImporter" },
+        .{ .id = 1037, .name = "AssetServerCache" },
+        .{ .id = 1038, .name = "LibraryAssetImporter" },
+        .{ .id = 1040, .name = "ModelImporter" },
+        .{ .id = 1041, .name = "FBXImporter" },
+        .{ .id = 1042, .name = "TrueTypeFontImporter" },
+        .{ .id = 1044, .name = "MovieImporter" },
+        .{ .id = 1045, .name = "EditorBuildSettings" },
+        .{ .id = 1046, .name = "DDSImporter" },
+        .{ .id = 1048, .name = "InspectorExpandedState" },
+        .{ .id = 1049, .name = "AnnotationManager" },
+        .{ .id = 1050, .name = "PluginImporter" },
+        .{ .id = 1051, .name = "EditorUserBuildSettings" },
+        .{ .id = 1052, .name = "PVRImporter" },
+        .{ .id = 1053, .name = "ASTCImporter" },
+        .{ .id = 1054, .name = "KTXImporter" },
     };
     for (names) |n| {
         if (n.id == class_id) return n.name;
     }
     return null;
+}
+
+test "className covers the UnityPy class ID table" {
+    // TextAsset (49) and MonoScript (115) are the ids the enum assigns;
+    // 100 is unassigned and 238 is NavMeshData, not ParticleSystem (198).
+    try std.testing.expectEqualStrings("TextAsset", className(49).?);
+    try std.testing.expectEqualStrings("MonoScript", className(115).?);
+    try std.testing.expectEqualStrings("AnimatorController", className(91).?);
+    try std.testing.expectEqualStrings("ParticleSystem", className(198).?);
+    try std.testing.expectEqualStrings("NavMeshData", className(238).?);
+    try std.testing.expectEqualStrings("GameObject", className(1).?);
+    try std.testing.expectEqualStrings("PrefabInstance", className(1001).?);
+    try std.testing.expect(className(100) == null);
+    try std.testing.expect(className(9999) == null);
 }
 
 test "parseCommand recognizes known subcommands" {
