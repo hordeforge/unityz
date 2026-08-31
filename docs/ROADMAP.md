@@ -15,6 +15,14 @@ Nothing in flight.
 
 ## Done
 
+- Multi-stream mesh export: a Mesh whose vertex channels spread over
+  `m_Streams_0_..3_` exports an OBJ instead of silently nothing; the
+  per-stream stride/offset is derived as UnityPy's MeshHandler does, and
+  single-stream output stays byte-identical.
+- Serialized format 4 parses and rewrites byte-exactly (Unity 4.x
+  metadata/object-info layout, legacy aligned type-tree strings), which
+  also fixed two legacy16 rewrite bugs. `container.sniff` still filters
+  v4 out, so a bare v4 file is not yet reachable from the CLI.
 - The remaining block-format parity gap closes: the 3DS ETC variants
   (ETC_RGB4_3DS 60, ETC_RGBA8_3DS 61) decode as ETC1 (matching UnityPy,
   which routes both to its ETC1 decoder) and ETC2_RGBA1 (46) decodes its

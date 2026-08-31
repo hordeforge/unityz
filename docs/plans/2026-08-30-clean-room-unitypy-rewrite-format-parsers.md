@@ -13,18 +13,21 @@ v7 alignment, data hash, 10-byte block entries), verified against
 UnityPy on real 2022.3 bundles.
 
 The legacy-format rewrite (< v17) is
-done: formats 2-22 except 4 round-trip through the writer (per-version
-object table, tail fields, Legacy16 metadata-at-end layout), with v9 and v13
-fixture tests. Real 2022.3 CABs parse 100% clean (49/49 and 10/10
+done: formats 2-22 round-trip through the writer (per-version
+object table, tail fields, Legacy16 metadata-at-end layout), with v4, v9
+and v13 fixture tests. Real 2022.3 CABs parse 100% clean (49/49 and 10/10
 objects, zero read errors) after the last reader gap was closed:
 strings are always 4-aligned in the wire format regardless of the
 type-tree meta flag (this fixed AssetBundle, Mesh, and Shader objects,
 which previously failed to read).
 
-One known limitation remains, shared
+Two known limitations remain. The first is shared
 with UnityPy itself: the serialized .NET object graph inside m_Script
 payloads is exposed as raw bytes and not parsed further (UnityPy also
-requires external .NET assemblies to parse it).  
+requires external .NET assemblies to parse it). The second is local:
+`container.sniff`'s version filter still excludes format 4, so a bare v4
+file is unreachable from the CLI even though the library parses and
+rewrites it.  
 **Related:**
 
 ## Outcome
@@ -36,7 +39,9 @@ public format documentation only - no code or data taken from UnityPy.
   format version, Unity version, platform, endianness, type-tree flag, and
   type/object/external counts for any UnityFS bundle, WebFile,
   `.assets`/`.resources`/`.resS` file produced by Unity 2.5 through current
-  versions (serialized formats 2-22 except 4, which is rejected).
+  versions (serialized formats 2-22, version 4 included; container
+  detection still skips v4, so a bare v4 file is not reachable from the
+  CLI even though the library parses it).
   `--objects` adds the object table; per-class object counts are
   `unityz stats`.
 - `unityz extract <file>` writes embedded assets (textures, text assets,
@@ -93,8 +98,11 @@ family now decode, and later passes closed the rest of the block-format
 gap too (BC6H, PVRTC, ATC, EAC, the 3DS ETC variants, ETC2_RGBA1); and
 AudioClip data is now extracted (container detection, raw PCM wrapped in
 a WAV header) rather than skipped, though nothing is transcoded, so
-audio/movie *conversion* remains out. The other three non-goals still
-hold.
+audio/movie *conversion* remains out. The other four non-goals still
+hold: class database download/caching, asset bundle encryption variants,
+asset bundle building from scratch (`bundle.rebuild`/`webfile.rebuild`
+rewrite a parsed container, they do not author one), and .NET assembly
+extraction beyond raw bytes.
 
 ## Decisions and unknowns
 
@@ -170,9 +178,9 @@ The UnityFS bundle parser was corrected to the real wire format
    (v17-22 file rebuild preserving the type section verbatim), `edit` CLI
    (JSON literal field set + in-place rewrite).
 
-Formats 2-22 except 4 round-trip
+Formats 2-22 round-trip
    (per-version object-table layout, tail fields, Legacy16 and
-   Standard20 header layouts); v9 and v13 fixtures cover the legacy
+   Standard20 header layouts); v4, v9 and v13 fixtures cover the legacy
    paths.
 11. **CLI + docs** - `info`, `--dump`, `extract`, `edit` wired; README
     status current.
@@ -1260,3 +1268,48 @@ arena and broke the next object's read; counts are now bounded against the
 data length, matching the existing "reject counts larger than the remaining
 metadata" rule. Unit tests cover the parameter-blob round-trip (incl. the
 nameless base buffer) and `verifyBlob` on a synthetic shader.
+
+2026-08-31 (3DS ETC + ETC2_RGBA1): the last block-format parity gap with
+UnityPy closed. ETC_RGB4_3DS (60) and ETC_RGBA8_3DS (61) decode as ETC1,
+matching UnityPy, which routes both to its ETC1 decoder.
+
+ETC2_RGBA1 (46)
+decodes its punch-through alpha: the ETC2 color block with a 1-bit alpha
+per texel, transparent when the opaque-alpha flag is 0 and the texel
+selects the transparent color (index 2); 8 bytes per block.
+
+The RGBA1
+decoder mirrors texture2ddecoder exactly (always runs the ETC2
+mode-selection path, then applies punch-through from the obaq flag),
+validated pixel-identical over a 96-block corpus. Decoding is read/verify
+only; nothing in the writer path changed.
+
+2026-08-31 (serialized format 4): the parser accepted formats 2-3 and
+5-22 but deliberately skipped version 4 (Unity 4.x). Its metadata and
+object-info layout match versions 3 and 5, so v4 now parses through the
+same code path, and its legacy type tree uses the documented 4-byte
+aligned length-prefixed strings.
+
+Adding a v4 round-trip test exposed two
+bugs in the legacy16 (version < 9) rewrite path: the metadata body was
+sliced one byte too long (`metadata_size` includes the trailing
+endianness byte for these versions), and `headerSize()` omitted version
+4, reporting 48 instead of 16 and skewing the rebuilt
+data_offset/file_size. Both fixed; v4 files now rewrite byte-exactly.
+
+Known gap, recorded in `container.sniff`: the container-detection version
+filter was never widened past the old 2-3/5-22 range, so a bare v4 file
+is still unreachable from the CLI even though the library reads and
+rewrites it.
+
+2026-08-31 (multi-stream mesh export): `extract` rejected any vertex
+channel with `stream != 0`, so a Mesh whose `m_Channels` spread over
+`m_Streams_0_..3_` exported no OBJ at all - silent data loss against
+UnityPy's MeshHandler.
+
+`classes.Mesh` now derives the implicit
+per-stream stride and offset (UnityPy's `get_streams`) via
+`streamLayout()`/`channelByteOffset()`, and `writeMeshObj` reads each
+channel from its own stream. Single-stream output is byte-identical to
+before (the derived stream-0 stride equals the old interleaved stride and
+its offset is 0), verified over 137 meshes on the tree bundle.
