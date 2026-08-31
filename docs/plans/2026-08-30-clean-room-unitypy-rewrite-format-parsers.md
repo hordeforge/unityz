@@ -1424,3 +1424,18 @@ Verified on the real bundles: the atlas bundle's 10 named objects match
 the find/extract names exactly (sprites WaterTower/WaterTowerModern3/
 ..., the SpriteAtlas, the AssetBundle), and the JSON stays parseable.
 277/277 tests.
+
+2026-08-31 (diff --json pixel/audio stats): the pixel and audio passes
+now collect structured stats, and `diff --json --pixels/--audio` embeds
+them in the JSON document - per-object `pixels` entries (path id, class,
+dimensions, differing-pixel count, per-channel max delta) and per-clip
+`audio` entries (sizes, first differing offset). In `--json` mode the
+passes' text diagnostics move to stderr, so stdout carries exactly one
+parseable JSON document. Directory diffs keep the text form (their json
+report is per-file).
+
+Verified on the real pairs: the atlas mutation
+reports the same two differing objects (sprite 122x298 and texture
+1024x512, 14 pixels, max delta [10,10,10,0]) and the audio mutation the
+same clip (first diff 5904) as the text modes, with stdout now parsing
+as pure JSON. 277/277 tests.

@@ -102,7 +102,10 @@ ids in different nodes can be targeted individually.
 - `hash --json` - per-object content fingerprints
 - `find --json` - matching objects as a JSON array
 - `diff --json` - the changed/new/deleted objects (or files, for directory
-  diffs) with counts, scoped to one class with `--class <id>` where useful
+  diffs) with counts, scoped to one class with `--class <id>` where
+  useful; with `--pixels`/`--audio` the same document carries per-object
+  pixel/audio stats and the text diagnostics move to stderr, so stdout
+  stays a single parseable JSON document
 - `verify --json` - a pass/fail report with per-object failure records
 - `skin --json` - the per-shader skinning report plus the skinned-mesh
   failures
