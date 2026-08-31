@@ -104,8 +104,8 @@ per-class counts for serialized files, nodes for bundles). With `--dump`,
 objects of a serialized file are read through their type trees and printed
 as JSON. Serialized formats 2-22 are supported (version 4 included, whose
 legacy recursive type-tree and trailing-metadata layouts are handled);
-decompression covers none (uncompressed), LZ4 (in-tree), and
-LZMA (via std), with LZHAM detected but unsupported.
+decompression covers none (uncompressed), LZ4 (in-tree), LZMA (via std),
+and LZHAM (vendored decompressor).
 
 The generic object reader is in: object payloads are decoded through
 their type trees into a JSON-serializable value model (primitives, strings,
