@@ -1561,3 +1561,18 @@ render as `<absent>`. Verified: the real-bundle diff emits 28 entries
 (the container rename, GO/material/mesh names, the shader reference
 73->74) matching the text mode, and a single-field edit reports
 `m_LocalPosition.y (0.6 -> 1.25)` in both modes. 279/279 tests.
+
+2026-08-31 (deep scene edit round-trip): verified the deepest nested
+edit path on real scene content: `edit ... 71
+m_PositionCurves[0].curve.m_Curve[1].value.y 0.15 --verify` edits an
+AnimationClip keyframe through a five-level dotted path (74 objects
+round-trip clean, UnityPy reads the new value), and a three-object
+`edit --patch` on the scene bundle (GameObject m_Name, Transform
+m_LocalPosition.y, the same AnimationClip keyframe) applies atomically
+and round-trips clean, with `diff --fields` pinpointing all three exact
+changes and a subsequent `extract` emitting the edited keyframe.
+
+The
+patch JSON shape (an object of path-id -> field -> value) was only
+tersely documented, so the usage text now carries a concrete patch
+example following the project's help conventions. 279/279 tests.

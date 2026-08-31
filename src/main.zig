@@ -76,8 +76,11 @@ const usage =
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
     \\  <path_id> may be node:path-id to target a specific container entry
     \\  (add --out <file> to write elsewhere instead of in place;
-    \\   or --patch <file> with a JSON patch of path-id -> field -> value;
     \\   --verify round-trip-checks the result and refuses to write on failure)
+    \\
+    \\Patch example: {"2": {"m_Name": "renamed"}, "7": {"m_LocalPosition.y": 1.25}}
+    \\  (edit --patch <file> applies every entry in one atomic rewrite;
+    \\   fields may be dotted and indexed like the single-edit form)
 ;
 
 /// Flushes stdout, exiting like SIGPIPE would (141) when the consumer
