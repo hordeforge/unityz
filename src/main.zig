@@ -3425,17 +3425,23 @@ fn setFieldPath(v: unityz.value.Value, segs: []const PathSeg, i: usize, new_valu
     return replaceArrayIndex(arr, idx, new_child);
 }
 
+/// Nesting limit for `parseJsonLiteral`. The parser recurses once per
+/// `[`/`{`, so without a bound a deeply nested literal overflows the stack
+/// instead of reporting a bad patch. Mirrors `typetree.max_depth`.
+const max_json_depth: u32 = 512;
+
 /// Minimal JSON literal parser: ints, floats, bools, null, quoted strings,
 /// and nested arrays/objects. Enough for `edit`.
 fn parseJsonLiteral(text: []const u8) !unityz.value.Value {
     var pos: usize = 0;
-    const v = try parseJsonValue(text, &pos);
+    const v = try parseJsonValue(text, &pos, 0);
     while (pos < text.len and (text[pos] == ' ' or text[pos] == '\t' or text[pos] == '\n')) pos += 1;
     if (pos != text.len) return error.TrailingInput;
     return v;
 }
 
-fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
+fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value {
+    if (depth > max_json_depth) return error.TooDeep;
     skipWs(text, pos);
     if (pos.* >= text.len) return error.UnexpectedEnd;
     const c = text[pos.*];
@@ -3467,7 +3473,7 @@ fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
             return .{ .array = try list.toOwnedSlice(std.heap.page_allocator) };
         }
         while (true) {
-            try list.append(std.heap.page_allocator, try parseJsonValue(text, pos));
+            try list.append(std.heap.page_allocator, try parseJsonValue(text, pos, depth + 1));
             skipWs(text, pos);
             if (pos.* >= text.len) return error.UnterminatedArray;
             if (text[pos.*] == ',') {
@@ -3494,11 +3500,11 @@ fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
         while (true) {
             skipWs(text, pos);
             if (pos.* >= text.len or text[pos.*] != '"') return error.BadObject;
-            const key = try parseJsonValue(text, pos);
+            const key = try parseJsonValue(text, pos, depth + 1);
             skipWs(text, pos);
             if (pos.* >= text.len or text[pos.*] != ':') return error.BadObject;
             pos.* += 1;
-            const val = try parseJsonValue(text, pos);
+            const val = try parseJsonValue(text, pos, depth + 1);
             try list.append(std.heap.page_allocator, .{ .name = key.string, .value = val });
             skipWs(text, pos);
             if (pos.* >= text.len) return error.UnterminatedObject;

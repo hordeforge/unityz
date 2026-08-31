@@ -408,10 +408,22 @@ fn lzmaDecompress(allocator: std.mem.Allocator, raw: []const u8, uncompressed_si
             continue;
         };
         defer decomp.deinit();
-        return decomp.reader.readAlloc(allocator, uncompressed_size) catch |e| {
+        const out = decomp.reader.readAlloc(allocator, uncompressed_size) catch |e| {
             last_err = e;
             continue;
         };
+        // `readAlloc` treats the size as a ceiling, so a truncated stream
+        // decodes "successfully" but short. The block table declares the
+        // exact size and `parse` sizes its concatenated buffer from it, so a
+        // short block would leave that buffer's tail uninitialized. Reject
+        // it here, like the `.none` and lz4 branches of `decompressRaw` do,
+        // and let the other framing offset have its turn.
+        if (out.len != uncompressed_size) {
+            allocator.free(out);
+            last_err = error.EndOfStream;
+            continue;
+        }
+        return out;
     }
     return last_err orelse error.DecompressFailed;
 }

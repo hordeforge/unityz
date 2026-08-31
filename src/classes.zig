@@ -400,6 +400,11 @@ pub fn mergeAlphaTexture(
     return out;
 }
 
+/// Upper bound on a rendered sprite edge in pixels. Only a sanity limit: it
+/// keeps the file-derived extent inside the range where converting it to a
+/// `usize` is defined.
+const max_sprite_dim: f32 = 65536;
+
 /// A sprite's tight/polygon mesh: 3D positions, optional per-vertex UVs,
 /// and triangle indices (grouped by submesh in the source blob).
 pub const SpriteMesh = struct {
@@ -569,10 +574,17 @@ fn paintTriangle(
     sp1: [2]f32,
     sp2: [2]f32,
 ) void {
-    const min_x = @max(@as(usize, @intFromFloat(@floor(@min(@min(dp0[0], dp1[0]), dp2[0])))), 0);
-    const max_x = @min(@as(usize, @intFromFloat(@ceil(@max(@max(dp0[0], dp1[0]), dp2[0])))), sw);
-    const min_y = @max(@as(usize, @intFromFloat(@floor(@min(@min(dp0[1], dp1[1]), dp2[1])))), 0);
-    const max_y = @min(@as(usize, @intFromFloat(@ceil(@max(@max(dp0[1], dp1[1]), dp2[1])))), sh);
+    // Clamp the bounding box in the float domain: `dp` derives from
+    // file-supplied positions times `m_PixelsToUnits`, so it can be
+    // negative, NaN, or huge, and @intFromFloat outside the destination
+    // range is illegal behavior. (@min/@max drop NaN, so a NaN corner
+    // collapses to the sw/sh end and the loop body never runs.)
+    const sw_f: f32 = @floatFromInt(sw);
+    const sh_f: f32 = @floatFromInt(sh);
+    const min_x: usize = @intFromFloat(@floor(std.math.clamp(@min(@min(dp0[0], dp1[0]), dp2[0]), 0, sw_f)));
+    const max_x: usize = @intFromFloat(@ceil(std.math.clamp(@max(@max(dp0[0], dp1[0]), dp2[0]), 0, sw_f)));
+    const min_y: usize = @intFromFloat(@floor(std.math.clamp(@min(@min(dp0[1], dp1[1]), dp2[1]), 0, sh_f)));
+    const max_y: usize = @intFromFloat(@ceil(std.math.clamp(@max(@max(dp0[1], dp1[1]), dp2[1]), 0, sh_f)));
     const area = (dp1[0] - dp0[0]) * (dp2[1] - dp0[1]) - (dp2[0] - dp0[0]) * (dp1[1] - dp0[1]);
     if (area == 0) return; // degenerate
     // Barycentric weights (share a common area sign); interior for either
@@ -635,12 +647,17 @@ pub fn renderSpriteMesh(
     const ptu = pixels_to_units;
     // destination (absolute-pixel) and source (absolute-texel) per vertex
     const n = mesh.positions.len;
-    const dw: usize = @intFromFloat(@round((max_x - min_x) * ptu));
-    const dh: usize = @intFromFloat(@round((max_y - min_y) * ptu));
-    // guard against zero/negative sizes
-    const dogw = @max(dw, 1);
-    const dogh = @max(dh, 1);
-    const sprite = try allocator.alloc(u8, dogw * dogh * 4);
+    const dw_f = @round((max_x - min_x) * ptu);
+    const dh_f = @round((max_y - min_y) * ptu);
+    // Reject before the conversion, not after: positions and
+    // `m_PixelsToUnits` are file-supplied, and @intFromFloat on a negative,
+    // NaN, or out-of-range extent is illegal behavior rather than a clamp.
+    if (!(dw_f >= 0 and dw_f <= max_sprite_dim)) return error.BadMesh;
+    if (!(dh_f >= 0 and dh_f <= max_sprite_dim)) return error.BadMesh;
+    // guard against zero sizes
+    const sprite_w = @max(@as(usize, @intFromFloat(dw_f)), 1);
+    const sprite_h = @max(@as(usize, @intFromFloat(dh_f)), 1);
+    const sprite = try allocator.alloc(u8, sprite_w * sprite_h * 4);
     @memset(sprite, 0);
 
     var dp: [][2]f32 = try allocator.alloc([2]f32, n);
@@ -655,9 +672,9 @@ pub fn renderSpriteMesh(
         const vb = mesh.triangles[t * 3 + 1];
         const vc = mesh.triangles[t * 3 + 2];
         if (va >= n or vb >= n or vc >= n) continue;
-        paintTriangle(sprite, dogw, dogh, tex_rgba, tw, th, dp[va], dp[vb], dp[vc], sp[va], sp[vb], sp[vc]);
+        paintTriangle(sprite, sprite_w, sprite_h, tex_rgba, tw, th, dp[va], dp[vb], dp[vc], sp[va], sp[vb], sp[vc]);
     }
-    return .{ .data = sprite, .w = @intCast(dogw), .h = @intCast(dogh) };
+    return .{ .data = sprite, .w = @intCast(sprite_w), .h = @intCast(sprite_h) };
 }
 
 pub const Material = struct {
