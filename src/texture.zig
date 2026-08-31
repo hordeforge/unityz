@@ -22,8 +22,14 @@
 //! standard documented conversions (clamp+truncate for float, high byte
 //! for 16-bit integer, bias for signed); UnityPy's own converters are
 //! lossy on these (half truncates x*256 and crashes above 1.0, and its
-//! RG32 path reads 16-bit samples). PVRTC/ATC/EAC/3DS and the DXT
-//! crunched formats remain unsupported.
+//! RG32 path reads 16-bit samples). The crunched block family covers the
+//! Unity crunch variants: ETC_RGB4Crunched (64), ETC2_RGBA8Crunched (65),
+//! DXT1Crunched (28), and DXT5Crunched (29), all routed through the
+//! vendored unitycrunch decompressor to raw ETC1/ETC2/DXT1/DXT5 blocks
+//! and then decoded by the corresponding block decoder. Crunched streams
+//! are validated against UnityPy's texture2ddecoder on real Unity crunch
+//! fixtures (the UNITYCRUNCH_*.crn test streams). PVRTC/ATC/EAC/3DS
+//! remain unsupported.
 //!
 //! Block formats are 4x4 pixels, row-major in the data: block (bx, by)
 //! sits at index `by * (width/4) + bx`. Within a block, pixel (x, y) is
@@ -61,6 +67,8 @@ pub const format = struct {
     pub const etc2_rgb: i32 = 45;
     pub const etc2_rgba1: i32 = 46;
     pub const etc2_rgba8: i32 = 47;
+    pub const dxt1_crunched: i32 = 28;
+    pub const dxt5_crunched: i32 = 29;
     pub const etc_rgb4_crunched: i32 = 64;
     pub const etc2_rgba8_crunched: i32 = 65;
     pub const r8: i32 = 63;
@@ -126,6 +134,8 @@ pub const format = struct {
             45 => "ETC2_RGB",
             46 => "ETC2_RGBA1",
             47 => "ETC2_RGBA8",
+            28 => "DXT1Crunched",
+            29 => "DXT5Crunched",
             64 => "ETC_RGB4Crunched",
             65 => "ETC2_RGBA8Crunched",
             63 => "R8",
@@ -463,15 +473,24 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
         format.etc_rgb4 => try decodeEtc(out, w, h, data, .etc1),
         format.etc2_rgb => try decodeEtc(out, w, h, data, .etc2),
         format.etc2_rgba8 => try decodeEtc2Rgba8(out, w, h, data),
-        format.etc_rgb4_crunched, format.etc2_rgba8_crunched => {
-            // decompress the crunch stream to ETC blocks, then decode them
+        format.etc_rgb4_crunched, format.etc2_rgba8_crunched, format.dxt1_crunched, format.dxt5_crunched => {
+            // decompress the crunch stream to raw blocks (ETC1/ETC2/DXT1/DXT5),
+            // then decode those blocks with the corresponding block decoder
             var out_ptr: ?*anyopaque = null;
             var out_size: u32 = 0;
             if (unitycrunch_unpack(data.ptr, @intCast(data.len), 0, &out_ptr, &out_size) == 0 or out_ptr == null)
                 return error.UnsupportedFormat;
             defer unitycrunch_free(out_ptr);
             const blocks: []const u8 = @as([*]const u8, @ptrCast(out_ptr.?))[0..out_size];
-            const fmt = if (tex_format == format.etc_rgb4_crunched) format.etc_rgb4 else format.etc2_rgba8;
+            // The crunch stream names the block format, not the Unity texture
+            // format; map the crunched format number back to its raw blocks.
+            const fmt: i32 = switch (tex_format) {
+                format.etc_rgb4_crunched => format.etc_rgb4,
+                format.etc2_rgba8_crunched => format.etc2_rgba8,
+                format.dxt1_crunched => format.dxt1,
+                format.dxt5_crunched => format.dxt5,
+                else => return error.UnsupportedFormat,
+            };
             return decode(allocator, fmt, width, height, blocks);
         },
         else => blk: {
@@ -575,7 +594,7 @@ fn expectedSize(tex_format: i32, width: u32, height: u32) ?usize {
             break :blk bw * bh * 16;
         },
         // crunched streams are arbitrary size; the crunch decompressor validates them
-        format.etc_rgb4_crunched, format.etc2_rgba8_crunched => 0,
+        format.etc_rgb4_crunched, format.etc2_rgba8_crunched, format.dxt1_crunched, format.dxt5_crunched => 0,
         else => blk: {
             const bs = astcBlockSize(tex_format) orelse return null;
             const nbx = (w + bs.bw - 1) / bs.bw;
@@ -598,10 +617,15 @@ fn interp5(a: u8, b: u8, na: u8, nb: u8) u8 {
 }
 
 fn expand565(v: u16) [3]u8 {
+    // BCn 565→888 expansion: replicate the high bits, not `v*255/31`
+    // (which truncates and is off-by-one from the spec's bit replication).
+    const r5 = (v >> 11) & 0x1f;
+    const g6 = (v >> 5) & 0x3f;
+    const b5 = v & 0x1f;
     return .{
-        @intCast((v >> 11) * 255 / 31),
-        @intCast(((v >> 5) & 0x3f) * 255 / 63),
-        @intCast((v & 0x1f) * 255 / 31),
+        @intCast((r5 << 3) | (r5 >> 2)),
+        @intCast((g6 << 2) | (g6 >> 4)),
+        @intCast((b5 << 3) | (b5 >> 2)),
     };
 }
 
@@ -3118,4 +3142,22 @@ test "flipVertical mirrors rows" {
     try std.testing.expectEqual(@as(u8, 1), flipped[8]); // row 1 = old row 1
     try std.testing.expectEqual(@as(u8, 0), flipped[16]); // row 2 = old row 0
     try std.testing.expectError(error.BadSize, flipVertical(a, rgba, 2, 4));
+}
+
+test "dxt1/5 crunched route to the crash-stable decompressor" {
+    // Format numbers 28/29 are Unity's DXT1Crunched / DXT5Crunched; the
+    // crunched stream is variable-length so expectedSize reports "unknown"
+    // (0), and a non-crunch payload must fail gracefully rather than panic.
+    try std.testing.expectEqualStrings("DXT1Crunched", format.name(format.dxt1_crunched));
+    try std.testing.expectEqualStrings("DXT5Crunched", format.name(format.dxt5_crunched));
+    try std.testing.expectEqual(@as(?usize, 0), expectedSize(format.dxt1_crunched, 512, 512));
+    try std.testing.expectEqual(@as(?usize, 0), expectedSize(format.dxt5_crunched, 512, 512));
+
+    // A non-crunch byte stream (not a valid CRN header) must be rejected.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const garbage = try a.dupe(u8, "not a crunch stream, 8 bytes!");
+    try std.testing.expectError(error.UnsupportedFormat, decode(a, format.dxt1_crunched, 4, 4, garbage));
+    try std.testing.expectError(error.UnsupportedFormat, decode(a, format.dxt5_crunched, 4, 4, garbage));
 }
