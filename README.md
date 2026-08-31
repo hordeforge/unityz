@@ -47,8 +47,8 @@ does not offer:
   matrices, exiting non-zero when a `SkinnedMeshRenderer` references a
   shader that does not
 - `hierarchy` - the GameObject/Transform tree of a scene (root transforms
-  first, names, component classes, local positions; `--json` for nested
-  objects)
+  first, names, component classes, local positions, with bones of any
+  SkinnedMeshRenderer marked; `--json` for nested objects)
 
 `diff` gains `--pixels`: every matched Texture2D and Sprite is decoded
 from both files (sprites rendered through their crop rect, packed

@@ -68,7 +68,8 @@ const usage =
     \\                  machine-readable report)
     \\  hierarchy <path> Print the GameObject/Transform tree of a scene
     \\                 (root transforms first, names, component classes,
-    \\                  local positions; --json for nested objects)
+    \\                  local positions, bones of any SkinnedMeshRenderer
+    \\                  marked (bone); --json for nested objects)
     \\
     \\Edit usage: unityz edit <file> <path_id> <field> <json-value> [<field> <json-value> ...]
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
@@ -5199,6 +5200,7 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
 
     var nodes: std.ArrayList(TEntry) = .empty;
     var gos: std.ArrayList(GoInfo) = .empty;
+    var bones: std.ArrayList(i64) = .empty;
     for (sf.objects) |*o| {
         const data = sf.objectData(o) orelse continue;
         const ti = o.type_index orelse continue;
@@ -5248,6 +5250,15 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
                 }
                 try gos.append(arena, gi);
             },
+            137 => { // SkinnedMeshRenderer: its m_Bones are transforms
+                if (unityz.classes.fieldOf(v, "m_Bones")) |b| {
+                    if (b == .array) {
+                        for (b.array) |bone| {
+                            if (pptrPathId(bone)) |bid| try bones.append(arena, bid);
+                        }
+                    }
+                }
+            },
             else => {},
         }
     }
@@ -5257,7 +5268,7 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
         if (e.node.father == 0) {
             if (json and roots_printed != 0) try stdout.writeByte(',');
             roots_printed += 1;
-            try printHierarchyNode(nodes.items, gos.items, e.path_id, 0, json, stdout);
+            try printHierarchyNode(nodes.items, gos.items, bones.items, e.path_id, 0, json, stdout);
         }
     }
     if (json) {
@@ -5283,9 +5294,17 @@ fn findGo(gos: []const GoInfo, path_id: i64) ?*const GoInfo {
     return null;
 }
 
-fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, path_id: i64, depth: usize, json: bool, stdout: *Io.Writer) !void {
+fn isBone(bones: []const i64, path_id: i64) bool {
+    for (bones) |b| {
+        if (b == path_id) return true;
+    }
+    return false;
+}
+
+fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, bones: []const i64, path_id: i64, depth: usize, json: bool, stdout: *Io.Writer) !void {
     const tn = findNode(nodes, path_id) orelse return;
     const go = findGo(gos, tn.go);
+    const bone = isBone(bones, path_id);
     if (json) {
         try stdout.writeAll("{\"name\":");
         try writeJsonString(stdout, if (go) |g| g.name else "");
@@ -5296,16 +5315,18 @@ fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, path_id: i64, 
                 try stdout.print("{d}", .{c});
             }
         }
-        try stdout.writeAll("],\"children\":[");
+        try stdout.print("],\"bone\":{}", .{bone});
+        try stdout.writeAll(",\"children\":[");
         for (tn.children.items, 0..) |c, i| {
             if (i != 0) try stdout.writeByte(',');
-            try printHierarchyNode(nodes, gos, c, depth + 1, json, stdout);
+            try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, stdout);
         }
         try stdout.writeAll("]}");
         return;
     }
     for (0..depth) |_| try stdout.writeAll("  ");
     try stdout.print("{s} (t {d}, go {d})", .{ if (go) |g| g.name else "?", path_id, tn.go });
+    if (bone) try stdout.writeAll("  (bone)");
     if (go) |g| {
         if (g.components.items.len != 0) {
             try stdout.writeAll(" [");
@@ -5318,7 +5339,7 @@ fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, path_id: i64, 
     }
     try stdout.print("  pos({d}, {d}, {d})\n", .{ tn.pos[0], tn.pos[1], tn.pos[2] });
     for (tn.children.items) |c| {
-        try printHierarchyNode(nodes, gos, c, depth + 1, json, stdout);
+        try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, stdout);
     }
 }
 

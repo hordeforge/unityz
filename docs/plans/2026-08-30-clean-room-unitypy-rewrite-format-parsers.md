@@ -1450,3 +1450,12 @@ answer in one file. Verified on the real material: name, shader path 73
 (resolving to the Shader object), _MainTex binding, and the empty
 float/color/int lists all match the raw tree and UnityPy's typed read
 exactly. 277/277 tests.
+
+2026-08-31 (hierarchy bone annotation): `hierarchy` now marks the
+transforms referenced by any SkinnedMeshRenderer's `m_Bones` as bones -
+`(bone)` in the text tree and a `"bone":true` flag in the JSON nodes -
+so the skeleton binding is visible in the scene tree alongside the
+`skin` shader-side check. Verified on the real scene: exactly 19 of the
+23 transforms are marked, matching the SkinnedMeshRenderer's m_Bones
+list (first: Root/Pelvis/Spine/Chest/Neck, ids 5/7/9/11/13/15...), in
+both text and JSON modes. 277/277 tests.
