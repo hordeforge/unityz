@@ -630,14 +630,16 @@ fn expand565(v: u16) [3]u8 {
 }
 
 /// Writes the 4x4 color block of a BC1 block (colors already resolved).
-/// `indices` holds 16 two-bit indices; `palette` has 4 entries.
-fn putColorBlock(out: []u8, block_x: usize, block_y: usize, w: usize, indices: u32, palette: [4][4]u8, alpha_from_palette: bool) void {
+/// `indices` holds 16 two-bit indices; `palette` has 4 entries. Pixels
+/// past the image edge (blocks are padded up to multiples of 4) are
+/// skipped.
+fn putColorBlock(out: []u8, block_x: usize, block_y: usize, w: usize, h: usize, indices: u32, palette: [4][4]u8, alpha_from_palette: bool) void {
     for (0..4) |y| {
         for (0..4) |x| {
             const idx = (indices >> @as(u5, @intCast(2 * (y * 4 + x)))) & 0x3;
             const px = block_x * 4 + x;
             const py = block_y * 4 + y;
-            if (px >= w) continue;
+            if (px >= w or py >= h) continue;
             const dst = out[(py * w + px) * 4 ..][0..4];
             if (alpha_from_palette and idx == 3) {
                 dst[0] = 0;
@@ -679,7 +681,7 @@ fn decodeDxt1(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
                 palette[3] = .{ 0, 0, 0, 0 };
                 alpha_from_palette = true;
             }
-            putColorBlock(out, bx, by, w, indices, palette, alpha_from_palette);
+            putColorBlock(out, bx, by, w, h, indices, palette, alpha_from_palette);
         }
     }
 }
