@@ -43,6 +43,7 @@ const usage =
     \\  find <path> <s>  Find objects whose name contains <s>
     \\                 (--class <id> to filter by class;
     \\                  --exact for a case-sensitive whole-name match;
+    \\                  --any to match any string field, not just m_Name;
     \\                  --json for a machine-readable array)
     \\  show <path> <id> Print one object as JSON
     \\                 (--raw for a hex dump of its serialized bytes;
@@ -3622,6 +3623,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var class_filter: ?i32 = null;
     var json = false;
     var exact = false;
+    var any = false;
     var i: usize = 1;
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
@@ -3634,6 +3636,8 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             json = true;
         } else if (std.mem.eql(u8, rest[i], "--exact")) {
             exact = true;
+        } else if (std.mem.eql(u8, rest[i], "--any")) {
+            any = true;
         } else {
             try stdout.print("unityz: unknown find option '{s}'\n", .{rest[i]});
             return;
@@ -3653,7 +3657,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             };
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                try findSerializedBytes(arena, n.data, n.path, needle, class_filter, exact, json, &found, stdout);
+                try findSerializedBytes(arena, n.data, n.path, needle, class_filter, exact, any, json, &found, stdout);
             }
         },
         .webfile => {
@@ -3663,10 +3667,10 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             };
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try findSerializedBytes(arena, e.data, e.path, needle, class_filter, exact, json, &found, stdout);
+                try findSerializedBytes(arena, e.data, e.path, needle, class_filter, exact, any, json, &found, stdout);
             }
         },
-        .serialized => try findSerializedBytes(arena, bytes, null, needle, class_filter, exact, json, &found, stdout),
+        .serialized => try findSerializedBytes(arena, bytes, null, needle, class_filter, exact, any, json, &found, stdout),
         else => {
             try stdout.print("{s}: find requires a serialized file, bundle, or webfile\n", .{path});
         },
@@ -3692,7 +3696,49 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
 /// One `find --json` match.
 const FindMatch = struct { path_id: i64, class_id: i32, name: []const u8, node: ?[]const u8 = null };
 
-fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, needle: []const u8, class_filter: ?i32, exact: bool, json: bool, found: *std.ArrayList(FindMatch), stdout: *Io.Writer) !void {
+/// True when any string value anywhere in the value tree contains
+/// `needle` (case-insensitive). `find --any` uses this to search fields
+/// beyond `m_Name`, e.g. AssetBundle container paths.
+fn anyStringContains(v: unityz.value.Value, needle: []const u8) bool {
+    return switch (v) {
+        .string => |s| std.ascii.indexOfIgnoreCase(s, needle) != null,
+        .array => |arr| blk: {
+            for (arr) |item| {
+                if (anyStringContains(item, needle)) break :blk true;
+            }
+            break :blk false;
+        },
+        .obj => |fields| blk: {
+            for (fields) |f| {
+                if (anyStringContains(f.value, needle)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+/// Like `anyStringContains`, but exact whole-string equality.
+fn anyStringEquals(v: unityz.value.Value, needle: []const u8) bool {
+    return switch (v) {
+        .string => |s| std.mem.eql(u8, std.mem.trimEnd(u8, s, "\x00"), needle),
+        .array => |arr| blk: {
+            for (arr) |item| {
+                if (anyStringEquals(item, needle)) break :blk true;
+            }
+            break :blk false;
+        },
+        .obj => |fields| blk: {
+            for (fields) |f| {
+                if (anyStringEquals(f.value, needle)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, needle: []const u8, class_filter: ?i32, exact: bool, any: bool, json: bool, found: *std.ArrayList(FindMatch), stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
@@ -3714,10 +3760,13 @@ fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
         if (needle.len != 0) {
             if (exact) {
                 // exact, case-sensitive whole-name match (names may carry
-                // trailing NULs)
-                if (!std.mem.eql(u8, std.mem.trimEnd(u8, name, "\x00"), needle)) continue;
+                // trailing NULs); --any extends the match to every string
+                // value in the tree
+                const name_eq = std.mem.eql(u8, std.mem.trimEnd(u8, name, "\x00"), needle);
+                if (!name_eq and !(any and anyStringEquals(v, needle))) continue;
             } else {
-                if (std.ascii.indexOfIgnoreCase(name, needle) == null) continue;
+                const name_has = std.ascii.indexOfIgnoreCase(name, needle) != null;
+                if (!name_has and !(any and anyStringContains(v, needle))) continue;
             }
         }
         if (json) {
