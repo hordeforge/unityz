@@ -193,7 +193,7 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
     // pixel) can overflow into a short allocation.
     const pixels = std.math.mul(usize, w, h) catch return error.BadSize;
     if (pixels > std.math.maxInt(usize) / 16) return error.BadSize;
-    const out = try allocator.alloc(u8, pixels * 4);
+    var out = try allocator.alloc(u8, pixels * 4);
     errdefer allocator.free(out);
     const expected = expectedSize(tex_format, width, height) orelse return error.UnsupportedFormat;
     if (data.len < expected) return error.BadSize;
@@ -496,6 +496,12 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
                 format.dxt5_crunched => format.dxt5,
                 else => return error.UnsupportedFormat,
             };
+            // The recursive call allocates the RGBA8 buffer for the real
+            // block format, so this one is dead weight: release it before
+            // recursing, and blank the slice so the errdefer above cannot
+            // free it a second time (freeing an empty slice is a no-op).
+            allocator.free(out);
+            out = &.{};
             return decode(allocator, fmt, width, height, blocks);
         },
         else => blk: {
@@ -2293,7 +2299,12 @@ test "astc hdr 4x4 block (HDR RGBA)" {
 
 test "unsupported format and bad size" {
     const a = std.testing.allocator;
-    try std.testing.expectError(error.UnsupportedFormat, decode(a, 32, 4, 4, "abcdefgh")); // BC6H
+    // 32 is a real Unity TextureFormat number this decoder does not map.
+    try std.testing.expectError(error.UnsupportedFormat, decode(a, 32, 4, 4, "abcdefgh"));
+    // BC6H and ETC2_RGBA1 have a format number and a name but no decoder;
+    // pin that they report unsupported rather than decoding as something else.
+    try std.testing.expectError(error.UnsupportedFormat, decode(a, format.bc6h, 4, 4, "abcdefgh"));
+    try std.testing.expectError(error.UnsupportedFormat, decode(a, format.etc2_rgba1, 4, 4, "abcdefgh"));
     try std.testing.expectError(error.BadSize, decode(a, format.rgba32, 2, 2, "short"));
     try std.testing.expectError(error.BadSize, decode(a, format.bc7, 4, 4, "short"));
 }
