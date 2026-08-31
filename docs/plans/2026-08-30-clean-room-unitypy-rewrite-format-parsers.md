@@ -1241,15 +1241,19 @@ two-pass. 251/251 tests.
 2026-08-31 (shader sub-program blob decode): extended the existing
 shader-blob parser (from the skin-detection pass) into a full decoder.
 `src/shader.zig` now lists every record of the d3d11 platform blob as either
-a parameter blob or a code blob, and decodes each: parameter blobs carry the
-constant buffers (name, used_size, members with their byte index, nested
-structs) and the texture/cbuffer-bind/UAV/sampler entries; code blobs carry
-the 38-byte program-data header (version, SRV/cbuffer/sampler counts, UAV,
-geometry primitive), the DXBC chunk set, the SHDR/SHEX declaration counts
-(srv/cbuffer/sampler/UAV + temp registers), the ISGN input signature, the
-RDEF constant-buffer member offsets, and the trailing ParserBindChannels
-(source,target) pairs. Non-d3d11 program payloads (SMOL-V/GLSL) are recorded
-as undecoded rather than guessed. Surfaced under `show` and a new `shader`
+a parameter blob or a code blob, and decodes each.
+
+Parameter blobs carry the constant buffers (name, used_size, members with
+their byte index, nested structs) and the texture/cbuffer-bind/UAV/sampler
+entries. Code blobs carry the 38-byte program-data header (version,
+SRV/cbuffer/sampler counts, UAV, geometry primitive), the DXBC chunk set,
+the SHDR/SHEX declaration counts (srv/cbuffer/sampler/UAV + temp
+registers), the ISGN input signature, the RDEF constant-buffer member
+offsets, and the trailing ParserBindChannels (source,target) pairs.
+Non-d3d11 program payloads (SMOL-V/GLSL) are recorded as undecoded rather
+than guessed.
+
+Surfaced under `show` and a new `shader`
 command (`<path> <node:path-id>`), which extends the Shader's JSON with a
 `shaderBlob` field; `verify` adds a class-48 check that re-encodes each
 parameter blob byte for byte.
@@ -1313,3 +1317,178 @@ per-stream stride and offset (UnityPy's `get_streams`) via
 channel from its own stream. Single-stream output is byte-identical to
 before (the derived stream-0 stride equals the old interleaved stride and
 its offset is 0), verified over 137 meshes on the tree bundle.
+
+2026-08-31 (diff --pixels covers matched objects and sprites): the pixel
+pass previously fired only on objects whose serialized bytes changed. But
+texture/sprite pixels usually stream from a sibling `.resS` node, so an
+edited stream byte changes no object hash and `diff --pixels` reported
+"0 changed" on files that were visually different. The pass now runs on
+every matched Texture2D and Sprite, and sprites are rendered through
+their full pipeline (crop rect, packed rotation, alpha-texture merge,
+tight/polygon mesh) before comparing.
+
+Verified against an independent
+Pillow crop on a real bundle pair with a byte-mutated crunch stream:
+every reported count and max delta matches (texture 1024x512 and the
+affected 122x298 sprite both report 14 pixels, R10 G10 B10 A0). Pixel
+lines now name the object id and class so results map back to objects.
+270/270 tests.
+
+2026-08-31 (extract --format tga|bmp|raw): textures and sprites export as
+PNG by default, plus TGA (uncompressed 32bpp, top-left origin, real
+alpha), BMP (32bpp BI_BITFIELDS with an RGBA mask set, so alpha survives
+where BI_RGB would force 255), and raw RGBA8 bytes - UnityPy only writes
+PNG. New src/tga.zig and src/bmp.zig follow png.zig's shape (encode +
+test-only round-trip reader); build.zig registers them as test roots.
+
+Verified end-to-end on the real atlas bundle: all 8 objects (7 sprites +
+the crunched 1024x512 texture) extracted in every format decode
+pixel-identical to the PNG baseline through an independent Pillow reader,
+alpha included. 274/274 tests.
+
+2026-08-31 (diff --pixels on directories): `diff <dir> <dir> --pixels`
+previously dropped the flag on the directory branch - the per-file
+comparison never looked at pixels, so a streamed-only edit was reported
+as nothing. The pixel walk is now a shared `pixelPass` (file and
+directory diffs both use it), and directory diffs run it on every matched
+file pair with the same matched-object semantics (streamed .resS edits
+are invisible to file hashes).
+
+Verified on the real atlas pair as
+directories: the mutated stream reports the same 14-pixel texture +
+sprite diffs as the file-level diff, identical directories report all
+zeros, `--class 213` scopes to sprites, and non-asset files in the
+directory are skipped. 274/274 tests.
+
+2026-08-31 (SpriteAtlas export + class-name table completion): the
+atlas_test bundle's mystery class 687078895 is Unity's SpriteAtlas
+(confirmed against UnityPy's ClassIDType), so `extract` now writes an
+`atlas_<id>_<name>.json` mapping every packed sprite's path id to its
+name (read from m_PackedSprites + m_PackedSpriteNamesToIndex, verified
+to align with the extracted sprite PNGs on the real atlas - 7/7 match),
+and `className` covers the rest of UnityPy's enum (the ~110 high-range
+registered ids: AnimatorStateMachine 1107, PackedAssets 1126, SpriteAtlas
+687078895, Tilemap 1839735485, VisualEffect 2083052967, ...), so stats/
+find label them instead of "Class". 274/274 tests.
+
+2026-08-31 (extract --name filter + FSB5 duration): `extract` gained a
+`--name <substring>` filter (case-insensitive `m_Name` match, combinable
+with --class/--path-id/--raw/--json) so a named subset of objects can be
+pulled without exporting everything - UnityPy's CLI has no name search at
+extract time. Verified on the real samples: `--name TowerModern` yields
+exactly the two WaterTowerModern sprites, `--name CN_00` a 9/35 audio
+subset, no-match extracts nothing, and combinations with --class work.
+The FSB5 metadata sidecar now reports per-sample `durationMs` (sample
+count / rate), verified against an independent computation on the real
+banks. 274/274 tests.
+
+2026-08-31 (AssetBundle asset manifest): `extract` now writes each
+AssetBundle object's `m_Container` as an `assetbundle_<id>_<name>.json`
+manifest: the bundle's asset paths mapped to their object ids (plus the
+main asset), so "what is in this bundle, under which path" is one JSON -
+UnityPy's CLI never surfaces the container. Verified on both real
+bundles: the atlas bundle's 8 asset paths resolve through
+`info --json` to the expected classes (SpriteAtlas 687078895 for the
+.spriteatlas path, Sprite 213 for the .png paths), and char_118's 35
+assets are all .ogg paths matching the extracted audio; `--class 142`
+extracts only the manifest. 274/274 tests.
+
+2026-08-31 (FSB5 audio decode to WAV in pure Zig): new src/audio.zig
+decodes FSB5 banks to 16-bit PCM for the codecs that need no transform
+decoder - PCM8/16/24/32/FLOAT and IMA ADPCM (mode 7, the XBOX IMA
+framing FSB5 uses for 1-2 channels: 36-byte per-channel blocks, header
+sample + 63 nibble samples, state reset per block, low nibble first,
+mirroring vgmstream's fsb5.c / ima_decoder.c). `extract` now writes a
+playable .wav for those banks in addition to the .fsb + metadata
+sidecar; Vorbis banks (the common case) stay as .fsb - UnityPy shells
+out to ffmpeg for every conversion, so this removes the dependency for
+the decodable modes.
+
+Verified on synthetic banks in every mode: PCM8/16/FLOAT decode exactly
+against fsb5.py (UnityPy's own dependency), IMA mono + stereo decode
+exactly against an independent Python implementation of the same
+framing, and a single-frame IMA bank agrees with ffmpeg's adpcm_ima_xbox
+within ±2 LSB (its direct-multiplication delta formula rounds differently
+from the branch form vgmstream uses for FSB5; framing and step-index
+evolution match). PCM24/32 use straightforward sign-extend + truncate.
+The real char_118 banks (all Vorbis) still extract with .fsb + sidecar
+and no wav, as before. 277/277 tests.
+
+2026-08-31 (diff --audio): `diff` gained an `--audio` pass that compares
+the resolved stream data of every matched AudioClip (embedded or a
+`.resource` sidecar slice), mirroring the `--pixels` matched-object
+semantics: stream bytes live outside the serialized payload, so an
+edited stream byte changes no object hash and plain `diff` reports
+nothing.
+
+Verified on a real bundle pair where one byte of the .resource
+stream was flipped: `diff` previously reported "36 unchanged, 0
+changed"; `--audio` now reports exactly one clip differing, with the
+first difference at offset 5904 within its 17088-byte stream - matching
+the mutated resource offset 10000 (4096 + 5904) cross-checked against
+the extracted sidecars. Identical files report 0 differ, `--class 83`
+scopes to clips, and directory diffs run the pass per matched pair.
+277/277 tests.
+
+2026-08-31 (find --any): `find` gained an `--any` flag that matches the
+needle against every string value in an object's tree, not just
+`m_Name` - so objects whose interesting strings live in other fields are
+searchable (e.g. AssetBundle `m_Container` asset paths). Combines with
+`--exact` for whole-string equality. Verified on the real bundles:
+`find char_118 "torappu"` finds nothing (no m_Name contains it), while
+`--any` finds the AssetBundle through its container paths, and
+`--any --exact` with a full asset path matches exactly. 277/277 tests.
+
+2026-08-31 (AnimationClip curve export): `extract` now writes each
+AnimationClip's curves as an `animation_<id>_<name>.json`: the clip
+name, legacy flag, sample rate, and one entry per curve (bone path,
+attribute, and keyframes with time, value, inSlope, outSlope - the
+weight fields are defaults and dropped). Handles the six curve arrays
+(Euler/position/scale/quaternion/float/PPtr) with per-field default
+attributes.
+
+The samples came from the other sessions' UnityPy test
+bundles (tmpjoxz4_66.unity3d), which do contain AnimationClips - the
+earlier "no animation samples" gap was about the mobile-game samples
+only. Verified on both real clips: keyframes match the raw tree
+field-by-field, and the times/name/rate match UnityPy's typed read
+exactly (UnityPy has no curve export, so this is beyond-parity).
+277/277 tests.
+
+2026-08-31 (hierarchy command): new `hierarchy <path>` command prints a
+scene's GameObject/Transform tree: root transforms first, recursing
+through m_Children, each node named by its GameObject with the transform
+path id, the GameObject's component classes, and the local position
+(`--json` for the same tree as nested objects). The scene test bundles
+from the other sessions (tmpiyofv9_i.unity3d, 23 GameObjects + 23
+Transforms) unlocked it.
+
+Verified: the full 23-node tree - transform
+ids, parent-child structure, and names - matches UnityPy's typed read
+exactly. Two bugs caught while building: the GameObject m_Component
+entries wrap the PPtr in a "component" field (pptrPathId on the entry
+missed it), and a shared JSON comma flag corrupted nested children
+arrays (now per-list separators). 277/277 tests.
+
+2026-08-31 (info --objects names): the object table now includes each
+object's `m_Name` (read through its type tree; objects without a name or
+tree stay bare), in both text mode and the `--json` object_list entries.
+Verified on the real bundles: the atlas bundle's 10 named objects match
+the find/extract names exactly (sprites WaterTower/WaterTowerModern3/
+..., the SpriteAtlas, the AssetBundle), and the JSON stays parseable.
+277/277 tests.
+
+2026-08-31 (diff --json pixel/audio stats): the pixel and audio passes
+now collect structured stats, and `diff --json --pixels/--audio` embeds
+them in the JSON document - per-object `pixels` entries (path id, class,
+dimensions, differing-pixel count, per-channel max delta) and per-clip
+`audio` entries (sizes, first differing offset). In `--json` mode the
+passes' text diagnostics move to stderr, so stdout carries exactly one
+parseable JSON document. Directory diffs keep the text form (their json
+report is per-file).
+
+Verified on the real pairs: the atlas mutation
+reports the same two differing objects (sprite 122x298 and texture
+1024x512, 14 pixels, max delta [10,10,10,0]) and the audio mutation the
+same clip (first diff 5904) as the text modes, with stdout now parsing
+as pure JSON. 277/277 tests.

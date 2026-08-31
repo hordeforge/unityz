@@ -42,6 +42,47 @@ pub fn build(b: *std.Build) void {
     });
     lib.linkLibrary(crunch_lib);
 
+    // The vendored LZHAM decompressor (public-domain / zlib) for UnityFS
+    // block compression type 4. A C++ static library exposing `lzham_unpack`,
+    // linked into the library so `bundle.zig` can decode LZHAM blocks.
+    const lzham_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "unitylzham",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+        }),
+    });
+    // Compile the vendored C++ optimized regardless of the project's mode:
+    // LZHAM's own assertions are tied to the `DEBUG` macro Zig defines for
+    // the default Debug build, and its `-O0` debug path is not stable. An
+    // optimized vendored lib decodes identically.
+    lzham_lib.root_module.optimize = .ReleaseFast;
+    lzham_lib.root_module.addIncludePath(b.path("src/vendor/lzham"));
+    for ([_][]const u8{
+        "src/vendor/lzham/lzham_assert.cpp",
+        "src/vendor/lzham/lzham_checksum.cpp",
+        "src/vendor/lzham/lzham_huffman_codes.cpp",
+        "src/vendor/lzham/lzham_lzdecomp.cpp",
+        "src/vendor/lzham/lzham_lzdecompbase.cpp",
+        "src/vendor/lzham/lzham_mem.cpp",
+        "src/vendor/lzham/lzham_platform.cpp",
+        "src/vendor/lzham/lzham_polar_codes.cpp",
+        "src/vendor/lzham/lzham_prefix_coding.cpp",
+        "src/vendor/lzham/lzham_symbol_codec.cpp",
+        "src/vendor/lzham/lzham_timer.cpp",
+        "src/vendor/lzham/lzham_vector.cpp",
+        "src/vendor/lzham/lzham_shim.cpp",
+    }) |src| {
+        lzham_lib.root_module.addCSourceFile(.{
+            .file = b.path(src),
+            .flags = &.{ "-DNDEBUG", "-DLZHAM_NO_FAST_FILE" },
+        });
+    }
+    lib.linkLibrary(lzham_lib);
+
     // CLI, linking the library module.
     const exe = b.addExecutable(.{
         .name = "unityz",
@@ -87,7 +128,10 @@ pub fn build(b: *std.Build) void {
         "src/shader.zig",
         "src/texture.zig",
         "src/png.zig",
+        "src/tga.zig",
+        "src/bmp.zig",
         "src/fsb5.zig",
+        "src/audio.zig",
         "src/object_writer.zig",
         "src/serialized_writer.zig",
     }) |module_path| {
@@ -98,6 +142,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         module.linkLibrary(crunch_lib);
+        module.linkLibrary(lzham_lib);
         const module_tests = b.addTest(.{ .root_module = module });
         const run_module_tests = b.addRunArtifact(module_tests);
         test_step.dependOn(&run_module_tests.step);

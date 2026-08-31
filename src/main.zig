@@ -24,9 +24,11 @@ const usage =
     \\  extract <path>  Extract embedded assets from a Unity asset file
     \\                 (--raw raw bytes; --json value trees as JSON, plus
     \\                  a manifest.json index; --class N / --path-id N
-    \\                  filters, N may be node:path-id; --recursive for
-    \\                  bundles/webfiles; --outdir <dir> to write into,
-    \\                  created if missing)
+    \\                  filters, N may be node:path-id; --name <substring>
+    \\                  name filter; --recursive for bundles/webfiles;
+    \\                  --format png|tga|bmp|raw image output (default
+    \\                  png); --outdir <dir> to write into, created if
+    \\                  missing)
     \\  edit <path>     Apply edits to a Unity asset file
     \\                 (bundles: finds and edits the embedded node, then
     \\                  rebuilds the bundle)
@@ -42,6 +44,7 @@ const usage =
     \\                 case-insensitively
     \\                 (--class <id> to filter by class;
     \\                  --exact for a case-sensitive whole-name match;
+    \\                  --any to match any string field, not just m_Name;
     \\                  --json for a machine-readable array)
     \\  show <path> <id> Print one object as JSON
     \\                 (--raw for a hex dump of its serialized bytes;
@@ -53,8 +56,9 @@ const usage =
     \\                 directories compare the two trees file-by-file
     \\                 (--json for a machine-readable diff;
     \\                  --class <id> to compare one class;
-    \\                  --pixels decodes changed Texture2D objects and
-    \\                  reports per-channel pixel differences)
+    \\                  --pixels to decode matched Texture2D/Sprite images
+    \\                  and report pixel diffs; --audio to compare matched
+    \\                  AudioClip streams)
     \\  hash <path>      Print per-object content fingerprints
     \\                 (--json for a machine-readable array;
     \\                  --class <id> / --path-id <id> filters,
@@ -63,6 +67,9 @@ const usage =
     \\                 (exits non-zero when a SkinnedMeshRenderer references
     \\                  a shader that does not skin; --json for a
     \\                  machine-readable report)
+    \\  hierarchy <path> Print the GameObject/Transform tree of a scene
+    \\                 (root transforms first, names, component classes,
+    \\                  local positions; --json for nested objects)
     \\
     \\Edit usage: unityz edit <file> <path_id> <field> <json-value> [<field> <json-value> ...]
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
@@ -201,7 +208,7 @@ pub fn main(init: std.process.Init) !void {
     if (verify_failed_flag) std.process.exit(1);
 }
 
-const Command = enum { info, extract, edit, verify, stats, find, show, diff, hash, skin, shader };
+const Command = enum { info, extract, edit, verify, stats, find, show, diff, hash, skin, shader, hierarchy };
 
 fn parseCommand(arg: []const u8) ?Command {
     inline for (std.meta.fields(Command)) |field| {
@@ -240,6 +247,7 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
         .diff => return cmdDiff(path, rest, bytes, stdout),
         .hash => return cmdHash(path, rest, bytes, stdout),
         .skin => return cmdSkin(path, rest, bytes, stdout),
+        .hierarchy => return cmdHierarchy(path, rest, bytes, stdout),
     }
 }
 
@@ -258,16 +266,51 @@ var extract_outdir: ?[]const u8 = null;
 /// `extract <path> [--raw] [--json]` — write embedded assets (to the
 /// current directory or `--outdir <dir>`): bundle/webfile nodes as files,
 /// serialized-file textures as PNG, meshes as OBJ, text assets, sprites,
-/// materials, shaders, and MonoBehaviour payloads. With `--raw`, every
+/// materials, shaders, and MonoBehaviour payloads (raw `.bin` plus a decoded
+/// `.json` of the managed .NET object graph). With `--raw`, every
 /// object's serialized bytes are written as-is; with `--json`, every
 /// object with a type tree is exported as its value tree JSON instead.
 /// `--outdir` is created if missing.
+/// Image output format for `extract` textures and sprites. UnityPy only
+/// writes PNG; TGA and BMP cover legacy pipelines, and `raw` dumps the
+/// RGBA8 bytes for external tools.
+const ExtractFormat = enum { png, tga, bmp, raw };
+
+fn parseFormat(s: []const u8) !ExtractFormat {
+    if (std.mem.eql(u8, s, "png")) return .png;
+    if (std.mem.eql(u8, s, "tga")) return .tga;
+    if (std.mem.eql(u8, s, "bmp")) return .bmp;
+    if (std.mem.eql(u8, s, "raw")) return .raw;
+    return error.UnknownFormat;
+}
+
+fn formatExtension(format: ExtractFormat) []const u8 {
+    return switch (format) {
+        .png => "png",
+        .tga => "tga",
+        .bmp => "bmp",
+        .raw => "rgba",
+    };
+}
+
+/// Encodes `rgba` in the requested format; raw passes the bytes through.
+fn encodeImage(arena: std.mem.Allocator, format: ExtractFormat, w: u32, h: u32, rgba: []const u8) ![]const u8 {
+    return switch (format) {
+        .png => try unityz.png.encode(arena, w, h, rgba),
+        .tga => try unityz.tga.encode(arena, w, h, rgba),
+        .bmp => try unityz.bmp.encode(arena, w, h, rgba),
+        .raw => rgba,
+    };
+}
+
 fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     var raw = false;
     var recursive = false;
     var json_mode = false;
     var class_filter: ?i32 = null;
     var path_filter: ?Selector = null;
+    var name_filter: ?[]const u8 = null;
+    var format: ExtractFormat = .png;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         const arg = rest[i];
@@ -289,6 +332,15 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
         } else if (std.mem.eql(u8, arg, "--path-id") and i + 1 < rest.len) {
             path_filter = parseSelector(rest[i + 1]) catch {
                 try stdout.print("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
+                return;
+            };
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--name") and i + 1 < rest.len) {
+            name_filter = rest[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--format") and i + 1 < rest.len) {
+            format = parseFormat(rest[i + 1]) catch {
+                try stdout.print("unityz: unknown extract format '{s}' (png|tga|bmp|raw)\n", .{rest[i + 1]});
                 return;
             };
             i += 1;
@@ -333,7 +385,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 try writeFileToCwd(basename(e.path), e.data);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ basename(e.path), e.data.len });
                 if (recursive and unityz.container.sniff(e.data).container == .serialized) {
-                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(e.path)}), sidecars.items, &manifest, stdout);
+                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(e.path)}), sidecars.items, &manifest, format, name_filter, stdout);
                 }
             }
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
@@ -361,7 +413,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 try writeFileToCwd(basename(n.path), n.data);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ basename(n.path), n.data.len });
                 if (recursive and unityz.container.sniff(n.data).container == .serialized) {
-                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(n.path)}), sidecars.items, &manifest, stdout);
+                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(n.path)}), sidecars.items, &manifest, format, name_filter, stdout);
                 }
             }
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
@@ -377,7 +429,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             defer arena_state.deinit();
             const arena = arena_state.allocator();
             var manifest: std.ArrayList(ManifestEntry) = .empty;
-            try extractSerialized(arena, path, bytes, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, null, &.{}, &manifest, stdout);
+            try extractSerialized(arena, path, bytes, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, null, &.{}, &manifest, format, name_filter, stdout);
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
         },
         else => {
@@ -575,6 +627,30 @@ fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.Serial
     return null;
 }
 
+/// Wraps interleaved little-endian PCM in a WAV container. `bits` is the
+/// source sample width (16 for decoded FSB5 samples; the raw AudioClip
+/// path passes its own width).
+fn wavPcm16(arena: std.mem.Allocator, pcm: []const u8, channels: u16, rate: u32, bits: u16) ![]u8 {
+    var wav_buf: std.ArrayList(u8) = .empty;
+    var hdr: [44]u8 = undefined;
+    @memcpy(hdr[0..4], "RIFF");
+    std.mem.writeInt(u32, hdr[4..8], @as(u32, @intCast(36 + pcm.len)), .little);
+    @memcpy(hdr[8..12], "WAVE");
+    @memcpy(hdr[12..16], "fmt ");
+    std.mem.writeInt(u32, hdr[16..20], 16, .little);
+    std.mem.writeInt(u16, hdr[20..22], 1, .little); // PCM
+    std.mem.writeInt(u16, hdr[22..24], channels, .little);
+    std.mem.writeInt(u32, hdr[24..28], rate, .little);
+    std.mem.writeInt(u32, hdr[28..32], rate * @as(u32, channels) * @as(u32, bits) / 8, .little);
+    std.mem.writeInt(u16, hdr[32..34], @intCast(@as(u32, channels) * @as(u32, bits) / 8), .little);
+    std.mem.writeInt(u16, hdr[34..36], bits, .little);
+    @memcpy(hdr[36..40], "data");
+    std.mem.writeInt(u32, hdr[40..44], @as(u32, @intCast(pcm.len)), .little);
+    try wav_buf.appendSlice(arena, &hdr);
+    try wav_buf.appendSlice(arena, pcm);
+    return wav_buf.items;
+}
+
 /// FSB5 bank metadata as a JSON document, or null when the data is not a
 /// well-formed FSB5 bank. Beyond UnityPy: its export converts the audio
 /// but never reports loop points or the header fields.
@@ -587,7 +663,8 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
     try w.print("{d},\"mode\":{d},\"samples\":[", .{ bank.version, bank.mode });
     for (bank.samples, 0..) |s, i| {
         if (i != 0) try w.writeByte(',');
-        try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d}", .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count });
+        const dur_ms: u64 = if (s.frequency != 0) @as(u64, s.sample_count) * 1000 / s.frequency else 0;
+        try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d},\"durationMs\":{d}", .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count, dur_ms });
         if (s.loop_start) |ls| {
             try w.print(",\"loopStart\":{d},\"loopEnd\":{d}", .{ ls, s.loop_end orelse 0 });
         }
@@ -598,7 +675,7 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
     return try list.toOwnedSlice(arena);
 }
 
-fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), stdout: *Io.Writer) !void {
+fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, name_filter: ?[]const u8, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("unityz: {s}: serialized file parse failed: {s}\n", .{ path, @errorName(err) });
         return;
@@ -640,6 +717,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
             skipped += 1;
             continue;
         };
+
+        if (name_filter) |nf| {
+            const nm = unityz.classes.stringField(v, "m_Name") orelse "";
+            if (std.ascii.indexOfIgnoreCase(nm, nf) == null) continue;
+        }
 
         if (json_mode) {
             // JSON mode: export the object's value tree, not a decoded asset
@@ -698,14 +780,14 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     skipped += 1;
                     continue;
                 };
-                const png = unityz.png.encode(tex_arena, t.width, t.height, flipped) catch |err| {
-                    try stdout.print("  texture {d}: PNG encode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                const image = encodeImage(tex_arena, format, t.width, t.height, flipped) catch |err| {
+                    try stdout.print("  texture {d}: image encode failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
                 };
-                var name_buf: [64]u8 = undefined;
-                const name = try std.fmt.bufPrint(&name_buf, "texture_{d}_{d}x{d}.png", .{ o.path_id, t.width, t.height });
-                try extractFile(subdir, name, png);
+                var name_buf: [96]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buf, "texture_{d}_{d}x{d}.{s}", .{ o.path_id, t.width, t.height, formatExtension(format) });
+                try extractFile(subdir, name, image);
                 try stdout.print("extracted {s} ({s})\n", .{ name, unityz.texture.format.name(t.format) });
                 extracted += 1;
             },
@@ -738,23 +820,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     // wrap raw PCM in a WAV container
                     const bits: u16 = @intCast(if (ac.bits_per_sample == 0) 16 else ac.bits_per_sample);
                     const ch: u16 = @intCast(if (ac.channels == 0) 1 else ac.channels);
-                    const rate: u32 = ac.frequency;
-                    var hdr: [44]u8 = undefined;
-                    @memcpy(hdr[0..4], "RIFF");
-                    std.mem.writeInt(u32, hdr[4..8], @as(u32, @intCast(36 + audio.len)), .little);
-                    @memcpy(hdr[8..12], "WAVE");
-                    @memcpy(hdr[12..16], "fmt ");
-                    std.mem.writeInt(u32, hdr[16..20], 16, .little);
-                    std.mem.writeInt(u16, hdr[20..22], 1, .little); // PCM
-                    std.mem.writeInt(u16, hdr[22..24], ch, .little);
-                    std.mem.writeInt(u32, hdr[24..28], rate, .little);
-                    std.mem.writeInt(u32, hdr[28..32], rate * @as(u32, ch) * @as(u32, bits) / 8, .little);
-                    std.mem.writeInt(u16, hdr[32..34], @intCast(@as(u32, ch) * @as(u32, bits) / 8), .little);
-                    std.mem.writeInt(u16, hdr[34..36], bits, .little);
-                    @memcpy(hdr[36..40], "data");
-                    std.mem.writeInt(u32, hdr[40..44], @as(u32, @intCast(audio.len)), .little);
-                    try wav_buf.appendSlice(arena, &hdr);
-                    try wav_buf.appendSlice(arena, audio);
+                    wav_buf.appendSlice(arena, wavPcm16(arena, audio, ch, ac.frequency, bits) catch continue) catch continue;
                     ext = "wav";
                     audio = wav_buf.items;
                 }
@@ -773,6 +839,31 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                         var meta_name_buf: [160]u8 = undefined;
                         const meta_name = try std.fmt.bufPrint(&meta_name_buf, "{s}.json", .{name});
                         try extractFile(subdir, meta_name, meta);
+                    }
+                    // Codecs that decode in pure Zig (PCM8/16/24/32/FLOAT,
+                    // IMA ADPCM) also export as a playable WAV, no external
+                    // tools needed. Vorbis banks (mode 15) need a transform
+                    // codec and stay as .fsb - UnityPy shells out to ffmpeg
+                    // for every conversion, so this is beyond-parity.
+                    if (try unityz.fsb5.parse(arena, audio)) |bank| {
+                        if (unityz.audio.decodable(bank.mode)) {
+                            for (bank.samples, 0..) |s, si| {
+                                const pcm = unityz.audio.decodeSample(arena, audio, bank.data_start, s, bank.mode) catch |err| {
+                                    try stdout.print("  audio {d}: FSB5 decode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                                    skipped += 1;
+                                    continue;
+                                };
+                                const wav = wavPcm16(arena, std.mem.sliceAsBytes(pcm), @intCast(s.channels), s.frequency, 16) catch continue;
+                                var wav_name_buf: [160]u8 = undefined;
+                                const wav_name = if (bank.samples.len == 1)
+                                    try std.fmt.bufPrint(&wav_name_buf, "audio_{d}_{s}.wav", .{ o.path_id, base_name })
+                                else
+                                    try std.fmt.bufPrint(&wav_name_buf, "audio_{d}_{s}_s{d}.wav", .{ o.path_id, base_name, si });
+                                try extractFile(subdir, sanitizeComponent(wav_name), wav);
+                                try stdout.print("extracted {s} ({d} samples, {s})\n", .{ wav_name, s.sample_count, unityz.audio.modeName(bank.mode) });
+                                extracted += 1;
+                            }
+                        }
                     }
                 }
                 try stdout.print("extracted {s} ({d} bytes, {s})\n", .{ name, audio.len, ext });
@@ -796,6 +887,83 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} ({d} vertices, {d} indices)\n", .{ name, mesh.vertex_count, mesh.index_buffer.len / @as(usize, if (mesh.index_format == 1) 4 else 2) });
                 extracted += 1;
             },
+            74 => { // AnimationClip -> curves JSON
+                const clip_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const legacy = unityz.classes.boolField(v, "m_Legacy") orelse false;
+                const sample_rate: f64 = if (unityz.classes.fieldOf(v, "m_SampleRate")) |sv| sv.asFloat() orelse 0 else 0;
+                var buf: std.ArrayList(u8) = .empty;
+                var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+                const w = &aw.writer;
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, clip_name);
+                try w.print(",\"legacy\":{},\"sample_rate\":{d},\"curves\":[", .{ legacy, sample_rate });
+                const curve_fields = [_]struct { name: []const u8, default_attr: []const u8 }{
+                    .{ .name = "m_EulerCurves", .default_attr = "m_LocalEulerAnglesHint" },
+                    .{ .name = "m_PositionCurves", .default_attr = "m_LocalPosition" },
+                    .{ .name = "m_ScaleCurves", .default_attr = "m_LocalScale" },
+                    .{ .name = "m_QuaternionCurves", .default_attr = "m_LocalRotation" },
+                    .{ .name = "m_FloatCurves", .default_attr = "" },
+                    .{ .name = "m_PPtrCurves", .default_attr = "" },
+                };
+                var curve_count: usize = 0;
+                for (curve_fields) |cf| {
+                    const arr = unityz.classes.fieldOf(v, cf.name) orelse continue;
+                    if (arr != .array) continue;
+                    for (arr.array) |entry| {
+                        if (entry != .obj) continue;
+                        const curve_path = unityz.classes.stringField(entry, "path") orelse "";
+                        var attr: []const u8 = cf.default_attr;
+                        if (unityz.classes.stringField(entry, "m_Attribute")) |a| {
+                            if (a.len != 0) attr = a;
+                        }
+                        const curve_obj = unityz.classes.fieldOf(entry, "curve") orelse continue;
+                        const keys = unityz.classes.fieldOf(curve_obj, "m_Curve") orelse continue;
+                        if (keys != .array) continue;
+                        if (curve_count != 0) try w.writeByte(',');
+                        try w.writeAll("{\"path\":");
+                        try writeJsonString(w, curve_path);
+                        try w.writeAll(",\"attribute\":");
+                        try writeJsonString(w, attr);
+                        try w.writeAll(",\"keys\":[");
+                        for (keys.array, 0..) |k, ki| {
+                            if (ki != 0) try w.writeByte(',');
+                            // time + value + slopes carry the animation; the
+                            // weight fields are defaults and dropped here
+                            try w.writeAll("{\"time\":");
+                            const t = if (unityz.classes.fieldOf(k, "time")) |tv| tv.asFloat() orelse 0 else 0;
+                            try w.print("{d}", .{t});
+                            try w.writeAll(",\"value\":");
+                            if (unityz.classes.fieldOf(k, "value")) |val| {
+                                try unityz.value.jsonWrite(val, w);
+                            } else try w.writeAll("null");
+                            try w.writeAll(",\"inSlope\":");
+                            if (unityz.classes.fieldOf(k, "inSlope")) |val| {
+                                try unityz.value.jsonWrite(val, w);
+                            } else try w.writeAll("null");
+                            try w.writeAll(",\"outSlope\":");
+                            if (unityz.classes.fieldOf(k, "outSlope")) |val| {
+                                try unityz.value.jsonWrite(val, w);
+                            } else try w.writeAll("null");
+                            try w.writeByte('}');
+                        }
+                        try w.writeAll("]}");
+                        curve_count += 1;
+                    }
+                }
+                try w.writeAll("]}\n");
+                const out = aw.toArrayList();
+                var clean_buf: [192]u8 = undefined;
+                const clean_name = if (clip_name.len != 0)
+                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{clip_name}))
+                else
+                    "";
+                var name_buf: [192]u8 = undefined;
+                const fname = try std.fmt.bufPrint(&name_buf, "animation_{d}_{s}.json", .{ o.path_id, if (clean_name.len != 0) clean_name else "unnamed" });
+                try extractFile(subdir, fname, out.items);
+                try stdout.print("extracted {s} ({d} curves)\n", .{ fname, curve_count });
+                try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = clip_name, .subdir = subdir });
+                extracted += 1;
+            },
             21 => { // Material -> readable text
                 const mat = try writeMaterialText(arena, v);
                 var name_buf: [160]u8 = undefined;
@@ -813,22 +981,111 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ name, shd.len });
                 extracted += 1;
             },
-            213 => { // Sprite -> cropped / mesh-rendered PNG
+            213 => { // Sprite -> cropped / mesh-rendered image
                 const rr = renderSprite(arena, &sf, sidecars, &sprite_cache, v, o.path_id) orelse continue;
-                const png = unityz.png.encode(arena, rr.w, rr.h, rr.data) catch |err| {
-                    try stdout.print("  sprite {d}: PNG encode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                const image = encodeImage(arena, format, rr.w, rr.h, rr.data) catch |err| {
+                    try stdout.print("  sprite {d}: image encode failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
                 };
                 const sprite = unityz.classes.Sprite.fromValue(v);
-                var name_buf: [160]u8 = undefined;
+                var name_buf: [192]u8 = undefined;
                 const sprite_name = std.mem.trimEnd(u8, sprite.name, "\x00");
-                const name = sanitizeComponent(if (sprite_name.len != 0)
-                    try std.fmt.bufPrint(&name_buf, "sprite_{d}_{s}.png", .{ o.path_id, sprite_name })
+                // raw RGBA has no header, so the name carries the dimensions
+                const name = sanitizeComponent(if (format == .raw)
+                    if (sprite_name.len != 0)
+                        try std.fmt.bufPrint(&name_buf, "sprite_{d}_{d}x{d}_{s}.{s}", .{ o.path_id, rr.w, rr.h, sprite_name, formatExtension(format) })
+                    else
+                        try std.fmt.bufPrint(&name_buf, "sprite_{d}_{d}x{d}.{s}", .{ o.path_id, rr.w, rr.h, formatExtension(format) })
+                else if (sprite_name.len != 0)
+                    try std.fmt.bufPrint(&name_buf, "sprite_{d}_{s}.{s}", .{ o.path_id, sprite_name, formatExtension(format) })
                 else
-                    try std.fmt.bufPrint(&name_buf, "sprite_{d}.png", .{o.path_id}));
-                try extractFile(subdir, name, png);
+                    try std.fmt.bufPrint(&name_buf, "sprite_{d}.{s}", .{ o.path_id, formatExtension(format) }));
+                try extractFile(subdir, name, image);
                 try stdout.print("extracted {s} ({d}x{d})\n", .{ name, rr.w, rr.h });
+                extracted += 1;
+            },
+            687078895 => { // SpriteAtlas -> packed-sprite mapping JSON
+                const atlas_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const packed_sprites = unityz.classes.fieldOf(v, "m_PackedSprites") orelse continue;
+                const names = unityz.classes.fieldOf(v, "m_PackedSpriteNamesToIndex") orelse continue;
+                if (packed_sprites != .array or names != .array or packed_sprites.array.len != names.array.len) continue;
+                var buf: std.ArrayList(u8) = .empty;
+                var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+                const w = &aw.writer;
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, atlas_name);
+                try w.writeAll(",\"sprites\":[");
+                for (packed_sprites.array, 0..) |sp, i| {
+                    if (i != 0) try w.writeByte(',');
+                    try w.writeAll("{\"path_id\":");
+                    try w.print("{d},\"name\":", .{pptrPathId(sp) orelse 0});
+                    try writeJsonString(w, switch (names.array[i]) {
+                        .string => |s| s,
+                        else => "",
+                    });
+                    try w.writeByte('}');
+                }
+                try w.writeAll("]}\n");
+                const out = aw.toArrayList();
+                // sanitizeComponent needs a mutable buffer; copy the
+                // file-owned name first so it cannot steer the output path.
+                var clean_buf: [192]u8 = undefined;
+                const clean_name = if (atlas_name.len != 0)
+                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{atlas_name}))
+                else
+                    "";
+                var name_buf: [192]u8 = undefined;
+                const fname = try std.fmt.bufPrint(&name_buf, "atlas_{d}_{s}.json", .{ o.path_id, if (clean_name.len != 0) clean_name else "unnamed" });
+                try extractFile(subdir, fname, out.items);
+                try stdout.print("extracted {s} ({d} packed sprites)\n", .{ fname, packed_sprites.array.len });
+                try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = atlas_name, .subdir = subdir });
+                extracted += 1;
+            },
+            142 => { // AssetBundle -> asset manifest JSON
+                const ab_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const container = unityz.classes.fieldOf(v, "m_Container") orelse continue;
+                if (container != .array) continue;
+                var buf: std.ArrayList(u8) = .empty;
+                var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+                const w = &aw.writer;
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, ab_name);
+                const main_id = if (unityz.classes.fieldOf(v, "m_MainAsset")) |m| blk: {
+                    if (unityz.classes.fieldOf(m, "asset")) |a| break :blk pptrPathId(a) orelse 0;
+                    break :blk 0;
+                } else 0;
+                try w.print(",\"main_asset\":{d},\"assets\":[", .{main_id});
+                // m_Container is a map rendered as [name, AssetInfo] pairs
+                var count: usize = 0;
+                for (container.array) |pair| {
+                    if (pair != .array or pair.array.len < 2) continue;
+                    const asset_name = switch (pair.array[0]) {
+                        .string => |s| s,
+                        else => continue,
+                    };
+                    const path_id = if (unityz.classes.fieldOf(pair.array[1], "asset")) |a|
+                        pptrPathId(a) orelse 0
+                    else
+                        0;
+                    if (count != 0) try w.writeByte(',');
+                    try w.writeAll("{\"path\":");
+                    try writeJsonString(w, asset_name);
+                    try w.print(",\"path_id\":{d}}}", .{path_id});
+                    count += 1;
+                }
+                try w.writeAll("]}\n");
+                const out = aw.toArrayList();
+                var clean_buf: [192]u8 = undefined;
+                const clean_name = if (ab_name.len != 0)
+                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{ab_name}))
+                else
+                    "";
+                var name_buf: [192]u8 = undefined;
+                const fname = try std.fmt.bufPrint(&name_buf, "assetbundle_{d}_{s}.json", .{ o.path_id, if (clean_name.len != 0) clean_name else "unnamed" });
+                try extractFile(subdir, fname, out.items);
+                try stdout.print("extracted {s} ({d} assets)\n", .{ fname, count });
+                try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = ab_name, .subdir = subdir });
                 extracted += 1;
             },
             114 => { // MonoBehaviour
@@ -861,6 +1118,13 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     std.mem.trimEnd(u8, ms.assembly, "\x00"),
                 });
                 try stdout.print("extracted {s} ({d} bytes) [{s}]\n", .{ fname, payload.len, label });
+                // The decoded managed object graph (the type-tree fields plus
+                // the serialized .NET fields) is already in `v`; write it as a
+                // JSON sidecar so the graph, not just the raw `m_Script` blob,
+                // is a first-class extract output.
+                var graph_buf: [192]u8 = undefined;
+                const graph_name = try std.fmt.bufPrint(&graph_buf, "script_{d}_{s}.json", .{ o.path_id, if (qual.len != 0) qual else "unnamed" });
+                try extractFile(subdir, graph_name, try writeValueJson(arena, v));
                 extracted += 1;
             },
             else => {},
@@ -1222,6 +1486,50 @@ fn meshF32(
 
 fn fieldStr(v: unityz.value.Value, name: []const u8) []const u8 {
     return unityz.classes.stringField(v, name) orelse "";
+}
+
+/// The target path id of a PPtr-typed value: the `.pptr` variant directly,
+/// or an object carrying `m_FileID`/`m_PathID` fields. Null when neither.
+fn pptrPathId(v: unityz.value.Value) ?i64 {
+    return switch (v) {
+        .pptr => |p| p.path_id,
+        .obj => blk: {
+            if (unityz.classes.fieldOf(v, "m_PathID")) |pv| {
+                if (pv.asInt()) |id| break :blk id;
+            }
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
+/// Adapter so `value.jsonWrite` (which expects `writeAll`/`writeByte`/`print`)
+/// can emit a value into an arena-backed `streams.Writer`.
+const JsonWriterAdapter = struct {
+    inner: unityz.streams.Writer,
+
+    pub fn init(arena: std.mem.Allocator) JsonWriterAdapter {
+        return .{ .inner = unityz.streams.Writer.init(arena) };
+    }
+    pub fn writeByte(self: *JsonWriterAdapter, b: u8) !void {
+        try self.inner.writeByte(b);
+    }
+    pub fn writeAll(self: *JsonWriterAdapter, bytes: []const u8) !void {
+        try self.inner.writeBytes(bytes);
+    }
+    pub fn print(self: *JsonWriterAdapter, comptime fmt: []const u8, args: anytype) !void {
+        try self.inner.print(fmt, args);
+    }
+    fn get(self: *JsonWriterAdapter) []const u8 {
+        return self.inner.getWritten();
+    }
+};
+
+/// Serializes a value tree to compact JSON in the arena.
+fn writeValueJson(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u8 {
+    var ad = JsonWriterAdapter.init(arena);
+    try unityz.value.jsonWrite(v, &ad);
+    return arena.dupe(u8, ad.get());
 }
 
 /// Major component of a Unity version string like "2022.3.62f2".
@@ -1757,6 +2065,20 @@ fn printSerialized(path: []const u8, bytes: []const u8, dump: bool, objects: boo
 
 /// Prints the object table (path id, class, byte start, size) of a
 /// serialized file.
+/// Best-effort `m_Name` of an object, read through its type tree. Empty
+/// when the object has no usable tree, no name, or fails to read.
+fn objectName(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, o: *const unityz.serialized.ObjectInfo) []const u8 {
+    const type_index = o.type_index orelse return "";
+    if (type_index >= sf.types.len) return "";
+    const tree = sf.types[type_index].type_tree;
+    if (tree.roots.len == 0) return "";
+    const data = sf.objectData(o) orelse return "";
+    var r = unityz.streams.Reader.init(data);
+    r.endian = sf.endian;
+    const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return "";
+    return unityz.classes.stringField(v, "m_Name") orelse "";
+}
+
 fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
@@ -1765,7 +2087,10 @@ fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writ
     try stdout.print("objects by id:\n", .{});
     for (sf.objects) |*o| {
         const name = className(o.class_id) orelse "Class";
-        try stdout.print("  {d}  {s} (class {d})  start {d}  size {d}\n", .{ o.path_id, name, o.class_id, o.byte_start, o.byte_size });
+        try stdout.print("  {d}  {s} (class {d})  start {d}  size {d}", .{ o.path_id, name, o.class_id, o.byte_start, o.byte_size });
+        const nm = objectName(arena, &sf, o);
+        if (nm.len != 0) try stdout.print("  \"{s}\"", .{nm});
+        try stdout.writeByte('\n');
     }
 }
 
@@ -1782,6 +2107,11 @@ fn dumpObjectTableJson(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
             try stdout.writeByte(',');
         }
         try stdout.print("\"path_id\":{d},\"class\":{d},\"offset\":{d},\"size\":{d}", .{ o.path_id, o.class_id, o.byte_start, o.byte_size });
+        const nm = objectName(arena, &sf, o);
+        if (nm.len != 0) {
+            try stdout.writeAll(",\"name\":");
+            try writeJsonString(stdout, std.mem.trimEnd(u8, nm, "\x00"));
+        }
         try stdout.writeByte('}');
     }
 }
@@ -2495,7 +2825,7 @@ fn warnToStderr(path: []const u8, err: anyerror) void {
 /// Compares two directories file-by-file by content hash, reporting
 /// unchanged/changed/new/deleted files and totals. UnityPy has no tree
 /// comparison.
-fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool, stdout: *Io.Writer) !void {
+fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool, pixels: bool, audio: bool, class_filter: ?i32, stdout: *Io.Writer) !void {
     const DirFile = struct { name: []const u8, hash: u64, size: u64 };
     var files_a: std.ArrayList(DirFile) = .empty;
     var files_b: std.ArrayList(DirFile) = .empty;
@@ -2572,6 +2902,47 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
             } else {
                 unchanged += 1;
             }
+            // The pixel/audio passes run on every matched pair, not only
+            // changed files: streamed pixels/audio live outside the file's
+            // serialized bytes, so the file hash cannot see .resS edits.
+            if (pixels or audio) {
+                const pa = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_a, fa.name });
+                defer std.heap.page_allocator.free(pa);
+                const pb = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_b, fb.name });
+                defer std.heap.page_allocator.free(pb);
+                const data_a = std.Io.Dir.cwd().readFileAlloc(io, pa, std.heap.page_allocator, .unlimited) catch continue;
+                const data_b = std.Io.Dir.cwd().readFileAlloc(io, pb, std.heap.page_allocator, .unlimited) catch continue;
+                defer std.heap.page_allocator.free(data_a);
+                defer std.heap.page_allocator.free(data_b);
+                const ka = unityz.container.sniff(data_a).container;
+                const kb = unityz.container.sniff(data_b).container;
+                if (ka == kb and (ka == .serialized or ka == .bundle or ka == .webfile)) {
+                    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                    defer arena_state.deinit();
+                    // directory diffs keep pixel/audio as text diagnostics
+                    // (on stderr in --json mode); the --json stats arrays
+                    // cover single-file diffs
+                    var diag_out: *Io.Writer = stdout;
+                    var err_buf: [1024]u8 = undefined;
+                    var err_writer: Io.File.Writer = undefined;
+                    if (json) {
+                        err_writer = .init(.stderr(), io, &err_buf);
+                        diag_out = &err_writer.interface;
+                    }
+                    var pixel_stats: std.ArrayList(PixelStat) = .empty;
+                    var audio_stats: std.ArrayList(AudioStat) = .empty;
+                    if (pixels) {
+                        try diag_out.print("  pixels in {s}:\n", .{fa.name});
+                        try pixelPass(arena_state.allocator(), data_a, data_b, class_filter, diag_out, &pixel_stats);
+                    }
+                    if (audio) {
+                        try diag_out.print("  audio in {s}:\n", .{fa.name});
+                        try audioPass(arena_state.allocator(), data_a, data_b, class_filter, diag_out, &audio_stats);
+                    }
+                    if (json) try err_writer.flush();
+                }
+            }
+            break;
         }
         if (!matched) {
             only_a += 1;
@@ -2771,57 +3142,86 @@ fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
     }
 }
 
-/// `diff --pixels`: decodes a Texture2D object in both files and reports
-/// pixel-level differences (per-channel differing-byte counts and the
-/// maximum per-channel delta). Node-aware: `fa.node` selects the container
-/// entry. Pixels may be embedded in the object or streamed inside the same
-/// serialized file; externally-streamed (.resS sidecar) pixels are not
-/// resolved here.
-fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !void {
-    const rgba_a = try findTextureRgba(arena, a_bytes, fa);
-    const rgba_b = try findTextureRgba(arena, b_bytes, fa);
-    if (rgba_a == null or rgba_b == null) {
-        try stdout.print("    (pixels: texture could not be decoded in one or both files)\n", .{});
-        return;
-    }
-    const a = rgba_a.?;
-    const b = rgba_b.?;
-    if (a.width != b.width or a.height != b.height) {
-        try stdout.print("    (pixels: size differs {d}x{d} vs {d}x{d})\n", .{ a.width, a.height, b.width, b.height });
-        return;
-    }
-    var per_channel = [_]usize{ 0, 0, 0, 0 };
-    var max_delta = [_]u32{ 0, 0, 0, 0 };
-    var diff_pixels: usize = 0;
-    var i: usize = 0;
-    while (i < a.rgba.len) : (i += 4) {
-        var any = false;
-        for (0..4) |c| {
-            const d: u32 = @abs(@as(i32, a.rgba[i + c]) - @as(i32, b.rgba[i + c]));
-            if (d != 0) {
-                per_channel[c] += 1;
-                any = true;
+/// `diff --pixels` core: runs the per-object pixel comparison for every
+/// matched Texture2D and Sprite in two files (same node + path id). Shared
+/// by file diffs and per-pair directory diffs. The pass covers matched
+/// objects, not only changed ones: streamed pixels live outside the
+/// serialized payload, so an edited .resS byte changes no object hash.
+fn pixelPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, class_filter: ?i32, stdout: *Io.Writer, stats: *std.ArrayList(PixelStat)) !void {
+    var a_list: std.ArrayList(Fp) = .empty;
+    var b_list: std.ArrayList(Fp) = .empty;
+    try collectFingerprints(arena, a_bytes, class_filter, null, &a_list);
+    try collectFingerprints(arena, b_bytes, class_filter, null, &b_list);
+    var sprite_cache: SpriteCache = .{};
+    for (a_list.items) |fa| {
+        for (b_list.items) |fb| {
+            if (fb.path_id != fa.path_id or !sameNode(fb.node, fa.node)) continue;
+            switch (fa.class_id) {
+                28 => if (try diffTexturePixels(arena, a_bytes, b_bytes, fa, &sprite_cache, stdout)) |st| {
+                    if (st.diff_pixels != 0) try stats.append(arena, st);
+                },
+                213 => if (try diffSpritePixels(arena, a_bytes, b_bytes, fa, &sprite_cache, stdout)) |st| {
+                    if (st.diff_pixels != 0) try stats.append(arena, st);
+                },
+                else => {},
             }
-            max_delta[c] = @max(max_delta[c], d);
+            break;
         }
-        if (any) diff_pixels += 1;
     }
-    try stdout.print("    (pixels: {d}x{d}, {d} pixels differ; max delta R{d} G{d} B{d} A{d})\n", .{ a.width, a.height, diff_pixels, max_delta[0], max_delta[1], max_delta[2], max_delta[3] });
 }
 
-const TexPixels = struct { rgba: []const u8, width: u32, height: u32 };
+/// `diff --audio`: compares the resolved stream data of every matched
+/// AudioClip in two files (embedded or streamed from a sibling
+/// `.resource` sidecar). Stream bytes live outside the serialized
+/// payload, so an edited stream byte changes no object hash - only this
+/// pass sees it.
+fn audioPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, class_filter: ?i32, stdout: *Io.Writer, stats: *std.ArrayList(AudioStat)) !void {
+    var a_list: std.ArrayList(Fp) = .empty;
+    var b_list: std.ArrayList(Fp) = .empty;
+    try collectFingerprints(arena, a_bytes, class_filter, null, &a_list);
+    try collectFingerprints(arena, b_bytes, class_filter, null, &b_list);
+    var compared: usize = 0;
+    var differ: usize = 0;
+    for (a_list.items) |fa| {
+        if (fa.class_id != 83) continue;
+        for (b_list.items) |fb| {
+            if (fb.path_id != fa.path_id or !sameNode(fb.node, fa.node)) continue;
+            compared += 1;
+            const sa = try findObjectStream(arena, a_bytes, fa);
+            const sb = try findObjectStream(arena, b_bytes, fa);
+            if (sa == null or sb == null) {
+                try stdout.print("    (audio: object {d} (AudioClip) could not be resolved in one or both files)\n", .{fa.path_id});
+                differ += 1;
+            } else if (sa.?.len != sb.?.len) {
+                try stdout.print("    (audio: object {d} (AudioClip) size differs {d} vs {d})\n", .{ fa.path_id, sa.?.len, sb.?.len });
+                try stats.append(arena, .{ .path_id = fa.path_id, .size_a = sa.?.len, .size_b = sb.?.len });
+                differ += 1;
+            } else if (!std.mem.eql(u8, sa.?, sb.?)) {
+                var first: usize = sa.?.len;
+                for (sa.?, 0..) |c, i| {
+                    if (c != sb.?[i]) {
+                        first = i;
+                        break;
+                    }
+                }
+                try stdout.print("    (audio: object {d} (AudioClip) {d} bytes, first difference at offset {d})\n", .{ fa.path_id, sa.?.len, first });
+                try stats.append(arena, .{ .path_id = fa.path_id, .size_a = sa.?.len, .size_b = sb.?.len, .first_diff = first });
+                differ += 1;
+            }
+            break;
+        }
+    }
+    try stdout.print("    (audio: {d} clips compared, {d} differ)\n", .{ compared, differ });
+}
 
-/// Decodes a Texture2D object's pixels from a file (container-aware,
-/// resolving `.resS` / `.resource` sidecar nodes inside the same
-/// container), or returns null when the object is absent or cannot be
-/// decoded.
-fn findTextureRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?TexPixels {
-    var out: ?TexPixels = null;
+/// Resolves an AudioClip object's stream data from a file (container-aware,
+/// resolving `.resource` sidecar nodes inside the same container), or null
+/// when absent or unresolvable.
+fn findObjectStream(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?[]const u8 {
+    var out: ?[]const u8 = null;
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = try unityz.bundle.parse(arena, bytes);
-            // collect sidecars first: the serialized node usually precedes
-            // its .resS node in the container
             var sidecars: std.ArrayList(Sidecar) = .empty;
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) {
@@ -2833,7 +3233,7 @@ fn findTextureRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?TexPix
                 if (fa.node) |sn| {
                     if (!std.mem.eql(u8, n.path, sn)) continue;
                 }
-                out = try findTextureInSerialized(arena, n.data, fa.path_id, sidecars.items);
+                out = try findAudioStreamInSerialized(arena, n.data, fa.path_id, sidecars.items);
                 if (out != null) return out;
             }
         },
@@ -2850,23 +3250,23 @@ fn findTextureRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?TexPix
                 if (fa.node) |sn| {
                     if (!std.mem.eql(u8, e.path, sn)) continue;
                 }
-                out = try findTextureInSerialized(arena, e.data, fa.path_id, sidecars.items);
+                out = try findAudioStreamInSerialized(arena, e.data, fa.path_id, sidecars.items);
                 if (out != null) return out;
             }
         },
         .serialized => {
             if (fa.node != null) return null;
-            out = try findTextureInSerialized(arena, bytes, fa.path_id, &.{});
+            out = try findAudioStreamInSerialized(arena, bytes, fa.path_id, &.{});
         },
         else => {},
     }
     return out;
 }
 
-fn findTextureInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar) !?TexPixels {
+fn findAudioStreamInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar) !?[]const u8 {
     const sf = unityz.serialized.parse(arena, bytes) catch return null;
     const o = for (sf.objects) |*oo| {
-        if (oo.class_id == 28 and oo.path_id == path_id) break oo;
+        if (oo.class_id == 83 and oo.path_id == path_id) break oo;
     } else return null;
     const data = sf.objectData(o) orelse return null;
     const ti = o.type_index orelse return null;
@@ -2876,12 +3276,202 @@ fn findTextureInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id:
     var r = unityz.streams.Reader.init(data);
     r.endian = sf.endian;
     const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return null;
-    const t = unityz.classes.Texture2D.fromValue(v);
-    if (t.width == 0 or t.height == 0) return null;
-    const pixels = texturePixels(&sf, sidecars, t);
-    if (pixels.len == 0) return null;
-    const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
-    return .{ .rgba = rgba, .width = t.width, .height = t.height };
+    const ac = unityz.classes.AudioClip.fromValue(v);
+    if (ac.audio_data.len != 0) return ac.audio_data;
+    if (ac.resource.size != 0 and ac.resource.path.len != 0) {
+        const slice = resolveSidecar(sidecars, ac.resource.path, ac.resource.offset, ac.resource.size);
+        if (slice.len != 0) return slice;
+    }
+    return null;
+}
+
+/// `diff --pixels`: decodes a Texture2D object in both files and reports
+/// pixel-level differences (per-channel differing-byte counts and the
+/// maximum per-channel delta). Node-aware: `fa.node` selects the container
+/// entry. Pixels may be embedded in the object, streamed inside the same
+/// serialized file, or streamed from a sibling `.resS` / `.resource`
+/// sidecar node inside the same container, all resolved here.
+fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, cache: *SpriteCache, stdout: *Io.Writer) !?PixelStat {
+    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .texture, cache);
+    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .texture, cache);
+    if (rgba_a == null or rgba_b == null) {
+        try stdout.print("    (pixels: object {d} texture could not be decoded in one or both files)\n", .{fa.path_id});
+        return null;
+    }
+    const a = rgba_a.?;
+    const b = rgba_b.?;
+    if (a.w != b.w or a.h != b.h) {
+        try stdout.print("    (pixels: object {d} size differs {d}x{d} vs {d}x{d})\n", .{ fa.path_id, a.w, a.h, b.w, b.h });
+        return null;
+    }
+    return diffRgbaPixels(fa, a.data, b.data, a.w, a.h, stdout);
+}
+
+/// `diff --pixels` for a Sprite: renders both sprites (crop rect, packed
+/// rotation, alpha-texture merge, tight/polygon mesh) and compares the
+/// RGBA. Object bytes are unchanged when only the streamed atlas pixels
+/// change, so this is the only diff signal that sees those edits.
+fn diffSpritePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, cache: *SpriteCache, stdout: *Io.Writer) !?PixelStat {
+    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .sprite, cache);
+    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .sprite, cache);
+    if (rgba_a == null or rgba_b == null) {
+        try stdout.print("    (pixels: object {d} sprite could not be rendered in one or both files)\n", .{fa.path_id});
+        return null;
+    }
+    const a = rgba_a.?;
+    const b = rgba_b.?;
+    if (a.w != b.w or a.h != b.h) {
+        try stdout.print("    (pixels: object {d} size differs {d}x{d} vs {d}x{d})\n", .{ fa.path_id, a.w, a.h, b.w, b.h });
+        return null;
+    }
+    return diffRgbaPixels(fa, a.data, b.data, a.w, a.h, stdout);
+}
+
+/// Shared per-channel RGBA comparison; `width`/`height` describe both
+/// buffers (they must have the same length). Prints the text line and
+/// returns the structured stat for `diff --json`.
+fn diffRgbaPixels(fa: Fp, a: []const u8, b: []const u8, width: u32, height: u32, stdout: *Io.Writer) !?PixelStat {
+    var per_channel = [_]usize{ 0, 0, 0, 0 };
+    var max_delta = [_]u32{ 0, 0, 0, 0 };
+    var diff_pixels: usize = 0;
+    var i: usize = 0;
+    while (i < a.len) : (i += 4) {
+        var any = false;
+        for (0..4) |c| {
+            const d: u32 = @abs(@as(i32, a[i + c]) - @as(i32, b[i + c]));
+            if (d != 0) {
+                per_channel[c] += 1;
+                any = true;
+            }
+            max_delta[c] = @max(max_delta[c], d);
+        }
+        if (any) diff_pixels += 1;
+    }
+    const name = className(fa.class_id) orelse "Class";
+    try stdout.print("    (pixels: object {d} ({s}) {d}x{d}, {d} pixels differ; max delta R{d} G{d} B{d} A{d})\n", .{ fa.path_id, name, width, height, diff_pixels, max_delta[0], max_delta[1], max_delta[2], max_delta[3] });
+    return .{ .path_id = fa.path_id, .class_id = fa.class_id, .width = width, .height = height, .diff_pixels = diff_pixels, .max_delta = max_delta };
+}
+
+/// One differing object's pixel stats, for `diff --json --pixels`.
+const PixelStat = struct {
+    path_id: i64,
+    class_id: i32,
+    width: u32,
+    height: u32,
+    diff_pixels: usize,
+    max_delta: [4]u32,
+};
+
+/// One differing clip's stream stats, for `diff --json --audio`.
+const AudioStat = struct {
+    path_id: i64,
+    size_a: usize,
+    size_b: usize,
+    /// First differing byte offset; null when the sizes differ.
+    first_diff: ?usize = null,
+};
+
+test "diffRgbaPixels counts per-channel diffs and max deltas" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var buf: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    const a = [_]u8{ 10, 20, 30, 40, 255, 255, 255, 255 };
+    const b = [_]u8{ 12, 20, 35, 44, 250, 245, 255, 255 };
+    _ = try diffRgbaPixels(.{ .path_id = 7, .class_id = 28, .hash = 0, .size = 0 }, &a, &b, 2, 1, &aw.writer);
+    try std.testing.expectEqualStrings("    (pixels: object 7 (Texture2D) 2x1, 2 pixels differ; max delta R5 G10 B5 A4)\n", aw.toArrayList().items);
+}
+
+/// RGBA8 pixels plus dimensions, from a decoded Texture2D or a rendered
+/// Sprite.
+const Rgba = struct { data: []const u8, w: u32, h: u32 };
+
+const RgbaKind = enum { texture, sprite };
+
+/// Decodes a Texture2D (28) or renders a Sprite (213) object's pixels from
+/// a file, container-aware: `.resS` / `.resource` sidecar nodes inside the
+/// same bundle/webfile are resolved, and `fa.node` selects the container
+/// entry. Returns null when the object is absent or cannot be decoded.
+fn findObjectRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, kind: RgbaKind, cache: *SpriteCache) !?Rgba {
+    var out: ?Rgba = null;
+    switch (unityz.container.sniff(bytes).container) {
+        .bundle => {
+            const b = try unityz.bundle.parse(arena, bytes);
+            // collect sidecars first: the serialized node usually precedes
+            // its .resS node in the container
+            var sidecars: std.ArrayList(Sidecar) = .empty;
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) {
+                    try sidecars.append(arena, .{ .path = n.path, .data = n.data });
+                }
+            }
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) continue;
+                if (fa.node) |sn| {
+                    if (!std.mem.eql(u8, n.path, sn)) continue;
+                }
+                out = try findObjectRgbaInSerialized(arena, n.data, fa.path_id, sidecars.items, kind, cache);
+                if (out != null) return out;
+            }
+        },
+        .webfile => {
+            const wf = try unityz.webfile.parse(arena, bytes);
+            var sidecars: std.ArrayList(Sidecar) = .empty;
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) {
+                    try sidecars.append(arena, .{ .path = e.path, .data = e.data });
+                }
+            }
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) continue;
+                if (fa.node) |sn| {
+                    if (!std.mem.eql(u8, e.path, sn)) continue;
+                }
+                out = try findObjectRgbaInSerialized(arena, e.data, fa.path_id, sidecars.items, kind, cache);
+                if (out != null) return out;
+            }
+        },
+        .serialized => {
+            if (fa.node != null) return null;
+            out = try findObjectRgbaInSerialized(arena, bytes, fa.path_id, &.{}, kind, cache);
+        },
+        else => {},
+    }
+    return out;
+}
+
+fn findObjectRgbaInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar, kind: RgbaKind, cache: *SpriteCache) !?Rgba {
+    const sf = unityz.serialized.parse(arena, bytes) catch return null;
+    const want: i32 = switch (kind) {
+        .texture => 28,
+        .sprite => 213,
+    };
+    const o = for (sf.objects) |*oo| {
+        if (oo.class_id == want and oo.path_id == path_id) break oo;
+    } else return null;
+    const data = sf.objectData(o) orelse return null;
+    const ti = o.type_index orelse return null;
+    if (ti >= sf.types.len) return null;
+    const tree = sf.types[ti].type_tree;
+    if (tree.roots.len == 0) return null;
+    var r = unityz.streams.Reader.init(data);
+    r.endian = sf.endian;
+    const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return null;
+    switch (kind) {
+        .texture => {
+            const t = unityz.classes.Texture2D.fromValue(v);
+            if (t.width == 0 or t.height == 0) return null;
+            const pixels = texturePixels(&sf, sidecars, t);
+            if (pixels.len == 0) return null;
+            const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
+            return .{ .data = rgba, .w = t.width, .h = t.height };
+        },
+        .sprite => {
+            const rr = renderSprite(arena, &sf, sidecars, cache, v, path_id) orelse return null;
+            return .{ .data = rr.data, .w = rr.w, .h = rr.h };
+        },
+    }
 }
 
 /// `diff <file1> <file2>` — compare two files' objects by content hash:
@@ -2896,6 +3486,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     }
     var json = false;
     var pixels = false;
+    var audio = false;
     var class_filter: ?i32 = null;
     var i: usize = 1;
     while (i < rest.len) : (i += 1) {
@@ -2903,6 +3494,8 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             json = true;
         } else if (std.mem.eql(u8, rest[i], "--pixels")) {
             pixels = true;
+        } else if (std.mem.eql(u8, rest[i], "--audio")) {
+            audio = true;
         } else if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
                 try stdout.print("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
@@ -2925,7 +3518,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         return;
     };
     if (stat_a.kind == .directory or stat_b.kind == .directory) {
-        return diffDirectories(io, path, rest[0], json, stdout);
+        return diffDirectories(io, path, rest[0], json, pixels, audio, class_filter, stdout);
     }
     const other_bytes = std.Io.Dir.cwd().readFileAlloc(io, rest[0], std.heap.page_allocator, .unlimited) catch |err| {
         try stdout.print("unityz: {s}: {s}\n", .{ rest[0], @errorName(err) });
@@ -2989,12 +3582,6 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                     }
                     reported += 1;
                 }
-                if (pixels and fa.class_id == 28) {
-                    // Texture2D: decode both and report pixel-level
-                    // differences (beyond UnityPy, whose comparisons never
-                    // look at pixels)
-                    try diffTexturePixels(arena, bytes, other_bytes, fa, stdout);
-                }
             } else {
                 unchanged += 1;
             }
@@ -3028,6 +3615,20 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
         }
     }
+    var pixel_stats: std.ArrayList(PixelStat) = .empty;
+    var audio_stats: std.ArrayList(AudioStat) = .empty;
+    // in --json mode the pixel/audio text diagnostics go to stderr so
+    // stdout carries only the JSON document
+    var diag_out: *Io.Writer = stdout;
+    var err_buf: [1024]u8 = undefined;
+    var err_writer: Io.File.Writer = undefined;
+    if (json) {
+        err_writer = .init(.stderr(), io_global.io, &err_buf);
+        diag_out = &err_writer.interface;
+    }
+    if (pixels) try pixelPass(arena, bytes, other_bytes, class_filter, diag_out, &pixel_stats);
+    if (audio) try audioPass(arena, bytes, other_bytes, class_filter, diag_out, &audio_stats);
+    if (json) try err_writer.flush();
     if (json) {
         try stdout.print("{{\"a\":", .{});
         try writeJsonString(stdout, path);
@@ -3039,10 +3640,42 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         try writeObjList(stdout, only_a_objs.items);
         try stdout.print(",\"only_b_objects\":", .{});
         try writeObjList(stdout, only_b_objs.items);
+        try stdout.print(",\"pixels\":", .{});
+        try writePixelStats(stdout, pixel_stats.items);
+        try stdout.print(",\"audio\":", .{});
+        try writeAudioStats(stdout, audio_stats.items);
         try stdout.print("}}\n", .{});
     } else {
         try stdout.print("{d} unchanged, {d} changed, {d} only in {s}, {d} only in {s}\n", .{ unchanged, changed, only_a, path, only_b, rest[0] });
     }
+}
+
+/// JSON array of `{"path_id":N,"class":N,"width":W,"height":H,
+/// "diff_pixels":N,"max_delta":[R,G,B,A]}` for objects whose pixels
+/// differ.
+fn writePixelStats(stdout: *Io.Writer, items: []const PixelStat) !void {
+    try stdout.writeByte('[');
+    for (items, 0..) |it, idx| {
+        if (idx != 0) try stdout.writeByte(',');
+        try stdout.print("{{\"path_id\":{d},\"class\":{d},\"width\":{d},\"height\":{d},\"diff_pixels\":{d},\"max_delta\":[{d},{d},{d},{d}]}}", .{ it.path_id, it.class_id, it.width, it.height, it.diff_pixels, it.max_delta[0], it.max_delta[1], it.max_delta[2], it.max_delta[3] });
+    }
+    try stdout.writeByte(']');
+}
+
+/// JSON array of `{"path_id":N,"size_a":A,"size_b":B,"first_diff":K}`
+/// for clips whose streams differ (`first_diff` omitted when the sizes
+/// differ).
+fn writeAudioStats(stdout: *Io.Writer, items: []const AudioStat) !void {
+    try stdout.writeByte('[');
+    for (items, 0..) |it, idx| {
+        if (idx != 0) try stdout.writeByte(',');
+        try stdout.print("{{\"path_id\":{d},\"size_a\":{d},\"size_b\":{d}", .{ it.path_id, it.size_a, it.size_b });
+        if (it.first_diff) |fd| {
+            try stdout.print(",\"first_diff\":{d}", .{fd});
+        }
+        try stdout.writeByte('}');
+    }
+    try stdout.writeByte(']');
 }
 
 /// Prints a JSON array of `{"path_id":N,"class":N}` objects.
@@ -3308,6 +3941,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var class_filter: ?i32 = null;
     var json = false;
     var exact = false;
+    var any = false;
     var i: usize = 1;
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
@@ -3320,6 +3954,8 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             json = true;
         } else if (std.mem.eql(u8, rest[i], "--exact")) {
             exact = true;
+        } else if (std.mem.eql(u8, rest[i], "--any")) {
+            any = true;
         } else {
             try stdout.print("unityz: unknown find option '{s}'\n", .{rest[i]});
             return;
@@ -3340,7 +3976,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             };
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                try findSerializedBytes(arena, n.data, n.path, needle, class_filter, exact, json, &found, stdout);
+                try findSerializedBytes(arena, n.data, n.path, needle, class_filter, exact, any, json, &found, stdout);
             }
         },
         .webfile => {
@@ -3351,10 +3987,10 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             };
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try findSerializedBytes(arena, e.data, e.path, needle, class_filter, exact, json, &found, stdout);
+                try findSerializedBytes(arena, e.data, e.path, needle, class_filter, exact, any, json, &found, stdout);
             }
         },
-        .serialized => try findSerializedBytes(arena, bytes, null, needle, class_filter, exact, json, &found, stdout),
+        .serialized => try findSerializedBytes(arena, bytes, null, needle, class_filter, exact, any, json, &found, stdout),
         else => {
             try diag(json, stdout, "{s}: find requires a serialized file, bundle, or webfile\n", .{path});
         },
@@ -3380,7 +4016,49 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
 /// One `find --json` match.
 const FindMatch = struct { path_id: i64, class_id: i32, name: []const u8, node: ?[]const u8 = null };
 
-fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, needle: []const u8, class_filter: ?i32, exact: bool, json: bool, found: *std.ArrayList(FindMatch), stdout: *Io.Writer) !void {
+/// True when any string value anywhere in the value tree contains
+/// `needle` (case-insensitive). `find --any` uses this to search fields
+/// beyond `m_Name`, e.g. AssetBundle container paths.
+fn anyStringContains(v: unityz.value.Value, needle: []const u8) bool {
+    return switch (v) {
+        .string => |s| std.ascii.indexOfIgnoreCase(s, needle) != null,
+        .array => |arr| blk: {
+            for (arr) |item| {
+                if (anyStringContains(item, needle)) break :blk true;
+            }
+            break :blk false;
+        },
+        .obj => |fields| blk: {
+            for (fields) |f| {
+                if (anyStringContains(f.value, needle)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+/// Like `anyStringContains`, but exact whole-string equality.
+fn anyStringEquals(v: unityz.value.Value, needle: []const u8) bool {
+    return switch (v) {
+        .string => |s| std.mem.eql(u8, std.mem.trimEnd(u8, s, "\x00"), needle),
+        .array => |arr| blk: {
+            for (arr) |item| {
+                if (anyStringEquals(item, needle)) break :blk true;
+            }
+            break :blk false;
+        },
+        .obj => |fields| blk: {
+            for (fields) |f| {
+                if (anyStringEquals(f.value, needle)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, needle: []const u8, class_filter: ?i32, exact: bool, any: bool, json: bool, found: *std.ArrayList(FindMatch), stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try diag(json, stdout, "  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
@@ -3411,10 +4089,13 @@ fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
         if (needle.len != 0) {
             if (exact) {
                 // exact, case-sensitive whole-name match (names may carry
-                // trailing NULs)
-                if (!std.mem.eql(u8, std.mem.trimEnd(u8, name, "\x00"), needle)) continue;
+                // trailing NULs); --any extends the match to every string
+                // value in the tree
+                const name_eq = std.mem.eql(u8, std.mem.trimEnd(u8, name, "\x00"), needle);
+                if (!name_eq and !(any and anyStringEquals(v, needle))) continue;
             } else {
-                if (std.ascii.indexOfIgnoreCase(name, needle) == null) continue;
+                const name_has = std.ascii.indexOfIgnoreCase(name, needle) != null;
+                if (!name_has and !(any and anyStringContains(v, needle))) continue;
             }
         }
         if (json) {
@@ -4456,6 +5137,209 @@ fn skipWs(text: []const u8, pos: *usize) void {
     while (pos.* < text.len) : (pos.* += 1) {
         const c = text[pos.*];
         if (c != ' ' and c != '\t' and c != '\n' and c != '\r') break;
+    }
+}
+
+/// `hierarchy <path> [--json]` — prints the GameObject/Transform tree of
+/// a scene: root transforms first, recursing through m_Children, each
+/// node named by its GameObject with the transform path id, component
+/// classes, and local position. UnityPy's CLI has no scene-structure
+/// view.
+fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+    var json = false;
+    for (rest) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+        } else {
+            try stdout.print("unityz: unknown hierarchy option '{s}'\n", .{arg});
+            return;
+        }
+    }
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    switch (unityz.container.sniff(bytes).container) {
+        .bundle => {
+            const b = unityz.bundle.parse(arena, bytes) catch |err| {
+                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                return;
+            };
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) continue;
+                try printHierarchy(arena, n.data, n.path, json, stdout);
+            }
+        },
+        .webfile => {
+            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
+                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                return;
+            };
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) continue;
+                try printHierarchy(arena, e.data, e.path, json, stdout);
+            }
+        },
+        .serialized => try printHierarchy(arena, bytes, null, json, stdout),
+        else => try stdout.print("{s}: hierarchy requires a serialized file, bundle, or webfile\n", .{path}),
+    }
+}
+
+/// One transform's scene-graph edges and local position.
+const TNode = struct {
+    go: i64 = 0,
+    father: i64 = 0,
+    pos: [3]f32 = .{ 0, 0, 0 },
+    children: std.ArrayList(i64) = .empty,
+};
+
+const TEntry = struct { path_id: i64, node: TNode };
+
+/// A GameObject's name plus the classes of its components.
+const GoInfo = struct {
+    path_id: i64,
+    name: []const u8 = "",
+    components: std.ArrayList(i32) = .empty,
+};
+
+fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, json: bool, stdout: *Io.Writer) !void {
+    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
+        try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    if (node) |n| {
+        if (json) {
+            try stdout.print("{{\"node\":", .{});
+            try writeJsonString(stdout, n);
+            try stdout.print(",\"hierarchy\":[", .{});
+        } else {
+            try stdout.print("hierarchy of {s}:\n", .{n});
+        }
+    } else if (!json) {
+        try stdout.print("hierarchy:\n", .{});
+    }
+
+    var nodes: std.ArrayList(TEntry) = .empty;
+    var gos: std.ArrayList(GoInfo) = .empty;
+    for (sf.objects) |*o| {
+        const data = sf.objectData(o) orelse continue;
+        const ti = o.type_index orelse continue;
+        if (ti >= sf.types.len) continue;
+        const tree = sf.types[ti].type_tree;
+        if (tree.roots.len == 0) continue;
+        var r = unityz.streams.Reader.init(data);
+        r.endian = sf.endian;
+        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+        switch (o.class_id) {
+            4 => { // Transform
+                var tn = TNode{};
+                if (unityz.classes.fieldOf(v, "m_GameObject")) |go| tn.go = pptrPathId(go) orelse 0;
+                if (unityz.classes.fieldOf(v, "m_Father")) |fa| tn.father = pptrPathId(fa) orelse 0;
+                if (unityz.classes.fieldOf(v, "m_LocalPosition")) |lp| {
+                    if (unityz.classes.fieldOf(lp, "x")) |x| tn.pos[0] = @floatCast(x.asFloat() orelse 0);
+                    if (unityz.classes.fieldOf(lp, "y")) |y| tn.pos[1] = @floatCast(y.asFloat() orelse 0);
+                    if (unityz.classes.fieldOf(lp, "z")) |z| tn.pos[2] = @floatCast(z.asFloat() orelse 0);
+                }
+                if (unityz.classes.fieldOf(v, "m_Children")) |ch| {
+                    if (ch == .array) {
+                        for (ch.array) |c| {
+                            if (pptrPathId(c)) |cid| try tn.children.append(arena, cid);
+                        }
+                    }
+                }
+                try nodes.append(arena, .{ .path_id = o.path_id, .node = tn });
+            },
+            1 => { // GameObject
+                var gi = GoInfo{ .path_id = o.path_id };
+                gi.name = unityz.classes.stringField(v, "m_Name") orelse "";
+                if (unityz.classes.fieldOf(v, "m_Component")) |comp| {
+                    if (comp == .array) {
+                        for (comp.array) |c| {
+                            // each entry wraps the PPtr in a "component" field
+                            const wrapped = unityz.classes.fieldOf(c, "component") orelse continue;
+                            const cid = pptrPathId(wrapped) orelse continue;
+                            // the component object's class, by path id
+                            for (sf.objects) |*other| {
+                                if (other.path_id == cid) {
+                                    try gi.components.append(arena, other.class_id);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                try gos.append(arena, gi);
+            },
+            else => {},
+        }
+    }
+
+    var roots_printed: usize = 0;
+    for (nodes.items) |*e| {
+        if (e.node.father == 0) {
+            if (json and roots_printed != 0) try stdout.writeByte(',');
+            roots_printed += 1;
+            try printHierarchyNode(nodes.items, gos.items, e.path_id, 0, json, stdout);
+        }
+    }
+    if (json) {
+        try stdout.print("]", .{});
+        if (node != null) try stdout.writeByte('}');
+        try stdout.writeByte('\n');
+    } else {
+        try stdout.writeByte('\n');
+    }
+}
+
+fn findNode(nodes: []const TEntry, path_id: i64) ?*const TNode {
+    for (nodes) |*e| {
+        if (e.path_id == path_id) return &e.node;
+    }
+    return null;
+}
+
+fn findGo(gos: []const GoInfo, path_id: i64) ?*const GoInfo {
+    for (gos) |*g| {
+        if (g.path_id == path_id) return g;
+    }
+    return null;
+}
+
+fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, path_id: i64, depth: usize, json: bool, stdout: *Io.Writer) !void {
+    const tn = findNode(nodes, path_id) orelse return;
+    const go = findGo(gos, tn.go);
+    if (json) {
+        try stdout.writeAll("{\"name\":");
+        try writeJsonString(stdout, if (go) |g| g.name else "");
+        try stdout.print(",\"transform\":{d},\"gameObject\":{d},\"position\":[{d},{d},{d}],\"components\":[", .{ path_id, tn.go, tn.pos[0], tn.pos[1], tn.pos[2] });
+        if (go) |g| {
+            for (g.components.items, 0..) |c, i| {
+                if (i != 0) try stdout.writeByte(',');
+                try stdout.print("{d}", .{c});
+            }
+        }
+        try stdout.writeAll("],\"children\":[");
+        for (tn.children.items, 0..) |c, i| {
+            if (i != 0) try stdout.writeByte(',');
+            try printHierarchyNode(nodes, gos, c, depth + 1, json, stdout);
+        }
+        try stdout.writeAll("]}");
+        return;
+    }
+    for (0..depth) |_| try stdout.writeAll("  ");
+    try stdout.print("{s} (t {d}, go {d})", .{ if (go) |g| g.name else "?", path_id, tn.go });
+    if (go) |g| {
+        if (g.components.items.len != 0) {
+            try stdout.writeAll(" [");
+            for (g.components.items, 0..) |c, i| {
+                if (i != 0) try stdout.writeAll(", ");
+                try stdout.writeAll(className(c) orelse "Class");
+            }
+            try stdout.writeByte(']');
+        }
+    }
+    try stdout.print("  pos({d}, {d}, {d})\n", .{ tn.pos[0], tn.pos[1], tn.pos[2] });
+    for (tn.children.items) |c| {
+        try printHierarchyNode(nodes, gos, c, depth + 1, json, stdout);
     }
 }
 
