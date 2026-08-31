@@ -386,10 +386,14 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                         if (!std.mem.eql(u8, e.path, sn)) continue;
                     }
                 }
-                try writeFileToCwd(basename(e.path), e.data);
-                try stdout.print("extracted {s} ({d} bytes)\n", .{ basename(e.path), e.data.len });
+                // Entry paths are file-supplied; confine the written name to
+                // one component so a crafted path cannot steer the write
+                // outside the extract directory.
+                const base_name = sanitizeComponent(try arena.dupe(u8, basename(e.path)));
+                try writeFileToCwd(base_name, e.data);
+                try stdout.print("extracted {s} ({d} bytes)\n", .{ base_name, e.data.len });
                 if (recursive and unityz.container.sniff(e.data).container == .serialized) {
-                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(e.path)}), sidecars.items, &manifest, format, name_filter, stdout);
+                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, stdout);
                 }
             }
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
@@ -414,10 +418,14 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                         if (!std.mem.eql(u8, n.path, sn)) continue;
                     }
                 }
-                try writeFileToCwd(basename(n.path), n.data);
-                try stdout.print("extracted {s} ({d} bytes)\n", .{ basename(n.path), n.data.len });
+                // Node paths are file-supplied; confine the written name to
+                // one component so a crafted path cannot steer the write
+                // outside the extract directory.
+                const base_name = sanitizeComponent(try arena.dupe(u8, basename(n.path)));
+                try writeFileToCwd(base_name, n.data);
+                try stdout.print("extracted {s} ({d} bytes)\n", .{ base_name, n.data.len });
                 if (recursive and unityz.container.sniff(n.data).container == .serialized) {
-                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(n.path)}), sidecars.items, &manifest, format, name_filter, stdout);
+                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, stdout);
                 }
             }
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
@@ -1690,6 +1698,16 @@ fn writeMeshObj(
 /// range (|v| >= 1e9 or < 1e-4) would use exponent form in C; mesh
 /// coordinates and UVs never reach those, and they still print as a valid
 /// decimal here.
+/// Rounds `x` to the nearest integer with ties to even (Python's %.9g and
+/// C's %g rounding), unlike Zig's @round which ties away from zero.
+fn roundHalfEven(x: f64) f64 {
+    var r = @round(x);
+    if (@abs(x - r) == 0.5 and @mod(@abs(r), 2.0) == 1.0) {
+        r = if (x < 0) r + 1.0 else r - 1.0;
+    }
+    return r;
+}
+
 fn writeObjFloat(w: *unityz.streams.Writer, v: f64) !void {
     if (v == 0) {
         // UnityPy prints the negated zero as "-0"; match it.
@@ -1697,16 +1715,23 @@ fn writeObjFloat(w: *unityz.streams.Writer, v: f64) !void {
         return w.print("{s}", .{sign});
     }
     const e = @floor(@log10(@abs(v)));
-    const scale = std.math.pow(f64, 10.0, 8 - e); // 10^(8-e)
-    const scaled = v * scale;
-    var rounded = @round(scaled); // half away from zero
-    // Python's %.9g rounds half-to-even (f32-derived values are dyadic, so
-    // the 9-digit boundary lands on exact midpoints); Zig's @round does
-    // half-away. Pull ties toward the even result.
-    if (@abs(scaled - rounded) == 0.5 and @mod(@abs(rounded), 2.0) == 1.0) {
-        rounded = if (scaled < 0) rounded + 1.0 else rounded - 1.0;
+    // C's %g switches to exponent form when the exponent is < -4 or >= the
+    // precision (9). Real meshes carry denormal-scale values (a creature
+    // mesh's 8.57252764E-18 vertices), so both forms are exercised.
+    if (e < -4 or e >= 9) {
+        var exp: i32 = @intFromFloat(e);
+        const p10 = std.math.pow(f64, 10.0, @as(f64, @floatFromInt(exp)));
+        var mant = roundHalfEven(v / p10 * 1e8) / 1e8;
+        if (@abs(mant) >= 10.0) {
+            mant /= 10.0;
+            exp += 1;
+        }
+        const exp_sign: []const u8 = if (exp < 0) "-" else "+";
+        try w.print("{d}E{s}{d:0>2}", .{ mant, exp_sign, @abs(exp) });
+        return;
     }
-    try w.print("{d}", .{rounded / scale});
+    const scale = std.math.pow(f64, 10.0, 8 - e); // 10^(8-e)
+    try w.print("{d}", .{roundHalfEven(v * scale) / scale});
 }
 
 /// Writes one face as an `f` line: `per_face` vertex references starting at
@@ -5842,6 +5867,13 @@ test "writeObjFloat matches Python's %.9g" {
         .{ .v = -0.0, .want = "-0" },
         .{ .v = 0.4999999999, .want = "0.5" },
         .{ .v = 0.9999999995, .want = "1" },
+        // exponent form: C's %g uses E-notation for |v| < 1e-4 or >= 1e9
+        // (real meshes carry denormal-scale values like these)
+        .{ .v = 8.57252764e-18, .want = "8.57252764E-18" },
+        .{ .v = 1.71450553e-17, .want = "1.71450553E-17" },
+        .{ .v = -3.5e-5, .want = "-3.5E-05" },
+        .{ .v = 1e9, .want = "1E+09" },
+        .{ .v = 1.23456789e-5, .want = "1.23456789E-05" },
     };
     for (cases) |c| {
         var buf: [64]u8 = undefined;
