@@ -1531,3 +1531,21 @@ end-to-end on the real scene bundle: editing a Transform's
 m_LocalPosition.y reports `m_LocalPosition.y (0.6 -> 1.25)`, and
 editing m_Children[0].m_PathID reports the PPtr change - both edits
 round-trip clean under `edit --verify` (73 objects). 277/277 tests.
+
+2026-08-31 (diff --fields binary fixes): exercising `--fields` on the
+two real scene bundles (tmpiyofv9_i vs tmpjoxz4_66, the same creature
+scene renamed) exposed two real defects.
+
+Equal binary fields were reported as changed - `valuesEqual` handled
+strings, PPtrs and bools but not `.bytes`, so every byte array (mesh
+index/vertex data, compressed-mesh blobs) showed as differing even when
+identical; the two meshes' 8928-byte index and 88448-byte vertex
+buffers are byte-equal, so the correct report is just the renamed
+m_Name. And binary leaves render as base64 that can be megabytes, so
+the report printed huge blobs; leaf values are now truncated to 72
+chars.
+
+The real-bundle diff now reports the actual differences
+(container paths renamed and a "physics" entry added, GO/material/mesh
+names, the material's shader reference 73 -> 74) in 0.05s with zero
+false positives. 277/277 tests.
