@@ -47,6 +47,10 @@ const usage =
     \\                 (--json for a machine-readable array;
     \\                  --class <id> / --path-id <id> filters,
     \\                  <id> may be node:path-id)
+    \\  skin <path>      Report whether every Shader (class 48) skins
+    \\                 (exits non-zero when a SkinnedMeshRenderer references
+    \\                  a shader that does not skin; --json for a
+    \\                  machine-readable report)
     \\
     \\Edit usage: unityz edit <file> <path_id> <field> <json-value> [<field> <json-value> ...]
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
@@ -173,7 +177,7 @@ pub fn main(init: std.process.Init) !void {
     if (verify_failed_flag) std.process.exit(1);
 }
 
-const Command = enum { info, extract, edit, verify, stats, find, show, diff, hash };
+const Command = enum { info, extract, edit, verify, stats, find, show, diff, hash, skin };
 
 fn parseCommand(arg: []const u8) ?Command {
     inline for (std.meta.fields(Command)) |field| {
@@ -210,6 +214,7 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
         .show => return cmdShow(path, rest, bytes, stdout),
         .diff => return cmdDiff(path, rest, bytes, stdout),
         .hash => return cmdHash(path, rest, bytes, stdout),
+        .skin => return cmdSkin(path, rest, bytes, stdout),
     }
 }
 
@@ -428,7 +433,6 @@ fn resolveSidecar(sidecars: []const Sidecar, stream_path: []const u8, offset: u6
     }
     return &.{};
 }
-
 
 /// One hit from a SpriteAtlas lookup: the texture the sprite was packed
 /// into, plus the atlas's textureRect, alphaTexture and settingsRaw for it
@@ -1355,6 +1359,7 @@ fn printWebFile(path: []const u8, bytes: []const u8, dump: bool, objects: bool, 
             }
             try stdout.print("]", .{});
         }
+        try emitShadersJson(arena, wf.entries, stdout);
         try stdout.print("}}\n", .{});
         return;
     }
@@ -1377,6 +1382,76 @@ fn printWebFile(path: []const u8, bytes: []const u8, dump: bool, objects: bool, 
             try dumpSerializedBytes(arena, e.data, stdout);
         }
     }
+}
+
+/// A Shader's display name: `m_ParsedForm.m_Name` (its authored name),
+/// trimmed of the trailing NUL, falling back to the top-level `m_Name`.
+fn shaderDisplayName(v: unityz.value.Value) []const u8 {
+    if (unityz.classes.fieldOf(v, "m_ParsedForm")) |pf| {
+        if (unityz.classes.stringField(pf, "m_Name")) |n| {
+            return std.mem.trimEnd(u8, n, "\x00");
+        }
+    }
+    return unityz.classes.stringField(v, "m_Name") orelse "";
+}
+
+/// Appends `{"name":...,"skins":...}` per Shader object of `sf` to the
+/// current JSON field, threading the `first` flag cumulatively. `--json`
+/// `info` uses this to report whether each shader skins. Entries are printed
+/// one per object; undetermined shaders (no d3d11 blob or multi-tier) report
+/// `skins:null`.
+fn emitShaderSkinsJson(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, stdout: *Io.Writer, first: *bool) !void {
+    for (sf.objects) |*o| {
+        if (o.class_id != 48) continue;
+        const ti = o.type_index orelse continue;
+        if (ti >= sf.types.len) continue;
+        const tree = sf.types[ti].type_tree;
+        if (tree.roots.len == 0) continue;
+        const data = sf.objectData(o) orelse continue;
+        var r = unityz.streams.Reader.init(data);
+        r.endian = sf.endian;
+        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+        const name = shaderDisplayName(v);
+        if (!first.*) try stdout.writeByte(',');
+        first.* = false;
+
+        const info = (try unityz.shader.skinInfo(arena, v)) orelse {
+            try stdout.print("{{\"name\":", .{});
+            try writeJsonString(stdout, name);
+            try stdout.print(",\"skins\":null,\"determined\":false}}", .{});
+            continue;
+        };
+        try stdout.print("{{\"name\":", .{});
+        try writeJsonString(stdout, name);
+        try stdout.print(",\"skins\":{s},\"determined\":true,\"blend_channels\":{s},\"blend_sources\":[", .{
+            if (info.skins) "true" else "false",
+            if (info.blend_channels) "true" else "false",
+        });
+        for (info.blend_sources, 0..) |s, i| {
+            if (i != 0) try stdout.writeByte(',');
+            try stdout.print("{d}", .{s});
+        }
+        try stdout.print("],\"bone_bindings\":[", .{});
+        for (info.bone_bindings, 0..) |b, i| {
+            if (i != 0) try stdout.writeByte(',');
+            try writeJsonString(stdout, b);
+        }
+        try stdout.print("],\"vertex_programs\":{d},\"parameter_blobs\":{d}}}", .{ info.vertex_programs, info.parameter_blobs });
+    }
+}
+
+/// Emits the `,"shaders":[...]` field for the serialized nodes of a
+/// bundle/webfile (any slice whose elements expose a `data` byte range). The
+/// caller manages the surrounding JSON.
+fn emitShadersJson(arena: std.mem.Allocator, nodes: anytype, stdout: *Io.Writer) !void {
+    try stdout.print(",\"shaders\":[", .{});
+    var first = true;
+    for (nodes) |n| {
+        if (unityz.container.sniff(n.data).container != .serialized) continue;
+        const ns = unityz.serialized.parse(arena, n.data) catch continue;
+        try emitShaderSkinsJson(arena, &ns, stdout, &first);
+    }
+    try stdout.print("]", .{});
 }
 
 fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
@@ -1406,6 +1481,7 @@ fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, j
             }
             try stdout.print("]", .{});
         }
+        try emitShadersJson(arena, b.nodes, stdout);
         try stdout.print("}}\n", .{});
         return;
     }
@@ -1445,10 +1521,9 @@ fn printSerialized(path: []const u8, bytes: []const u8, dump: bool, objects: boo
     };
     if (json) {
         try stdout.print("{{\"type\":\"SerializedFile\",\"version\":{d},\"unity\":\"{s}\",\"platform\":{d},\"endian\":\"{s}\",\"type_tree\":{s},\"types\":{d},\"objects\":{d},\"externals\":{d}", .{
-            sf.version, sf.unity_version, sf.target_platform,
-            if (sf.endian == .little) "little" else "big",
-            if (sf.enable_type_tree) "true" else "false",
-            sf.types.len, sf.objects.len, sf.externals.len,
+            sf.version,                                    sf.unity_version,                             sf.target_platform,
+            if (sf.endian == .little) "little" else "big", if (sf.enable_type_tree) "true" else "false", sf.types.len,
+            sf.objects.len,                                sf.externals.len,
         });
         if (objects) {
             try stdout.print(",\"object_list\":[", .{});
@@ -1464,6 +1539,10 @@ fn printSerialized(path: []const u8, bytes: []const u8, dump: bool, objects: boo
             for (e.guid) |b| try stdout.print("{x:0>2}", .{b});
             try stdout.print("\",\"type\":{d}}}", .{e.type_});
         }
+        try stdout.print("]", .{});
+        try stdout.print(",\"shaders\":[", .{});
+        var first_shader = true;
+        try emitShaderSkinsJson(arena, &sf, stdout, &first_shader);
         try stdout.print("]}}\n", .{});
         return;
     }
@@ -1802,6 +1881,263 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
     if (!json) try stdout.print("  {d} object(s) checked, {d} failed\n", .{ checked, failed });
 }
 
+/// One Shader's skinning summary, as reported by `skin <path>`.
+const ShaderSummary = struct {
+    node: ?[]const u8,
+    path_id: i64,
+    name: []const u8,
+    skins: bool,
+    blend_channels: bool,
+    determined: bool,
+    blend_sources: []const u32,
+    bone_bindings: []const []const u8,
+};
+
+/// A `SkinnedMeshRenderer` referencing a shader that does not skin — the
+/// reason `skin <path>` exits non-zero.
+const SkinFailure = struct {
+    node: ?[]const u8,
+    path_id: i64,
+    shader_name: []const u8,
+    renderer_path_id: i64,
+};
+
+/// Interpret a value as a `PPtr`, accepting both the native `.pptr` form and
+/// an object with extra fields that the reader produced as an `.obj`.
+fn asPPtr(v: unityz.value.Value) ?unityz.value.PPtr {
+    return switch (v) {
+        .pptr => |p| p,
+        .obj => |fields| blk: {
+            var file: i32 = 0;
+            var path: i64 = 0;
+            var seen = false;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "m_FileID")) {
+                    file = @intCast(f.value.asInt() orelse 0);
+                    seen = true;
+                } else if (std.mem.eql(u8, f.name, "m_PathID")) {
+                    path = f.value.asInt() orelse 0;
+                    seen = true;
+                }
+            }
+            if (!seen) break :blk null;
+            break :blk .{ .file_id = file, .path_id = path };
+        },
+        else => null,
+    };
+}
+
+/// Reads a Shader object's value tree (borrowing from `sf`), returning null
+/// when the object has no decodable type tree.
+fn shaderObjectValue(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, o: *const unityz.serialized.ObjectInfo) ?unityz.value.Value {
+    const ti = o.type_index orelse return null;
+    if (ti >= sf.types.len) return null;
+    const tree = sf.types[ti].type_tree;
+    if (tree.roots.len == 0) return null;
+    const od = sf.objectData(o) orelse return null;
+    var r = unityz.streams.Reader.init(od);
+    r.endian = sf.endian;
+    return unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch null;
+}
+
+/// Collects skinning summaries for every Shader of `bytes`, and records a
+/// failure for any `SkinnedMeshRenderer` whose material's shader does not
+/// skin. `shaders`/`failures` are appended to across nodes.
+fn skinSerializedBytes(
+    arena: std.mem.Allocator,
+    bytes: []const u8,
+    node: ?[]const u8,
+    shaders: *std.ArrayList(ShaderSummary),
+    failures: *std.ArrayList(SkinFailure),
+) !void {
+    const sf = unityz.serialized.parse(arena, bytes) catch return;
+
+    // Per-shader skinning summary.
+    for (sf.objects) |*o| {
+        if (o.class_id != 48) continue;
+        const v = shaderObjectValue(arena, &sf, o) orelse continue;
+        const name = shaderDisplayName(v);
+        const info = try unityz.shader.skinInfo(arena, v);
+        if (info) |inf| {
+            try shaders.append(arena, .{
+                .node = node,
+                .path_id = o.path_id,
+                .name = name,
+                .skins = inf.skins,
+                .blend_channels = inf.blend_channels,
+                .determined = inf.determined,
+                .blend_sources = inf.blend_sources,
+                .bone_bindings = inf.bone_bindings,
+            });
+        } else {
+            // blob not decodable (no d3d11 platform, or multi-tier): unknown.
+            try shaders.append(arena, .{
+                .node = node,
+                .path_id = o.path_id,
+                .name = name,
+                .skins = false,
+                .blend_channels = false,
+                .determined = false,
+                .blend_sources = &[_]u32{},
+                .bone_bindings = &[_][]const u8{},
+            });
+        }
+    }
+
+    // A SkinnedMeshRenderer only renders if its shader skins. Resolve
+    // renderer -> materials -> shader (same-file references only) and flag a
+    // shader that is deterministically non-skinning.
+    for (sf.objects) |*o| {
+        if (o.class_id != 137) continue;
+        const rv = shaderObjectValue(arena, &sf, o) orelse continue;
+        const mats = unityz.classes.fieldOf(rv, "m_Materials") orelse continue;
+        const arr = switch (mats) {
+            .array => |a| a,
+            else => continue,
+        };
+        for (arr) |mat_ref| {
+            const mp = asPPtr(mat_ref) orelse continue;
+            if (mp.file_id != 0 or mp.path_id == 0) continue; // external or null
+            const mv = readObjectValue(arena, &sf, mp.path_id) orelse continue;
+            const sp = unityz.classes.pptrField(mv, "m_Shader") orelse continue;
+            if (sp.file_id != 0 or sp.path_id == 0) continue;
+            const sv = readObjectValue(arena, &sf, sp.path_id) orelse continue;
+            const sname = shaderDisplayName(sv);
+            const info = (try unityz.shader.skinInfo(arena, sv)) orelse continue; // unknown -> no verdict
+            if (!info.skins) {
+                try failures.append(arena, .{
+                    .node = node,
+                    .path_id = sp.path_id,
+                    .shader_name = sname,
+                    .renderer_path_id = o.path_id,
+                });
+            }
+        }
+    }
+}
+
+/// `skin <path> [--json]` — report whether each Shader (class 48) skins, and
+/// exit non-zero when a `SkinnedMeshRenderer` references a shader that does
+/// not skin. Recurse into bundle/webfile serialized nodes.
+fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+    var json = false;
+    for (rest) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+        } else {
+            try stdout.print("unityz: unknown skin option '{s}'\n", .{arg});
+            return;
+        }
+    }
+
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var shaders: std.ArrayList(ShaderSummary) = .empty;
+    defer shaders.deinit(arena);
+    var failures: std.ArrayList(SkinFailure) = .empty;
+    defer failures.deinit(arena);
+
+    switch (unityz.container.sniff(bytes).container) {
+        .serialized => try skinSerializedBytes(arena, bytes, null, &shaders, &failures),
+        .bundle => {
+            const b = unityz.bundle.parse(arena, bytes) catch |err| {
+                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                return;
+            };
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) continue;
+                try skinSerializedBytes(arena, n.data, n.path, &shaders, &failures);
+            }
+        },
+        .webfile => {
+            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
+                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                return;
+            };
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) continue;
+                try skinSerializedBytes(arena, e.data, e.path, &shaders, &failures);
+            }
+        },
+        .archive => {
+            try stdout.print("{s}: UnityArchive files are not supported yet\n", .{path});
+            return;
+        },
+        .unknown => {
+            try stdout.print("{s}: not a recognized Unity asset file\n", .{path});
+            return;
+        },
+    }
+
+    if (json) {
+        try stdout.print("{{\"shaders\":[", .{});
+        for (shaders.items, 0..) |s, i| {
+            if (i != 0) try stdout.writeByte(',');
+            try stdout.print("{{\"path_id\":{d},\"name\":", .{s.path_id});
+            try writeJsonString(stdout, s.name);
+            try stdout.print(",\"skins\":{s},\"determined\":{s},\"blend_channels\":{s},\"blend_sources\":[", .{
+                if (s.skins) "true" else "false",
+                if (s.determined) "true" else "false",
+                if (s.blend_channels) "true" else "false",
+            });
+            for (s.blend_sources, 0..) |src, si| {
+                if (si != 0) try stdout.writeByte(',');
+                try stdout.print("{d}", .{src});
+            }
+            try stdout.print("],\"bone_bindings\":[", .{});
+            for (s.bone_bindings, 0..) |b, bi| {
+                if (bi != 0) try stdout.writeByte(',');
+                try writeJsonString(stdout, b);
+            }
+            try stdout.print("]}}", .{});
+        }
+        try stdout.print("],\"failures\":[", .{});
+        for (failures.items, 0..) |f, i| {
+            if (i != 0) try stdout.writeByte(',');
+            try stdout.print("{{\"path_id\":{d},\"renderer_path_id\":{d},\"shader\":", .{ f.path_id, f.renderer_path_id });
+            try writeJsonString(stdout, f.shader_name);
+            try stdout.print("}}", .{});
+        }
+        try stdout.print("]}}\n", .{});
+    } else {
+        for (shaders.items) |s| {
+            if (s.node) |n| try stdout.print("{s}:", .{n});
+            try stdout.print(" object {d} {s}: skins {s}", .{
+                s.path_id,
+                s.name,
+                if (!s.determined) "unknown" else if (s.skins) "true" else "false",
+            });
+            if (s.determined) {
+                try stdout.print(" (blend channels:", .{});
+                for (s.blend_sources, 0..) |src, i| {
+                    if (i != 0) try stdout.writeByte(',');
+                    try stdout.print("{d}", .{src});
+                }
+                try stdout.print("; bone bindings:", .{});
+                for (s.bone_bindings, 0..) |b, i| {
+                    if (i != 0) try stdout.writeByte(',');
+                    try stdout.print(" {s}", .{b});
+                }
+                try stdout.print(")", .{});
+            }
+            try stdout.print("\n", .{});
+        }
+        if (failures.items.len != 0) {
+            for (failures.items) |f| {
+                if (f.node) |n| try stdout.print("{s}:", .{n});
+                try stdout.print(" object {d} (renderer {d}): shader {s} does not skin\n", .{ f.path_id, f.renderer_path_id, f.shader_name });
+            }
+            try stdout.print("{d} skinned-mesh shader(s) do not skin\n", .{failures.items.len});
+        } else {
+            try stdout.print("all skinned-mesh shaders skin\n", .{});
+        }
+    }
+
+    if (failures.items.len != 0) verify_failed_flag = true;
+}
+
 /// Compares two directories file-by-file by content hash, reporting
 /// unchanged/changed/new/deleted files and totals. UnityPy has no tree
 /// comparison.
@@ -2020,12 +2356,12 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         for (entries.items, 0..) |fp, idx| {
             if (idx != 0) try stdout.writeByte(',');
             try stdout.writeByte('{');
-        if (fp.node) |n| {
-            try stdout.print("\"node\":", .{});
-            try writeJsonString(stdout, n);
-            try stdout.writeByte(',');
-        }
-        try stdout.print("\"path_id\":{d},\"hash\":\"{x:0>16}\",\"class\":{d},\"size\":{d}}}", .{ fp.path_id, fp.hash, fp.class_id, fp.size });
+            if (fp.node) |n| {
+                try stdout.print("\"node\":", .{});
+                try writeJsonString(stdout, n);
+                try stdout.writeByte(',');
+            }
+            try stdout.print("\"path_id\":{d},\"hash\":\"{x:0>16}\",\"class\":{d},\"size\":{d}}}", .{ fp.path_id, fp.hash, fp.class_id, fp.size });
         }
         try stdout.print("]\n", .{});
     }
@@ -3590,7 +3926,6 @@ test "parseCommand recognizes known subcommands" {
 }
 
 test "parseFieldPath splits dotted and indexed paths" {
-
     const p1 = try parseFieldPath("m_Name");
     try std.testing.expectEqual(@as(usize, 1), p1.len);
     try std.testing.expectEqualStrings("m_Name", p1[0].name);

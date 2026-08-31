@@ -46,6 +46,9 @@ pub const object_reader = @import("object_reader.zig");
 /// Typed views over the value tree for the common classes.
 pub const classes = @import("classes.zig");
 
+/// Shader (class 48) sub-program blob parsing and skinning detection.
+pub const shader = @import("shader.zig");
+
 /// Texture format decoding to RGBA8.
 pub const texture = @import("texture.zig");
 
