@@ -1137,6 +1137,23 @@ fn readF32(data: []const u8, pos: usize, endian: std.builtin.Endian) f32 {
     return @bitCast(bits);
 }
 
+/// Reads component `comp` of vertex channel `channel_index` for `vertex` as a
+/// float32, honoring the mesh's per-stream layout. Null when the channel is
+/// absent, non-float32, or the read would run past the vertex buffer.
+fn meshF32(
+    mesh: *const unityz.classes.Mesh,
+    channel_index: usize,
+    vertex: usize,
+    comp: usize,
+    endian: std.builtin.Endian,
+) ?f32 {
+    const c = mesh.channel(channel_index) orelse return null;
+    if (c.format != 0 or comp >= c.dimension) return null;
+    const off = mesh.channelByteOffset(channel_index, vertex) orelse return null;
+    if (off + (comp + 1) * 4 > mesh.vertex_data.len) return null;
+    return readF32(mesh.vertex_data, off + comp * 4, endian);
+}
+
 fn fieldStr(v: unityz.value.Value, name: []const u8) []const u8 {
     return unityz.classes.stringField(v, name) orelse "";
 }
@@ -1148,8 +1165,9 @@ fn unityMajor(version: []const u8) u32 {
 }
 
 /// Wavefront OBJ export for a Mesh: vertices, normals, UVs, and triangle
-/// faces from the index buffer. Returns an empty slice when the layout is
-/// unsupported (compressed mesh, non-float32 vertex channel, multi-stream).
+/// faces from the index buffer. Handles multi-stream vertex layouts (each
+/// channel read from its own stream's stride/offset). Returns an empty slice
+/// when the layout is unsupported (compressed mesh, non-float32 channel).
 fn writeMeshObj(
     arena: std.mem.Allocator,
     sf: *const unityz.serialized.SerializedFile,
@@ -1159,9 +1177,8 @@ fn writeMeshObj(
     if (unityz.classes.intField(v, "m_MeshCompression") orelse 0 != 0) return &.{};
     const vch = mesh.channel(0) orelse return &.{};
     if (vch.format != 0 or vch.dimension < 3) return &.{};
-    const stride = mesh.stride() orelse return &.{};
     const vcount: usize = mesh.vertex_count;
-    if (mesh.vertex_data.len < stride *| vcount) return &.{};
+    // Bounds are checked per read in meshF32; the index buffer is bounded below.
     const idx_bytes: usize = if (mesh.index_format == 1) 4 else 2;
     if (mesh.index_format != 0 and mesh.index_format != 1) return &.{};
     if (mesh.index_buffer.len < idx_bytes * 3) return &.{};
@@ -1171,7 +1188,8 @@ fn writeMeshObj(
     // (UnityPy's kShaderChannel mapping); the layout is visible in the
     // real file: the vertex data's first 2-float channel past normals.
     const uv_major = unityMajor(sf.unity_version);
-    const uv = mesh.channel(if (uv_major >= 2018) 4 else 3);
+    const uv_index: usize = if (uv_major >= 2018) 4 else 3;
+    const uv = mesh.channel(uv_index);
 
     // The arena owns the buffer; never deinit an arena-backed Writer and
     // then hand out its slice (Zig 0.16's ArenaAllocator.free reclaims the
@@ -1180,32 +1198,31 @@ fn writeMeshObj(
     var w: unityz.streams.Writer = .init(arena);
     try w.print("o {s}\n", .{std.mem.trimEnd(u8, mesh.name, "\x00")});
     for (0..vcount) |i| {
-        const base = i * stride;
-        const x = readF32(mesh.vertex_data, base + vch.offset, sf.endian);
-        const y = readF32(mesh.vertex_data, base + vch.offset + 4, sf.endian);
-        const z = readF32(mesh.vertex_data, base + vch.offset + 8, sf.endian);
+        const x = meshF32(mesh, 0, i, 0, sf.endian) orelse return &.{};
+        const y = meshF32(mesh, 0, i, 1, sf.endian) orelse return &.{};
+        const z = meshF32(mesh, 0, i, 2, sf.endian) orelse return &.{};
         // Unity is left-handed; OBJ convention is right-handed, so mirror X
         // (UnityPy's exporter does the same, negating vertices and normals).
         try w.print("v {d} {d} {d}\n", .{ -x, y, z });
     }
     if (nrm) |n| {
-        if (n.format == 0 and n.dimension >= 3) {
+        if (n.format == 0 and n.dimension >= 3 and meshF32(mesh, 1, 0, 0, sf.endian) != null) {
             for (0..vcount) |i| {
-                const base = i * stride;
-                const x = readF32(mesh.vertex_data, base + n.offset, sf.endian);
-                const y = readF32(mesh.vertex_data, base + n.offset + 4, sf.endian);
-                const z = readF32(mesh.vertex_data, base + n.offset + 8, sf.endian);
-                try w.print("vn {d} {d} {d}\n", .{ -x, y, z });
+                try w.print("vn {d} {d} {d}\n", .{
+                    -(meshF32(mesh, 1, i, 0, sf.endian) orelse 0),
+                    meshF32(mesh, 1, i, 1, sf.endian) orelse 0,
+                    meshF32(mesh, 1, i, 2, sf.endian) orelse 0,
+                });
             }
         }
     }
     if (uv) |t| {
-        if (t.format == 0 and t.dimension >= 2) {
+        if (t.format == 0 and t.dimension >= 2 and meshF32(mesh, uv_index, 0, 0, sf.endian) != null) {
             for (0..vcount) |i| {
-                const base = i * stride;
-                const u = readF32(mesh.vertex_data, base + t.offset, sf.endian);
-                const v2 = readF32(mesh.vertex_data, base + t.offset + 4, sf.endian);
-                try w.print("vt {d} {d}\n", .{ u, v2 });
+                try w.print("vt {d} {d}\n", .{
+                    meshF32(mesh, uv_index, i, 0, sf.endian) orelse 0,
+                    meshF32(mesh, uv_index, i, 1, sf.endian) orelse 0,
+                });
             }
         }
     }
