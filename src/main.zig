@@ -845,8 +845,8 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                         try extractFile(subdir, meta_name, meta);
                     }
                     // Codecs that decode in pure Zig (PCM8/16/24/32/FLOAT,
-                    // GCADPCM, IMA ADPCM) also export as a playable WAV, no
-                    // external tools needed. Vorbis banks (mode 15) need a
+                    // IMA ADPCM) also export as a playable WAV, no external
+                    // tools needed. Vorbis banks (mode 15) need a
                     // transform codec and stay as .fsb - UnityPy shells out
                     // to ffmpeg for every conversion, so this is
                     // beyond-parity.

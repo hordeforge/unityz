@@ -190,10 +190,12 @@ UnityPy (which routes both to its ETC1 decoder), and ETC2_RGBA1 (46)
 decodes its punch-through alpha, matching UnityPy's texture2ddecoder
 pixel-for-pixel.
 
-ETC2, the BC family, and the crunch variants decode pixel-identical to
-UnityPy (ASTC decodes within ±1 per channel on a small fraction of
-pixels, a rounding variance between independent spec-compliant decoders;
-UnityPy itself switched from texture2ddecoder to ARM's astc_encoder).
+ETC2, the BC family, the crunch variants, and ASTC decode
+pixel-identical to UnityPy: LDR ASTC matches ARM's astcenc byte for byte
+(verified on real assets - the banner_1 test bundle's ASTC_RGBA_6x6
+texture and its polygon-mesh sprite, whose streamed pixels live in a
+.resS sidecar). UnityPy itself switched from texture2ddecoder to ARM's
+astc_encoder.
 
 The raw half/float/16-bit formats use standard documented conversions;
 UnityPy's converters for those are lossy (its half path truncates x*256
