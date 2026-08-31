@@ -225,6 +225,10 @@ pub fn parseParameterBlob(arena: std.mem.Allocator, data: []const u8, offset: us
     for (0..@as(usize, @intCast(entry_count))) |_| {
         const name = trimNul(try r.readAlignedStringBorrow());
         const kind = try r.readInt(i32);
+        // Reject the negative case here rather than at the switch below: the
+        // @intCast to the u32 field runs first, and is illegal behavior on a
+        // negative. A negative kind hits `else => error.BadKind` either way.
+        if (kind < 0) return error.BadKind;
         try bindings.append(arena, .{ .name = name, .kind = @intCast(kind) });
         switch (kind) {
             0 => { // texture
@@ -394,6 +398,10 @@ pub fn skinInfo(arena: std.mem.Allocator, v: value.Value) !?SkinInfo {
         const trailing = data[data_end..rec_end];
         const bc = parseBindChannels(arena, trailing) catch continue;
         for (bc.channels) |ch| {
+            // Channel sources are raw i32s from the file; @intCast is illegal
+            // behavior on a negative one. Neither blend source is negative, so
+            // skipping cannot change the result.
+            if (ch[0] < 0) continue;
             const src: u32 = @intCast(ch[0]);
             if (src == blend_weight_source or src == blend_indices_source) {
                 var found = false;

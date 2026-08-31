@@ -59,7 +59,12 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Bank {
         const raw = std.mem.readInt(u64, data[pos..][0..8], .little);
         pos += 8;
         var next_chunk = raw & 1 != 0;
-        var frequency: u32 = FREQUENCY_VALUES[@intCast((raw >> 1) & 0xf)];
+        // The code is 4 bits (0-15) but only 0-9 name a standard rate, so
+        // an out-of-range code must not index the table. Fall back to the
+        // table's own 0 ("unknown") entry: a FREQUENCY chunk below is what
+        // carries a non-standard rate, and it overrides this.
+        const freq_code: usize = @intCast((raw >> 1) & 0xf);
+        var frequency: u32 = if (freq_code < FREQUENCY_VALUES.len) FREQUENCY_VALUES[freq_code] else 0;
         const channels: u32 = @intCast(((raw >> 5) & 1) + 1);
         const data_offset: u32 = @intCast(((raw >> 6) & 0x0fffffff) * 16);
         const sample_count: u32 = @intCast((raw >> 34) & 0x3fffffff);

@@ -75,7 +75,14 @@ pub fn jsonWrite(v: Value, writer: anytype) !void {
         .bool => |b| try writer.writeAll(if (b) "true" else "false"),
         .int => |i| try writer.print("{d}", .{i}),
         .uint => |u| try writer.print("{d}", .{u}),
-        .float => |f| try writer.print("{d}", .{f}),
+        // JSON has no NaN/Infinity literal, and "{d}" would emit the bare
+        // words `nan`/`inf`, which no conforming parser accepts. Float
+        // fields are bit-cast straight from the file, so any bit pattern
+        // reaches here. Emit null, as JSON.stringify does.
+        .float => |f| if (std.math.isFinite(f))
+            try writer.print("{d}", .{f})
+        else
+            try writer.writeAll("null"),
         .string => |s| try jsonString(s, writer),
         .bytes => |b| {
             try writer.writeAll("\"");
