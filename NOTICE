@@ -1,0 +1,62 @@
+unityz
+Copyright (c) 2026 ywy50
+Licensed under the MIT License; see LICENSE.
+
+This product bundles third-party source code. The notices below are
+required by the licenses of that code and apply only to the files listed.
+
+================================================================================
+unitycrunch -- crunch/CRN texture decompressor
+Location in this distribution: src/vendor/unitycrunch/
+  crn_decomp.h
+  crn_defs.h
+  crnlib.h
+
+Copyright (c) 2010-2016 Richard Geldreich, Jr. and Binomial LLC
+License: ZLIB (http://opensource.org/licenses/Zlib)
+
+Version identifiers carried by the vendored sources:
+  CRND_LIB_VERSION 104 / CRND_VERSION_STRING "01.04"  (crn_defs.h)
+  CRNLIB_VERSION 104                                   (crnlib.h)
+The upstream revision these files were taken from is not recorded; the
+identifiers above are the only provenance the sources themselves carry.
+
+MODIFICATIONS
+The ZLIB license requires that altered source versions be plainly marked
+as such. These files are altered from their original form:
+
+  - crn_decomp.h carries an in-file `/* edit for Mac & Linux */` marker at
+    the top of its include block, present when the sources were vendored.
+  - crn_decomp.h was further modified in this repository to harden the
+    decoder against malformed input (huffman bounds and level-offset
+    validation), in commit 0739822.
+  - crn_defs.h carries no copyright or license notice of its own. It is
+    part of the same ZLIB-licensed distribution as its two siblings, which
+    both carry the notice reproduced below, and is covered by it.
+
+The wrapper src/vendor/unitycrunch_shim.cpp is original work of this
+project and is covered by this project's MIT license, not by the ZLIB
+grant below.
+
+ZLIB LICENSE, as carried by crn_decomp.h and crnlib.h:
+
+  Copyright (c) 2010-2016 Richard Geldreich, Jr. and Binomial LLC
+
+  This software is provided 'as-is', without any express or implied
+  warranty.  In no event will the authors be held liable for any damages
+  arising from the use of this software.
+
+  Permission is granted to anyone to use this software for any purpose,
+  including commercial applications, and to alter it and redistribute it
+  freely, subject to the following restrictions:
+
+  1. The origin of this software must not be misrepresented; you must not
+  claim that you wrote the original software. If you use this software
+  in a product, an acknowledgment in the product documentation would be
+  appreciated but is not required.
+
+  2. Altered source versions must be plainly marked as such, and must not be
+  misrepresented as being the original software.
+
+  3. This notice may not be removed or altered from any source distribution.
+================================================================================

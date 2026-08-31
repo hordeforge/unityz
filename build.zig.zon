@@ -45,6 +45,10 @@
         "build.zig.zon",
         "src",
         "LICENSE",
+        // Attribution for the vendored ZLIB-licensed unitycrunch sources
+        // under src/vendor/. It has to travel with the package: the ZLIB
+        // grant is what lets consumers redistribute those files.
+        "NOTICE",
         "README.md",
     },
 }
