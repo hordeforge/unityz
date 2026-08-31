@@ -1376,3 +1376,12 @@ the mutated resource offset 10000 (4096 + 5904) cross-checked against
 the extracted sidecars. Identical files report 0 differ, `--class 83`
 scopes to clips, and directory diffs run the pass per matched pair.
 277/277 tests.
+
+2026-08-31 (find --any): `find` gained an `--any` flag that matches the
+needle against every string value in an object's tree, not just
+`m_Name` - so objects whose interesting strings live in other fields are
+searchable (e.g. AssetBundle `m_Container` asset paths). Combines with
+`--exact` for whole-string equality. Verified on the real bundles:
+`find char_118 "torappu"` finds nothing (no m_Name contains it), while
+`--any` finds the AssetBundle through its container paths, and
+`--any --exact` with a full asset path matches exactly. 277/277 tests.

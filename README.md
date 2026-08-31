@@ -36,7 +36,8 @@ does not offer:
 - `verify` - read every object through its type tree, write it back, compare
   bytes; non-zero exit on failure
 - `stats` - per-class sizes and duplicate-object detection
-- `find` - name/class search, with `--exact` for whole-name lookups
+- `find` - name/class search, with `--exact` for whole-name lookups and
+  `--any` to search every string field (e.g. AssetBundle container paths)
 - `show` - one object as JSON, or a hex dump of its bytes with `--raw`
 - `diff` - compare two files' objects by content hash, scoped with
   `--class`, or two directories file-by-file
