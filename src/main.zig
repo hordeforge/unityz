@@ -1992,7 +1992,17 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
     };
     var checked: usize = 0;
     var failed: usize = 0;
+    // An object's value tree and its re-serialized bytes are dead once the
+    // byte comparison is done, but `arena` spans every object of every node
+    // of the file, so taking them from it makes peak memory the sum of the
+    // whole bundle rather than its largest object. Reset a scratch arena per
+    // object instead. Failure messages keep coming from `arena`: they are
+    // held by `report` and outlive the iteration that recorded them.
+    var obj_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer obj_arena_state.deinit();
+    const obj_arena = obj_arena_state.allocator();
     for (sf.objects) |*o| {
+        defer _ = obj_arena_state.reset(.retain_capacity);
         if (class_filter) |cf| {
             if (o.class_id != cf) continue;
         }
@@ -2009,7 +2019,7 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
 
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
-        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch |err| {
+        const v = unityz.object_reader.readObject(obj_arena, &r, &tree.roots[0]) catch |err| {
             if (json) {
                 try recordFailure(report, arena, node, o.path_id, "read failed: {s}", .{@errorName(err)});
             } else {
@@ -2019,7 +2029,7 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
             failed += 1;
             continue;
         };
-        var w: unityz.streams.Writer = .init(arena);
+        var w: unityz.streams.Writer = .init(obj_arena);
         // preserve the bytes after the tree fields (MonoBehaviour payloads)
         unityz.object_writer.writeObject(&w, &tree.roots[0], v, data[r.position()..]) catch |err| {
             if (json) {
@@ -2042,7 +2052,7 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
         } else if (o.class_id == 48) {
             // Extra Shader check: the sub-program blob must decode and
             // re-encode byte for byte (parameter records round-trip exactly).
-            if (!(try unityz.shader.verifyBlob(arena, v))) {
+            if (!(try unityz.shader.verifyBlob(obj_arena, v))) {
                 if (json) {
                     try recordFailure(report, arena, node, o.path_id, "shader sub-program blob does not round-trip", .{});
                 } else {
@@ -3376,7 +3386,16 @@ fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
         return;
     };
     var matches: usize = 0;
+    // `find` decodes a whole value tree per object but keeps only `m_Name`
+    // from it, so holding the trees in `arena` — which spans every object of
+    // every node — makes peak memory the sum of the file's decoded objects.
+    // Reset a scratch arena per object; the name is duped into `arena` at
+    // the one point it outlives the iteration (the `found` list).
+    var obj_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer obj_arena_state.deinit();
+    const obj_arena = obj_arena_state.allocator();
     for (sf.objects) |*o| {
+        defer _ = obj_arena_state.reset(.retain_capacity);
         if (class_filter) |cf| {
             if (o.class_id != cf) continue;
         }
@@ -3387,7 +3406,7 @@ fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
         const data = sf.objectData(o) orelse continue;
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
-        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+        const v = unityz.object_reader.readObject(obj_arena, &r, &tree.roots[0]) catch continue;
         const name = unityz.classes.stringField(v, "m_Name") orelse "";
         if (needle.len != 0) {
             if (exact) {
@@ -3399,10 +3418,11 @@ fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
             }
         }
         if (json) {
-            // Arena-backed, like `name`: the caller's arena is released on
-            // return, whereas a page_allocator buffer would leak once per
-            // file when `find` is run over a directory.
-            try found.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = name, .node = node });
+            // Arena-backed: the caller's arena is released on return, whereas
+            // a page_allocator buffer would leak once per file when `find` is
+            // run over a directory. `name` borrows the per-object arena, which
+            // is reset at the end of this iteration, so it has to be copied.
+            try found.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = try arena.dupe(u8, name), .node = node });
         } else {
             const cname = className(o.class_id) orelse "Class";
             if (node) |nd| {
