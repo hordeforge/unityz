@@ -1576,3 +1576,18 @@ The
 patch JSON shape (an object of path-id -> field -> value) was only
 tersely documented, so the usage text now carries a concrete patch
 example following the project's help conventions. 279/279 tests.
+
+2026-08-31 (ROADMAP refresh + skin scene validation): the roadmap's
+Planned section still listed the managed .NET graph (resolved by the
+type-tree graph export) and its Done list predated the recent
+beyond-parity work; both corrected - Planned is now empty and the
+beyond-parity CLI work (diff --pixels/--audio/--fields, TGA/BMP/raw
+formats, FSB5 decode, find --any, hierarchy, the structured exports)
+is recorded.
+
+Also validated `skin` on the real scene bundle for the
+first time: it correctly reports that the Shamway/Unlit shader does not
+skin (no blend channels, no bone bindings) and that the scene's
+SkinnedMeshRenderer (46) references it, exiting 1 - so that scene's
+renderer would show broken skinning in-game, a real finding the tool
+surfaces. The atlas bundle passes with exit 0. 279/279 tests.
