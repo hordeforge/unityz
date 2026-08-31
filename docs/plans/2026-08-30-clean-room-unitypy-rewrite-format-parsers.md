@@ -1416,3 +1416,11 @@ exactly. Two bugs caught while building: the GameObject m_Component
 entries wrap the PPtr in a "component" field (pptrPathId on the entry
 missed it), and a shared JSON comma flag corrupted nested children
 arrays (now per-list separators). 277/277 tests.
+
+2026-08-31 (info --objects names): the object table now includes each
+object's `m_Name` (read through its type tree; objects without a name or
+tree stay bare), in both text mode and the `--json` object_list entries.
+Verified on the real bundles: the atlas bundle's 10 named objects match
+the find/extract names exactly (sprites WaterTower/WaterTowerModern3/
+..., the SpriteAtlas, the AssetBundle), and the JSON stays parseable.
+277/277 tests.
