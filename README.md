@@ -63,8 +63,8 @@ does not offer:
   matrices, exiting non-zero when a `SkinnedMeshRenderer` references a
   shader that does not
 - `hierarchy` - the GameObject/Transform tree of a scene (root transforms
-  first, names, component classes, local positions; `--json` for nested
-  objects)
+  first, names, component classes, local positions, with bones of any
+  SkinnedMeshRenderer marked; `--json` for nested objects)
 
 `diff` gains `--pixels`: every matched Texture2D and Sprite is decoded
 from both files (sprites rendered through their crop rect, packed
@@ -215,9 +215,14 @@ matching UnityPy's mask_sprite/render_sprite_mesh.
 Managed-reference registries decode
 through their type trees, MonoBehaviours resolve their MonoScript and
 export the raw script payload alongside the decoded managed .NET object
-graph (a `.json` sidecar, read off the type tree), Meshes export as
+graph (a `.json` sidecar, read off the type tree), and Meshes export as
 Wavefront OBJ (vertices, normals, UVs, faces), including multi-stream
-vertex layouts, Materials and Shaders export as readable text, and
+vertex layouts.
+
+Materials export as readable text plus a structured JSON
+(shader reference, render queue, and the saved properties: texture
+bindings with scale/offset, floats, colors, ints), Shaders export as
+readable text, and
 AnimationClips export their curves as JSON (per-curve bone path,
 attribute, and keyframes with time, value, and slopes - UnityPy reads
 clips generically but never surfaces the curves).

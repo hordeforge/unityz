@@ -69,7 +69,8 @@ const usage =
     \\                  machine-readable report)
     \\  hierarchy <path> Print the GameObject/Transform tree of a scene
     \\                 (root transforms first, names, component classes,
-    \\                  local positions; --json for nested objects)
+    \\                  local positions, bones of any SkinnedMeshRenderer
+    \\                  marked (bone); --json for nested objects)
     \\
     \\Edit usage: unityz edit <file> <path_id> <field> <json-value> [<field> <json-value> ...]
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
@@ -964,13 +965,24 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = clip_name, .subdir = subdir });
                 extracted += 1;
             },
-            21 => { // Material -> readable text
+            21 => { // Material -> readable text + structured JSON
                 const mat = try writeMaterialText(arena, v);
                 var name_buf: [160]u8 = undefined;
                 const name = try std.fmt.bufPrint(&name_buf, "material_{d}.txt", .{o.path_id});
                 try extractFile(subdir, name, mat);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ name, mat.len });
                 extracted += 1;
+                // Structured export: shader reference + saved properties
+                // (texture bindings with scale/offset, floats, colors,
+                // ints). UnityPy reads materials generically; this is the
+                // "what does this material reference" answer in one file.
+                if (try materialJson(arena, v)) |mj| {
+                    var jbuf: [160]u8 = undefined;
+                    const jname = try std.fmt.bufPrint(&jbuf, "material_{d}.json", .{o.path_id});
+                    try extractFile(subdir, jname, mj);
+                    try stdout.print("extracted {s} ({d} bytes)\n", .{ jname, mj.len });
+                    extracted += 1;
+                }
             },
             48 => { // Shader -> readable text
                 const shd = try writeShaderText(arena, v);
@@ -1735,6 +1747,120 @@ fn writeMaterialText(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u
         }
     }
     return arena.dupe(u8, w.getWritten());
+}
+
+/// Structured Material export: name, shader reference, render queue, and
+/// the saved properties (texture bindings with scale/offset, floats,
+/// colors, ints). Null when the material has no saved-properties block.
+fn materialJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
+    const props = unityz.classes.fieldOf(v, "m_SavedProperties") orelse return null;
+    var buf: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    const w = &aw.writer;
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, fieldStr(v, "m_Name"));
+    try w.writeAll(",\"shader\":");
+    try w.print("{d}", .{if (unityz.classes.pptrField(v, "m_Shader")) |p| p.path_id else 0});
+    if (unityz.classes.intField(v, "m_CustomRenderQueue")) |q| {
+        try w.print(",\"render_queue\":{d}", .{q});
+    }
+    try w.writeAll(",\"textures\":[");
+    if (unityz.classes.fieldOf(props, "m_TexEnvs")) |texenvs| {
+        if (texenvs == .array) {
+            var count: usize = 0;
+            for (texenvs.array) |entry| {
+                if (entry != .array or entry.array.len < 2) continue;
+                const prop_name = switch (entry.array[0]) {
+                    .string => |s| s,
+                    else => "",
+                };
+                const val = entry.array[1];
+                const tex = if (unityz.classes.pptrField(val, "m_Texture")) |t| t.path_id else 0;
+                if (count != 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, prop_name);
+                try w.print(",\"texture\":{d}", .{tex});
+                if (unityz.classes.fieldOf(val, "m_Scale")) |sc| {
+                    try w.print(",\"scale\":[{d},{d}]", .{
+                        if (unityz.classes.floatField(sc, "x")) |x| x else 1,
+                        if (unityz.classes.floatField(sc, "y")) |y| y else 1,
+                    });
+                }
+                if (unityz.classes.fieldOf(val, "m_Offset")) |off| {
+                    try w.print(",\"offset\":[{d},{d}]", .{
+                        unityz.classes.floatField(off, "x") orelse 0,
+                        unityz.classes.floatField(off, "y") orelse 0,
+                    });
+                }
+                try w.writeByte('}');
+                count += 1;
+            }
+        }
+    }
+    try w.writeAll("],\"floats\":[");
+    if (unityz.classes.fieldOf(props, "m_Floats")) |floats| {
+        if (floats == .array) {
+            var count: usize = 0;
+            for (floats.array) |entry| {
+                if (entry != .array or entry.array.len < 2) continue;
+                const prop_name = switch (entry.array[0]) {
+                    .string => |s| s,
+                    else => "",
+                };
+                if (count != 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, prop_name);
+                try w.print(",\"value\":{d}}}", .{entry.array[1].asFloat() orelse 0});
+                count += 1;
+            }
+        }
+    }
+    try w.writeAll("],\"colors\":[");
+    if (unityz.classes.fieldOf(props, "m_Colors")) |colors| {
+        if (colors == .array) {
+            var count: usize = 0;
+            for (colors.array) |entry| {
+                if (entry != .array or entry.array.len < 2) continue;
+                const prop_name = switch (entry.array[0]) {
+                    .string => |s| s,
+                    else => "",
+                };
+                if (count != 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, prop_name);
+                try w.writeAll(",\"value\":[");
+                const val = entry.array[1];
+                try w.print("{d},{d},{d},{d}]}}", .{
+                    unityz.classes.floatField(val, "r") orelse 0,
+                    unityz.classes.floatField(val, "g") orelse 0,
+                    unityz.classes.floatField(val, "b") orelse 0,
+                    unityz.classes.floatField(val, "a") orelse 1,
+                });
+                count += 1;
+            }
+        }
+    }
+    try w.writeAll("],\"ints\":[");
+    if (unityz.classes.fieldOf(props, "m_Ints")) |ints| {
+        if (ints == .array) {
+            var count: usize = 0;
+            for (ints.array) |entry| {
+                if (entry != .array or entry.array.len < 2) continue;
+                const prop_name = switch (entry.array[0]) {
+                    .string => |s| s,
+                    else => "",
+                };
+                if (count != 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, prop_name);
+                try w.print(",\"value\":{d}}}", .{entry.array[1].asInt() orelse 0});
+                count += 1;
+            }
+        }
+    }
+    try w.writeAll("]}\n");
+    const out = aw.toArrayList();
+    return try arena.dupe(u8, out.items);
 }
 
 /// Readable text summary of a Shader (name, properties, pass names).
@@ -5220,6 +5346,7 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
 
     var nodes: std.ArrayList(TEntry) = .empty;
     var gos: std.ArrayList(GoInfo) = .empty;
+    var bones: std.ArrayList(i64) = .empty;
     for (sf.objects) |*o| {
         const data = sf.objectData(o) orelse continue;
         const ti = o.type_index orelse continue;
@@ -5269,6 +5396,15 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
                 }
                 try gos.append(arena, gi);
             },
+            137 => { // SkinnedMeshRenderer: its m_Bones are transforms
+                if (unityz.classes.fieldOf(v, "m_Bones")) |b| {
+                    if (b == .array) {
+                        for (b.array) |bone| {
+                            if (pptrPathId(bone)) |bid| try bones.append(arena, bid);
+                        }
+                    }
+                }
+            },
             else => {},
         }
     }
@@ -5278,7 +5414,7 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
         if (e.node.father == 0) {
             if (json and roots_printed != 0) try stdout.writeByte(',');
             roots_printed += 1;
-            try printHierarchyNode(nodes.items, gos.items, e.path_id, 0, json, stdout);
+            try printHierarchyNode(nodes.items, gos.items, bones.items, e.path_id, 0, json, stdout);
         }
     }
     if (json) {
@@ -5304,9 +5440,17 @@ fn findGo(gos: []const GoInfo, path_id: i64) ?*const GoInfo {
     return null;
 }
 
-fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, path_id: i64, depth: usize, json: bool, stdout: *Io.Writer) !void {
+fn isBone(bones: []const i64, path_id: i64) bool {
+    for (bones) |b| {
+        if (b == path_id) return true;
+    }
+    return false;
+}
+
+fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, bones: []const i64, path_id: i64, depth: usize, json: bool, stdout: *Io.Writer) !void {
     const tn = findNode(nodes, path_id) orelse return;
     const go = findGo(gos, tn.go);
+    const bone = isBone(bones, path_id);
     if (json) {
         try stdout.writeAll("{\"name\":");
         try writeJsonString(stdout, if (go) |g| g.name else "");
@@ -5317,16 +5461,18 @@ fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, path_id: i64, 
                 try stdout.print("{d}", .{c});
             }
         }
-        try stdout.writeAll("],\"children\":[");
+        try stdout.print("],\"bone\":{}", .{bone});
+        try stdout.writeAll(",\"children\":[");
         for (tn.children.items, 0..) |c, i| {
             if (i != 0) try stdout.writeByte(',');
-            try printHierarchyNode(nodes, gos, c, depth + 1, json, stdout);
+            try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, stdout);
         }
         try stdout.writeAll("]}");
         return;
     }
     for (0..depth) |_| try stdout.writeAll("  ");
     try stdout.print("{s} (t {d}, go {d})", .{ if (go) |g| g.name else "?", path_id, tn.go });
+    if (bone) try stdout.writeAll("  (bone)");
     if (go) |g| {
         if (g.components.items.len != 0) {
             try stdout.writeAll(" [");
@@ -5339,7 +5485,7 @@ fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, path_id: i64, 
     }
     try stdout.print("  pos({d}, {d}, {d})\n", .{ tn.pos[0], tn.pos[1], tn.pos[2] });
     for (tn.children.items) |c| {
-        try printHierarchyNode(nodes, gos, c, depth + 1, json, stdout);
+        try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, stdout);
     }
 }
 
