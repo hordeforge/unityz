@@ -1803,3 +1803,15 @@ UnityPy converts FSB5 via fmod_toolkit/ffmpeg; its decoded PCM
 differs from ffmpeg's decode of our ogg by +/-1-2 LSB (normal vorbis
 decoder rounding), with identical durations. Unit tests: block-flag
 parse, page framing with CRC verification. 289/289 tests.
+
+The table's coverage was also checked against vgmstream's own FSB
+codebook set: both derive from the same python-fsb5 extraction and
+carry exactly 161 unique setup CRCs, so the embedded table is the
+complete known set, not a subset.
+
+A follow-up fuzz pass mutated both
+real vorbis banks (headers and packet data) through parse +
+rebuildOgg - 100,000 iterations across 5 seeds, zero crashes, the
+bounds checks and the OggStream's growable buffers degrade cleanly.
+extract now prints a note (instead of failing silently) when a
+vorbis bank's setup CRC is not in the table and the clip stays .fsb.
