@@ -13,6 +13,12 @@ zig build test
 zig build
 ```
 
+Linux (x86_64) and macOS (aarch64) are built and tested in CI. There is no
+host-endianness or word-size assumption in the parsers — every field is read
+and written with an explicit byte order — so other targets `zig build
+-Dtarget=...` accepts are expected to work, but are not covered by CI.
+Windows is untested.
+
 Run the CLI:
 
 ```bash

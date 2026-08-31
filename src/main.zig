@@ -859,26 +859,21 @@ fn sanitizeComponent(name: []u8) []u8 {
 /// Creates a directory and any missing parents, tolerating an existing
 /// directory. Walks the path one component at a time with single-level
 /// `createDir` instead of std's `createDirPath`, which hangs on special
-/// filesystems such as /proc.
+/// filesystems such as /proc. Components come from the platform's path
+/// iterator rather than a hardcoded '/' split, so a `--outdir` written
+/// with the native separator (`a\b\c` on Windows) still creates parents,
+/// and the root prefix (`/`, `C:\`) is never handed to `createDir`.
 fn ensureDirPath(io: std.Io, dir_path: []const u8) !void {
     if (dir_path.len == 0) return;
     if (std.Io.Dir.cwd().statFile(io, dir_path, .{})) |st| {
         if (st.kind == .directory) return;
     } else |_| {}
-    var start: usize = 0;
-    while (start < dir_path.len) {
-        const end = std.mem.indexOfScalarPos(u8, dir_path, start, '/') orelse dir_path.len;
-        if (end > start) {
-            const prefix = dir_path[0..end];
-            // skip only the leading "/" of an absolute path
-            if (!(prefix.len == 1 and prefix[0] == '/')) {
-                std.Io.Dir.cwd().createDir(io, prefix, .default_dir) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => return err,
-                };
-            }
-        }
-        start = end + 1;
+    var it = std.fs.path.componentIterator(dir_path);
+    while (it.next()) |component| {
+        std.Io.Dir.cwd().createDir(io, component.path, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
     }
 }
 
