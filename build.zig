@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
     });
     lib.linkLibrary(crunch_lib);
 
-    // The vendored LZHAM decompressor (public-domain / zlib) for UnityFS
+    // The vendored LZHAM decompressor (MIT-licensed) for UnityFS
     // block compression type 4. A C++ static library exposing `lzham_unpack`,
     // linked into the library so `bundle.zig` can decode LZHAM blocks.
     const lzham_lib = b.addLibrary(.{
