@@ -110,6 +110,18 @@ empty) can be de-streamed by patching the image field with the sidecar
 bytes and clearing `m_StreamData`; the rebuilt bundle decodes
 pixel-identically.
 
+Streamed payloads can also be patched in place: a patch entry keyed by
+a raw container node (a `.resS`/`.resource` sidecar) replaces bytes at
+an offset without touching the object tree, so an AudioClip's bank
+(still referenced by its `m_Resource` offset/size) swaps cleanly:
+
+```json
+{"CAB-abc123.resource": {"offset": 4096, "bytes": "<base64>"}}
+```
+
+The range must fit inside the node, keeping every sidecar reference
+valid.
+
 Inside bundles and webfiles, every object belongs to a container node,
 and the tool is node-aware throughout: outputs tag objects with their
 node, and `show`/`edit`/`verify`/`extract`/`hash` accept `node:path-id`
