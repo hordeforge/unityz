@@ -330,10 +330,11 @@ pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []c
     out.endian = .big;
     try out.writeStringToNull("UnityFS");
     try out.writeInt(u32, b.version);
-    if (b.version >= 7) {
-        try out.writeStringToNull(b.unity_version);
-        try out.writeStringToNull(b.unity_revision);
-    }
+    // The parser reads both version strings for every UnityFS version
+    // (including format-6 bundles from Unity 5.x/2017/2018); the rebuild
+    // must write them unconditionally too, or v6 output misparses.
+    try out.writeStringToNull(b.unity_version);
+    try out.writeStringToNull(b.unity_revision);
     try out.writeInt(i64, 0); // size placeholder
     try out.writeInt(u32, @intCast(info_bytes.len));
     try out.writeInt(u32, @intCast(info_bytes.len));
@@ -347,7 +348,7 @@ pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []c
 
     // patch the size field: after signature(8) + version(4) [+ unity + revision]
     var size_off: usize = 12;
-    if (b.version >= 7) {
+    {
         size_off += b.unity_version.len + 1;
         size_off += b.unity_revision.len + 1;
     }

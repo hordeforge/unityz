@@ -29,7 +29,8 @@ Put commentary, substitutions, and alternatives in prose outside the block.
 
 ## No em dashes
 
-Do not use em dashes (—) in prose. Where a dash fits, use a regular dash (-);
+Do not use em dashes (the long dash character, U+2014) in prose. Where a
+dash fits, use a regular dash (-);
 otherwise restructure the sentence with a comma, colon, parentheses, or a
 separate sentence. This applies to documentation, templates, commit messages,
 and generated records alike.
