@@ -24,10 +24,11 @@ const usage =
     \\  extract <path>  Extract embedded assets from a Unity asset file
     \\                 (--raw raw bytes; --json value trees as JSON, plus
     \\                  a manifest.json index; --class N / --path-id N
-    \\                  filters, N may be node:path-id; --recursive for
-    \\                  bundles/webfiles; --format png|tga|bmp|raw image
-    \\                  output (default png); --outdir <dir> to write
-    \\                  into, created if missing)
+    \\                  filters, N may be node:path-id; --name <substring>
+    \\                  name filter; --recursive for bundles/webfiles;
+    \\                  --format png|tga|bmp|raw image output (default
+    \\                  png); --outdir <dir> to write into, created if
+    \\                  missing)
     \\  edit <path>     Apply edits to a Unity asset file
     \\                 (bundles: finds and edits the embedded node, then
     \\                  rebuilds the bundle)
@@ -289,6 +290,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
     var json_mode = false;
     var class_filter: ?i32 = null;
     var path_filter: ?Selector = null;
+    var name_filter: ?[]const u8 = null;
     var format: ExtractFormat = .png;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
@@ -313,6 +315,9 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 try stdout.print("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
                 return;
             };
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--name") and i + 1 < rest.len) {
+            name_filter = rest[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, arg, "--format") and i + 1 < rest.len) {
             format = parseFormat(rest[i + 1]) catch {
@@ -361,7 +366,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 try writeFileToCwd(basename(e.path), e.data);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ basename(e.path), e.data.len });
                 if (recursive and unityz.container.sniff(e.data).container == .serialized) {
-                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(e.path)}), sidecars.items, &manifest, format, stdout);
+                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(e.path)}), sidecars.items, &manifest, format, name_filter, stdout);
                 }
             }
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
@@ -389,7 +394,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 try writeFileToCwd(basename(n.path), n.data);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ basename(n.path), n.data.len });
                 if (recursive and unityz.container.sniff(n.data).container == .serialized) {
-                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(n.path)}), sidecars.items, &manifest, format, stdout);
+                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(n.path)}), sidecars.items, &manifest, format, name_filter, stdout);
                 }
             }
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
@@ -405,7 +410,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             defer arena_state.deinit();
             const arena = arena_state.allocator();
             var manifest: std.ArrayList(ManifestEntry) = .empty;
-            try extractSerialized(arena, path, bytes, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, null, &.{}, &manifest, format, stdout);
+            try extractSerialized(arena, path, bytes, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, null, &.{}, &manifest, format, name_filter, stdout);
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
         },
         else => {
@@ -593,8 +598,9 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
     try w.print("{d},\"mode\":{d},\"samples\":[", .{ bank.version, bank.mode });
     for (bank.samples, 0..) |s, i| {
         if (i != 0) try w.writeByte(',');
-        try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d}",
-            .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count });
+        const dur_ms: u64 = if (s.frequency != 0) @as(u64, s.sample_count) * 1000 / s.frequency else 0;
+        try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d},\"durationMs\":{d}",
+            .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count, dur_ms });
         if (s.loop_start) |ls| {
             try w.print(",\"loopStart\":{d},\"loopEnd\":{d}", .{ ls, s.loop_end orelse 0 });
         }
@@ -606,7 +612,7 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
 }
 
 
-fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, stdout: *Io.Writer) !void {
+fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, name_filter: ?[]const u8, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("unityz: {s}: serialized file parse failed: {s}\n", .{ path, @errorName(err) });
         return;
@@ -643,6 +649,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
             skipped += 1;
             continue;
         };
+
+        if (name_filter) |nf| {
+            const nm = unityz.classes.stringField(v, "m_Name") orelse "";
+            if (std.ascii.indexOfIgnoreCase(nm, nf) == null) continue;
+        }
 
         if (json_mode) {
             // JSON mode: export the object's value tree, not a decoded asset

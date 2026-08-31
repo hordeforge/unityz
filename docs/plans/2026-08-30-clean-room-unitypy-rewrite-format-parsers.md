@@ -1317,3 +1317,14 @@ and `className` covers the rest of UnityPy's enum (the ~110 high-range
 registered ids: AnimatorStateMachine 1107, PackedAssets 1126, SpriteAtlas
 687078895, Tilemap 1839735485, VisualEffect 2083052967, ...), so stats/
 find label them instead of "Class". 274/274 tests.
+
+2026-08-31 (extract --name filter + FSB5 duration): `extract` gained a
+`--name <substring>` filter (case-insensitive `m_Name` match, combinable
+with --class/--path-id/--raw/--json) so a named subset of objects can be
+pulled without exporting everything - UnityPy's CLI has no name search at
+extract time. Verified on the real samples: `--name TowerModern` yields
+exactly the two WaterTowerModern sprites, `--name CN_00` a 9/35 audio
+subset, no-match extracts nothing, and combinations with --class work.
+The FSB5 metadata sidecar now reports per-sample `durationMs` (sample
+count / rate), verified against an independent computation on the real
+banks. 274/274 tests.

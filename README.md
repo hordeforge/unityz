@@ -56,7 +56,9 @@ pass to every matched file pair.
 
 All commands accept a directory and process every file in it.
 
-`extract` filters with `--class`/`--path-id`/`--raw`, exports value trees with
+`extract` filters with `--class`/`--path-id`/`--name <substring>`/`--raw`
+(case-insensitive name match on `m_Name`, combinable with the others),
+exports value trees with
 `--json` (plus a `manifest.json` index of every exported object; inside
 bundles/webfiles each node's objects land in its own `objects/<node>/`
 subdirectory so identical path ids never collide), writes textures and
@@ -196,7 +198,7 @@ ParserBindChannels block with its (source,target) channel pairs).
 
 AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
 MP3) with an FSB5 metadata sidecar (sample rate, channels, loop points,
-format - UnityPy never surfaces these), and objects reserialize
+duration, format - UnityPy never surfaces these), and objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
 
