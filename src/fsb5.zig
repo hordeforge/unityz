@@ -32,7 +32,12 @@ pub const Bank = struct {
     data_start: u32,
 };
 
-const FREQUENCY_VALUES = [_]u32{ 0, 8000, 11000, 11025, 16000, 22050, 24000, 32000, 44100, 48000 };
+/// FSB5 sample-rate codes (FMOD's frequency nibble). Code 0 is 4000 Hz,
+/// not "unknown"; code 10 is 96000. A bank with a non-standard rate
+/// carries a FREQUENCY metadata chunk that overrides this table.
+/// Mirrors vgmstream's fsb5.c and Fmod5Sharp's FsbLoader.Frequencies
+/// (which both map 0 -> 4000, 10 -> 96000); fsb5.py lacks both entries.
+const FREQUENCY_VALUES = [_]u32{ 4000, 8000, 11000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 96000 };
 
 /// Parses FSB5 metadata from `data`. Returns null when the data is not a
 /// well-formed FSB5 bank (bad magic, truncated, or inconsistent).
@@ -63,10 +68,11 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Bank {
         const raw = std.mem.readInt(u64, data[pos..][0..8], .little);
         pos += 8;
         var next_chunk = raw & 1 != 0;
-        // The code is 4 bits (0-15) but only 0-9 name a standard rate, so
-        // an out-of-range code must not index the table. Fall back to the
-        // table's own 0 ("unknown") entry: a FREQUENCY chunk below is what
-        // carries a non-standard rate, and it overrides this.
+        // The code is 4 bits (0-15); 0-10 name standard rates (see
+        // FREQUENCY_VALUES). Codes 11-15 are rejected by FMOD, so an
+        // out-of-range code must not index the table - report 0
+        // (unknown) rather than guessing. A FREQUENCY chunk below is
+        // what carries a non-standard rate, and it overrides this.
         const freq_code: usize = @intCast((raw >> 1) & 0xf);
         var frequency: u32 = if (freq_code < FREQUENCY_VALUES.len) FREQUENCY_VALUES[freq_code] else 0;
         const channels: u32 = @intCast(((raw >> 5) & 1) + 1);
@@ -156,4 +162,25 @@ test "fsb5 metadata parse round trip" {
     try std.testing.expectEqual(@as(u32, 100), bank.samples[0].loop_start.?);
     try std.testing.expectEqual(@as(u32, 900), bank.samples[0].loop_end.?);
     try std.testing.expectEqualStrings("loopclip", bank.samples[0].name);
+}
+
+test "fsb5 frequency codes 0 and 10" {
+    const a = std.testing.allocator;
+    // minimal banks with no metadata chunks: 60-byte header + one
+    // 8-byte sample header (next_chunk=0, mono, 1000 samples). Codes
+    // 0 and 10 name real rates (4000 / 96000); fsb5.py rejects both.
+    for ([_]u32{ 0, 10 }) |code| {
+        var blob: [68]u8 = [_]u8{0} ** 68;
+        @memcpy(blob[0..4], "FSB5");
+        std.mem.writeInt(u32, blob[4..8], 1, .little); // version
+        std.mem.writeInt(u32, blob[8..12], 1, .little); // num_samples
+        std.mem.writeInt(u32, blob[12..16], 8, .little); // hdr_size
+        std.mem.writeInt(u32, blob[24..28], 2, .little); // mode
+        const raw = (@as(u64, code) << 1) | (@as(u64, 1000) << 34);
+        std.mem.writeInt(u64, blob[60..68], raw, .little);
+        const bank = (try parse(a, &blob)).?;
+        defer a.free(bank.samples);
+        try std.testing.expectEqual(@as(u32, 1000), bank.samples[0].sample_count);
+        try std.testing.expectEqual(if (code == 0) @as(u32, 4000) else 96000, bank.samples[0].frequency);
+    }
 }
