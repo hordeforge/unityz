@@ -28,6 +28,7 @@ Run the CLI:
 ./zig-out/bin/unityz hash path/to/asset
 ./zig-out/bin/unityz diff asset_a asset_b
 ./zig-out/bin/unityz skin path/to/asset
+./zig-out/bin/unityz hierarchy path/to/asset
 ```
 
 Beyond the core `info`/`extract`/`edit`, the CLI adds capabilities UnityPy
@@ -45,6 +46,9 @@ does not offer:
 - `skin` - whether every Shader's vertex stage applies per-vertex bone
   matrices, exiting non-zero when a `SkinnedMeshRenderer` references a
   shader that does not
+- `hierarchy` - the GameObject/Transform tree of a scene (root transforms
+  first, names, component classes, local positions; `--json` for nested
+  objects)
 
 `diff` gains `--pixels`: every matched Texture2D and Sprite is decoded
 from both files (sprites rendered through their crop rect, packed
