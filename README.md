@@ -120,8 +120,9 @@ ATC (RGB4/RGBA8), EAC (R/RG, signed and unsigned), ETC1/ETC2/ETC2-RGBA8,
 ASTC, ASTC HDR (66-71), plus the crunch-crunched formats (ETC_RGB4,
 ETC2_RGBA8, DXT1, DXT5) through a vendored ZLIB-licensed unitycrunch
 decompressor (hardened against corrupt streams). The 3DS ETC variants
-(TextureFormat 60/61) and ETC2_RGBA1 are not decoded; `decode` reports
-them as `error.UnsupportedFormat`.
+(TextureFormat 60/61) decode as ETC1, matching UnityPy (which routes both
+to its ETC1 decoder), and ETC2_RGBA1 (46) decodes its punch-through alpha,
+matching UnityPy's texture2ddecoder pixel-for-pixel.
 
 ETC2, the BC family, and the crunch variants decode pixel-identical to
 UnityPy (ASTC decodes within ±1 per channel on a small fraction of
