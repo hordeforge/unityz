@@ -1088,14 +1088,60 @@ pub const Mesh = struct {
         return self.channels[0..self.channel_count];
     }
 
-    /// The channel's layout, or null when absent (dimension 0) or when the
-    /// data is not all in stream 0 (multi-stream layouts are rare and
-    /// unsupported for export).
+    /// The channel's layout, or null when absent (dimension 0). The channel
+    /// may live in any vertex stream; use [`channelByteOffset`] to read it.
     pub fn channel(self: *const Mesh, index: usize) ?MeshChannel {
         if (index >= self.channel_count) return null;
         const c = self.channels[index];
-        if (c.dimension == 0 or c.stream != 0) return null;
+        if (c.dimension == 0) return null;
         return c;
+    }
+
+    /// One derived vertex stream's byte range (implicit layout).
+    pub const StreamLayout = struct { offset: usize, stride: usize };
+
+    /// Derives the implicit per-stream base offsets and strides from the
+    /// channel table, mirroring UnityPy's `MeshHandler.get_streams`: each
+    /// stream's stride is the rounded 4-byte span of its channels (so a
+    /// single-stream mesh keeps the exact old `stride()` value), and later
+    /// streams start at `vertex_count * stride` (16-byte aligned) past the
+    /// earlier ones. Returns the number of populated streams (0-based index
+    /// range 0..n), or null when a channel uses an unsupported format/stream.
+    pub fn streamLayout(self: *const Mesh, out: *[4]StreamLayout) ?usize {
+        var max_stream: usize = 0;
+        for (self.channelSlice()) |c| {
+            if (c.dimension == 0) continue;
+            if (c.stream > max_stream) max_stream = @intCast(c.stream);
+            _ = formatSize(c.format) orelse return null;
+        }
+        if (max_stream >= 4) return null; // Unity writes at most 3
+        const vcount: usize = self.vertex_count;
+        var offset: usize = 0;
+        for (0..max_stream + 1) |s| {
+            var max_end: usize = 0;
+            for (self.channelSlice()) |c| {
+                if (c.dimension == 0 or c.stream != s) continue;
+                const fs = formatSize(c.format) orelse return null;
+                max_end = @max(max_end, @as(usize, c.offset) + @as(usize, c.dimension) * fs);
+            }
+            const stream_stride = (max_end + 3) / 4 * 4;
+            out[s] = .{ .offset = offset, .stride = stream_stride };
+            offset = (offset + vcount * stream_stride + 15) / 16 * 16;
+        }
+        return max_stream + 1;
+    }
+
+    /// Byte offset of channel `index` at `vertex` within `vertex_data`,
+    /// honoring the implicit per-stream layout. Null when the channel is
+    /// absent, uses a non-float/unsupported format, or the layout is bad.
+    pub fn channelByteOffset(self: *const Mesh, index: usize, vertex: usize) ?usize {
+        const c = self.channel(index) orelse return null;
+        _ = formatSize(c.format) orelse return null;
+        var layout: [4]StreamLayout = undefined;
+        const nstreams = self.streamLayout(&layout) orelse return null;
+        if (@as(usize, c.stream) >= nstreams) return null;
+        const st = layout[c.stream];
+        return st.offset + @as(usize, c.offset) + vertex * st.stride;
     }
 
     /// Size in bytes of one component for a `VertexChannelFormat` value.
@@ -1384,4 +1430,46 @@ test "className covers the UnityPy class ID table" {
     try std.testing.expectEqualStrings("PrefabInstance", className(1001).?);
     try std.testing.expect(className(100) == null);
     try std.testing.expect(className(9999) == null);
+}
+
+test "mesh multi-stream layout and per-vertex reads" {
+    // Two streams: stream 0 has position (offset 0) + normal (offset 12),
+    // stride 24; stream 1 (offset 48 = round16(2*24)) has UV (offset 0),
+    // stride 8. vertex_count = 2.
+    var m = Mesh{ .vertex_count = 2 };
+    m.channels[0] = .{ .stream = 0, .offset = 0, .format = 0, .dimension = 3 };
+    m.channels[1] = .{ .stream = 0, .offset = 12, .format = 0, .dimension = 3 };
+    m.channels[4] = .{ .stream = 1, .offset = 0, .format = 0, .dimension = 2 };
+    m.channel_count = 5;
+
+    var layout: [4]Mesh.StreamLayout = undefined;
+    const nstreams = m.streamLayout(&layout).?;
+    try std.testing.expectEqual(@as(usize, 2), nstreams);
+    try std.testing.expectEqual(@as(usize, 0), layout[0].offset);
+    try std.testing.expectEqual(@as(usize, 24), layout[0].stride);
+    try std.testing.expectEqual(@as(usize, 48), layout[1].offset);
+    try std.testing.expectEqual(@as(usize, 8), layout[1].stride);
+
+    // vertex 1 of channel 0 (pos) sits at 0 + 1*24; channel 1 (normal) at
+    // 12 + 1*24; channel 4 (uv, stream 1) at 48 + 1*8.
+    try std.testing.expectEqual(@as(usize, 24), m.channelByteOffset(0, 1).?);
+    try std.testing.expectEqual(@as(usize, 36), m.channelByteOffset(1, 1).?);
+    try std.testing.expectEqual(@as(usize, 56), m.channelByteOffset(4, 1).?);
+
+    // Fill vertex_data. stream 0 (bytes 0..47): v0 pos(1,2,3)/nrm(4,5,6),
+    // v1 pos(7,8,9)/nrm(10,11,12). stream 1 (bytes 48..63): v0 uv(0.5,0.25),
+    // v1 uv(0.75,0.125).
+    var data: [64]u8 = undefined;
+    const vals = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0.5, 0.25, 0.75, 0.125 };
+    for (vals, 0..) |f, i| std.mem.writeInt(u32, data[i * 4 ..][0..4], @bitCast(f), .little);
+    m.vertex_data = &data;
+    const endian = std.builtin.Endian.little;
+
+    // vertex 1 position (channel 0) = (7,8,9), normal (channel 1) = (10,11,12)
+    try std.testing.expectEqual(@as(f32, 7), @as(f32, @bitCast(std.mem.readInt(u32, data[24..][0..4], endian))));
+    try std.testing.expectEqual(@as(f32, 9), @as(f32, @bitCast(std.mem.readInt(u32, data[32..][0..4], endian))));
+    try std.testing.expectEqual(@as(f32, 10), @as(f32, @bitCast(std.mem.readInt(u32, data[36..][0..4], endian))));
+    // vertex 1 uv (channel 4, stream 1) = (0.75, 0.125)
+    try std.testing.expectEqual(@as(f32, 0.75), @as(f32, @bitCast(std.mem.readInt(u32, data[56..][0..4], endian))));
+    try std.testing.expectEqual(@as(f32, 0.125), @as(f32, @bitCast(std.mem.readInt(u32, data[60..][0..4], endian))));
 }
