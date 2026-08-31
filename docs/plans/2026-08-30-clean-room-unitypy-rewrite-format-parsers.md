@@ -1385,3 +1385,19 @@ searchable (e.g. AssetBundle `m_Container` asset paths). Combines with
 `find char_118 "torappu"` finds nothing (no m_Name contains it), while
 `--any` finds the AssetBundle through its container paths, and
 `--any --exact` with a full asset path matches exactly. 277/277 tests.
+
+2026-08-31 (AnimationClip curve export): `extract` now writes each
+AnimationClip's curves as an `animation_<id>_<name>.json`: the clip
+name, legacy flag, sample rate, and one entry per curve (bone path,
+attribute, and keyframes with time, value, inSlope, outSlope - the
+weight fields are defaults and dropped). Handles the six curve arrays
+(Euler/position/scale/quaternion/float/PPtr) with per-field default
+attributes.
+
+The samples came from the other sessions' UnityPy test
+bundles (tmpjoxz4_66.unity3d), which do contain AnimationClips - the
+earlier "no animation samples" gap was about the mobile-game samples
+only. Verified on both real clips: keyframes match the raw tree
+field-by-field, and the times/name/rate match UnityPy's typed read
+exactly (UnityPy has no curve export, so this is beyond-parity).
+277/277 tests.

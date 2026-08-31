@@ -190,7 +190,10 @@ through their type trees, MonoBehaviours resolve their MonoScript and
 export the raw script payload alongside the decoded managed .NET object
 graph (a `.json` sidecar, read off the type tree), Meshes export as
 Wavefront OBJ (vertices, normals, UVs, faces), including multi-stream
-vertex layouts, and Materials and Shaders export as readable text.
+vertex layouts, Materials and Shaders export as readable text, and
+AnimationClips export their curves as JSON (per-curve bone path,
+attribute, and keyframes with time, value, and slopes - UnityPy reads
+clips generically but never surfaces the curves).
 
 Additionally, each Shader's compiled sub-program blob is decoded and
 reported as skinning or not (its vertex stage applies per-vertex bone

@@ -838,6 +838,83 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} ({d} vertices, {d} indices)\n", .{ name, mesh.vertex_count, mesh.index_buffer.len / @as(usize, if (mesh.index_format == 1) 4 else 2) });
                 extracted += 1;
             },
+            74 => { // AnimationClip -> curves JSON
+                const clip_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const legacy = unityz.classes.boolField(v, "m_Legacy") orelse false;
+                const sample_rate: f64 = if (unityz.classes.fieldOf(v, "m_SampleRate")) |sv| sv.asFloat() orelse 0 else 0;
+                var buf: std.ArrayList(u8) = .empty;
+                var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+                const w = &aw.writer;
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, clip_name);
+                try w.print(",\"legacy\":{},\"sample_rate\":{d},\"curves\":[", .{ legacy, sample_rate });
+                const curve_fields = [_]struct { name: []const u8, default_attr: []const u8 }{
+                    .{ .name = "m_EulerCurves", .default_attr = "m_LocalEulerAnglesHint" },
+                    .{ .name = "m_PositionCurves", .default_attr = "m_LocalPosition" },
+                    .{ .name = "m_ScaleCurves", .default_attr = "m_LocalScale" },
+                    .{ .name = "m_QuaternionCurves", .default_attr = "m_LocalRotation" },
+                    .{ .name = "m_FloatCurves", .default_attr = "" },
+                    .{ .name = "m_PPtrCurves", .default_attr = "" },
+                };
+                var curve_count: usize = 0;
+                for (curve_fields) |cf| {
+                    const arr = unityz.classes.fieldOf(v, cf.name) orelse continue;
+                    if (arr != .array) continue;
+                    for (arr.array) |entry| {
+                        if (entry != .obj) continue;
+                        const curve_path = unityz.classes.stringField(entry, "path") orelse "";
+                        var attr: []const u8 = cf.default_attr;
+                        if (unityz.classes.stringField(entry, "m_Attribute")) |a| {
+                            if (a.len != 0) attr = a;
+                        }
+                        const curve_obj = unityz.classes.fieldOf(entry, "curve") orelse continue;
+                        const keys = unityz.classes.fieldOf(curve_obj, "m_Curve") orelse continue;
+                        if (keys != .array) continue;
+                        if (curve_count != 0) try w.writeByte(',');
+                        try w.writeAll("{\"path\":");
+                        try writeJsonString(w, curve_path);
+                        try w.writeAll(",\"attribute\":");
+                        try writeJsonString(w, attr);
+                        try w.writeAll(",\"keys\":[");
+                        for (keys.array, 0..) |k, ki| {
+                            if (ki != 0) try w.writeByte(',');
+                            // time + value + slopes carry the animation; the
+                            // weight fields are defaults and dropped here
+                            try w.writeAll("{\"time\":");
+                            const t = if (unityz.classes.fieldOf(k, "time")) |tv| tv.asFloat() orelse 0 else 0;
+                            try w.print("{d}", .{t});
+                            try w.writeAll(",\"value\":");
+                            if (unityz.classes.fieldOf(k, "value")) |val| {
+                                try unityz.value.jsonWrite(val, w);
+                            } else try w.writeAll("null");
+                            try w.writeAll(",\"inSlope\":");
+                            if (unityz.classes.fieldOf(k, "inSlope")) |val| {
+                                try unityz.value.jsonWrite(val, w);
+                            } else try w.writeAll("null");
+                            try w.writeAll(",\"outSlope\":");
+                            if (unityz.classes.fieldOf(k, "outSlope")) |val| {
+                                try unityz.value.jsonWrite(val, w);
+                            } else try w.writeAll("null");
+                            try w.writeByte('}');
+                        }
+                        try w.writeAll("]}");
+                        curve_count += 1;
+                    }
+                }
+                try w.writeAll("]}\n");
+                const out = aw.toArrayList();
+                var clean_buf: [192]u8 = undefined;
+                const clean_name = if (clip_name.len != 0)
+                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{clip_name}))
+                else
+                    "";
+                var name_buf: [192]u8 = undefined;
+                const fname = try std.fmt.bufPrint(&name_buf, "animation_{d}_{s}.json", .{ o.path_id, if (clean_name.len != 0) clean_name else "unnamed" });
+                try extractFile(subdir, fname, out.items);
+                try stdout.print("extracted {s} ({d} curves)\n", .{ fname, curve_count });
+                try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = clip_name, .subdir = subdir });
+                extracted += 1;
+            },
             21 => { // Material -> readable text
                 const mat = try writeMaterialText(arena, v);
                 var name_buf: [160]u8 = undefined;
