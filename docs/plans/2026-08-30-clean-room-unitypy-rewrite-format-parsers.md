@@ -1703,3 +1703,27 @@ our faces carry real vn references. writeObjFloat implements the
 %.9g semantics (exact integer powers of 10 + half-even ties, verified
 against Python's format on the golden values); unit test pins the
 rounding cases. 286/286 tests.
+
+2026-08-31 (ASTC LDR interpolation rounding): the banner_1 real-bundle
+comparison (UnityPy's own test asset, github.com/K0lb3/UnityPy
+tests/samples) found its ASTC_RGBA_6x6 texture differing from UnityPy
+by exactly 1 LSB on ~31% of pixels - a systematic rounding, not the
+±1 "variance" previously documented. Bisecting with the real banner
+blocks against ARM's astcenc (compiled from source, plus the
+astc_encoder Python binding) pinned it to the LDR color
+interpolation: the output byte is the top 8 bits of the 16-bit
+interpolant (astcenc's lerp_color_int truncates with `t >> 8`), where
+unityz used `(t*255+32768)>>16` - the two differ by 1 on texels whose
+16-bit value lands in the rounding gap.
+
+The weights were already correct (astcenc's `summed_value(8)`
+accumulator is the same `+8 >> 4` rounding unityz uses; the block-mode
+quant, weight grid, and decimation tables all match astcenc
+field-for-field, verified by dumping astcenc's per-texel weights and
+endpoints for the real block 667). The one-line fix makes the LDR
+path byte-exact: the banner's 492x180 ASTC texture and its 488x170
+polygon-mesh sprite now decode with 0 pixel differences vs UnityPy,
+on pixels streamed from a real .resS sidecar. A regression test pins
+the real block (texels 0-2: 65/29/36, 29/45/45, 35/54/54 - the old
+form gave 66 and 30). HDR ASTC is untouched (its fp16 path was
+already byte-exact). 287/287 tests.

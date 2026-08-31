@@ -2414,8 +2414,12 @@ fn astcSetEndpointBlueClamp(e: *[8]i32, r1: i32, g1: i32, b1: i32, a1: i32, r2: 
 /// LDR endpoint interpolation: (v0*257*(64-w) +% v1*257*w +% 32) >> 6, then
 /// scaled to 0..255.
 fn astcSelectColor(v0: i32, v1: i32, weight: i32) u8 {
+    // LDR UNORM16 interpolation (astcenc lerp_color_int): the interpolated
+    // 16-bit value truncates to 8 bits for the output byte, not
+    // (t*255+32768)>>16 - the two differ by 1 on texels where t lands in
+    // the rounding gap (verified against astcenc on real ASTC textures).
     const t: i32 = ((std.math.shl(@TypeOf(v0), v0, 8) | v0) *% (64 -% weight) +% (std.math.shl(@TypeOf(v1), v1, 8) | v1) *% weight +% 32) >> 6;
-    return @truncate(@as(u32, @bitCast(@divTrunc(t *% 255 +% 32768, 65536))));
+    return @truncate(@as(u32, @bitCast(t >> 8)));
 }
 
 /// HDR endpoint interpolation with an fp16 intermediate.
@@ -3146,6 +3150,20 @@ test "astc 6x6 block" {
     defer a.free(out);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 59, 59, 59, 255 }, out[0..4]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 59, 59, 59, 255 }, out[35 * 4 ..][0..4]);
+}
+
+test "astc LDR interpolation truncates the 16-bit value" {
+    const a = std.testing.allocator;
+    // Real block from UnityPy's banner_1 test bundle (resS sidecar). The
+    // LDR output byte is the top 8 bits of the 16-bit interpolant
+    // (astcenc lerp_color_int); the (t*255+32768)>>16 form differs by 1
+    // on texels 0 and 1 (66->65, 30->29), verified against astcenc.
+    var block = [_]u8{ 0xd3, 0x48, 0x01, 0x03, 0x07, 0x89, 0x40, 0xb9, 0x58, 0x69, 0x9f, 0xe9, 0x3d, 0x86, 0xbf, 0x9a };
+    const out = try decode(a, format.astc_rgb_6x6, 6, 6, &block);
+    defer a.free(out);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 65, 29, 36, 255 }, out[0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 29, 45, 45, 255 }, out[4..8]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 35, 54, 54, 255 }, out[8..12]);
 }
 
 test "astc void-extent and error blocks" {
