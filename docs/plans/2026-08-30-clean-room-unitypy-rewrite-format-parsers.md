@@ -1727,3 +1727,25 @@ on pixels streamed from a real .resS sidecar. A regression test pins
 the real block (texels 0-2: 65/29/36, 29/45/45, 35/54/54 - the old
 form gave 66 and 30). HDR ASTC is untouched (its fp16 path was
 already byte-exact). 287/287 tests.
+
+2026-08-31 (OBJ float exponent form + full mesh byte-parity): comparing
+the scene bundle's multi-stream mesh export against UnityPy's exposed
+the last %.9g gap: C's %g switches to exponent form for |v| < 1e-4 or
+>= 1e9, and real meshes carry denormal-scale values (the creature
+mesh's 8.57252764E-18 vertices) - the OBJ writer now emits
+`<mantissa>E<sign><exp>` for those, matching UnityPy byte for byte.
+
+With that, every real mesh in the sample set exports byte-identical
+to UnityPy: the scene bundles' multi-stream creature mesh (724-vertex
+position/normal/UV channels, 1382 vn lines, denormal values) and its
+renamed twin, 0 diff lines including the f lines; the xinzexi golden
+OBJ still differs only in UnityPy's undefined-vn face references (its
+own bug - the sprite mesh carries no normals).
+
+The writeObjFloat
+unit test pins the exponent cases (8.57252764E-18, -3.5E-05, 1E+09,
+1.23456789E-05) against Python's format. The diff passes were also
+exercised on the new real bundles: banner_1 self-diff --pixels reports
+0 pixels across 3 objects, char_118 self-diff --audio compares all 35
+clips with 0 differ, and the scene bundle pair reports exactly the
+renames (AssetBundle container, GameObject m_Name). 287/287 tests.
