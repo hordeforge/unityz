@@ -939,7 +939,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     extracted += 1;
                 }
             },
-            48 => { // Shader -> readable text
+            48 => { // Shader -> readable text + structured JSON
                 const shd = try writeShaderText(arena, v);
                 if (shd.len == 0) continue;
                 var name_buf: [160]u8 = undefined;
@@ -947,6 +947,15 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try extractFile(subdir, name, shd);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ name, shd.len });
                 extracted += 1;
+                // Structured export: name, keywords, and the parsed-form
+                // subshader/pass structure (pass type + state name + LOD).
+                if (try shaderJson(arena, v)) |sj| {
+                    var jbuf: [160]u8 = undefined;
+                    const jname = try std.fmt.bufPrint(&jbuf, "shader_{d}.json", .{o.path_id});
+                    try extractFile(subdir, jname, sj);
+                    try stdout.print("extracted {s} ({d} bytes)\n", .{ jname, sj.len });
+                    extracted += 1;
+                }
             },
             213 => { // Sprite -> cropped / mesh-rendered image
                 const rr = renderSprite(arena, &sf, sidecars, v, o.path_id) orelse continue;
@@ -1831,6 +1840,62 @@ fn writeShaderText(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u8 
         }
     }
     return arena.dupe(u8, w.getWritten());
+}
+
+/// Structured Shader export: name, keywords, and the parsed-form
+/// subshader/pass structure (pass type, state name, LOD). Null when the
+/// shader has no parsed form.
+fn shaderJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
+    const pf = unityz.classes.fieldOf(v, "m_ParsedForm") orelse return null;
+    var buf: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    const w = &aw.writer;
+    // the top-level m_Name is often empty; the parsed form carries the real one
+    const top_name = fieldStr(v, "m_Name");
+    const real_name = if (top_name.len != 0) top_name else fieldStr(pf, "m_Name");
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, real_name);
+    try w.writeAll(",\"keywords\":[");
+    if (unityz.classes.fieldOf(pf, "m_KeywordNames")) |kw| {
+        if (kw == .array) {
+            var count: usize = 0;
+            for (kw.array) |k| {
+                if (k != .string) continue;
+                if (count != 0) try w.writeByte(',');
+                try writeJsonString(w, k.string);
+                count += 1;
+            }
+        }
+    }
+    try w.writeAll("],\"subshaders\":[");
+    if (unityz.classes.fieldOf(pf, "m_SubShaders")) |subs| {
+        if (subs == .array) {
+            var scount: usize = 0;
+            for (subs.array) |sub| {
+                const passes = unityz.classes.fieldOf(sub, "m_Passes") orelse continue;
+                if (passes != .array) continue;
+                if (scount != 0) try w.writeByte(',');
+                try w.writeAll("{\"lod\":");
+                try w.print("{d},\"passes\":[", .{unityz.classes.intField(sub, "m_LOD") orelse 0});
+                var pcount: usize = 0;
+                for (passes.array) |pass| {
+                    const state = unityz.classes.fieldOf(pass, "m_State");
+                    const pname = if (state) |s| fieldStr(s, "m_Name") else "";
+                    if (pcount != 0) try w.writeByte(',');
+                    try w.writeAll("{\"type\":");
+                    try w.print("{d},\"name\":", .{unityz.classes.intField(pass, "m_Type") orelse 0});
+                    try writeJsonString(w, pname);
+                    try w.writeByte('}');
+                    pcount += 1;
+                }
+                try w.writeAll("]}");
+                scount += 1;
+            }
+        }
+    }
+    try w.writeAll("]}\n");
+    const out = aw.toArrayList();
+    return try arena.dupe(u8, out.items);
 }
 
 /// `info <path> [--dump]` — sniff the container and print a summary;
