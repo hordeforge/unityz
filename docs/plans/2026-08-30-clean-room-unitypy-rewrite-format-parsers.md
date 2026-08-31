@@ -21,13 +21,14 @@ strings are always 4-aligned in the wire format regardless of the
 type-tree meta flag (this fixed AssetBundle, Mesh, and Shader objects,
 which previously failed to read).
 
-Two known limitations remain. The first is shared
-with UnityPy itself: the serialized .NET object graph inside m_Script
-payloads is exposed as raw bytes and not parsed further (UnityPy also
-requires external .NET assemblies to parse it). The second is local:
-`container.sniff`'s version filter still excludes format 4, so a bare v4
-file is unreachable from the CLI even though the library parses and
-rewrites it.  
+One known limitation remains: `container.sniff`'s
+version filter still excludes format 4, so a bare v4 file is
+unreachable from the CLI even though the library parses and
+rewrites it. The serialized .NET object graph inside m_Script
+payloads is no longer a limitation: `extract` decodes the graph
+through its type tree and writes a `.json` sidecar alongside the raw
+`.bin` payload (UnityPy itself still requires external .NET
+assemblies to parse the graph).  
 **Related:**
 
 ## Outcome
@@ -1749,3 +1750,23 @@ exercised on the new real bundles: banner_1 self-diff --pixels reports
 0 pixels across 3 objects, char_118 self-diff --audio compares all 35
 clips with 0 differ, and the scene bundle pair reports exactly the
 renames (AssetBundle container, GameObject m_Name). 287/287 tests.
+
+2026-08-31 (edit round-trip on UnityPy test bundles): the
+edit/reserialize machinery exercised on the three sidecar-carrying
+UnityPy test bundles - banner_1 (Unity 2018.4, .resS texture),
+char_118_yuki.ab (Unity 5.6.7, .resource audio) and xinzexi_2_n_tex
+(Unity 2017.4, .resS texture) - renaming a Sprite m_Name and an
+AudioClip m_Name through the CLI.
+
+All three edit with --verify
+round-trip clean (3/36/4 objects), the rebuilt bundles re-parse with
+both unityz and UnityPy, and the streamed content is untouched:
+banner's texture reports 0 pixel diffs vs the original, char_118's
+UnityPy re-read finds all 35 clips plus the renamed one, and
+xinzexi's edited sprite + texture renders are byte-identical to the
+original extracts (the resS sidecar survives the rebuild byte for
+byte).
+
+The rebuilt bundles write their block uncompressed (flags 0x0
+vs the source's 0x43) - pre-existing rebuilder behavior, verified
+parseable by both tools. 287/287 tests.
