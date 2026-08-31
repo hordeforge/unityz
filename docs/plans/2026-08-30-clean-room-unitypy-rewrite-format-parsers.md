@@ -1439,3 +1439,14 @@ reports the same two differing objects (sprite 122x298 and texture
 1024x512, 14 pixels, max delta [10,10,10,0]) and the audio mutation the
 same clip (first diff 5904) as the text modes, with stdout now parsing
 as pure JSON. 277/277 tests.
+
+2026-08-31 (Material structured JSON): `extract` now writes each
+Material's saved properties as a structured `material_<id>.json` in
+addition to the readable text: name, shader reference (path id),
+render queue, and the m_SavedProperties lists - texture bindings with
+their scale/offset, floats, colors (RGBA), ints. UnityPy reads
+materials generically; this is the "what does this material reference"
+answer in one file. Verified on the real material: name, shader path 73
+(resolving to the Shader object), _MainTex binding, and the empty
+float/color/int lists all match the raw tree and UnityPy's typed read
+exactly. 277/277 tests.

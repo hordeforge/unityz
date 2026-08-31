@@ -196,9 +196,14 @@ matching UnityPy's mask_sprite/render_sprite_mesh.
 Managed-reference registries decode
 through their type trees, MonoBehaviours resolve their MonoScript and
 export the raw script payload alongside the decoded managed .NET object
-graph (a `.json` sidecar, read off the type tree), Meshes export as
+graph (a `.json` sidecar, read off the type tree), and Meshes export as
 Wavefront OBJ (vertices, normals, UVs, faces), including multi-stream
-vertex layouts, Materials and Shaders export as readable text, and
+vertex layouts.
+
+Materials export as readable text plus a structured JSON
+(shader reference, render queue, and the saved properties: texture
+bindings with scale/offset, floats, colors, ints), Shaders export as
+readable text, and
 AnimationClips export their curves as JSON (per-curve bone path,
 attribute, and keyframes with time, value, and slopes - UnityPy reads
 clips generically but never surfaces the curves).
