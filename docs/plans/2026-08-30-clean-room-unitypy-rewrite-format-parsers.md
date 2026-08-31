@@ -1360,3 +1360,19 @@ from the branch form vgmstream uses for FSB5; framing and step-index
 evolution match). PCM24/32 use straightforward sign-extend + truncate.
 The real char_118 banks (all Vorbis) still extract with .fsb + sidecar
 and no wav, as before. 277/277 tests.
+
+2026-08-31 (diff --audio): `diff` gained an `--audio` pass that compares
+the resolved stream data of every matched AudioClip (embedded or a
+`.resource` sidecar slice), mirroring the `--pixels` matched-object
+semantics: stream bytes live outside the serialized payload, so an
+edited stream byte changes no object hash and plain `diff` reports
+nothing.
+
+Verified on a real bundle pair where one byte of the .resource
+stream was flipped: `diff` previously reported "36 unchanged, 0
+changed"; `--audio` now reports exactly one clip differing, with the
+first difference at offset 5904 within its 17088-byte stream - matching
+the mutated resource offset 10000 (4096 + 5904) cross-checked against
+the extracted sidecars. Identical files report 0 differ, `--class 83`
+scopes to clips, and directory diffs run the pass per matched pair.
+277/277 tests.

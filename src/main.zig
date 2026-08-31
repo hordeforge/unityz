@@ -53,7 +53,10 @@ const usage =
     \\  diff <a> <b>     Compare two files' objects by content hash;
     \\                 directories compare the two trees file-by-file
     \\                 (--json for a machine-readable diff;
-    \\                  --class <id> to compare one class)
+    \\                  --class <id> to compare one class;
+    \\                  --pixels to decode matched Texture2D/Sprite images
+    \\                  and report pixel diffs; --audio to compare matched
+    \\                  AudioClip streams)
     \\  hash <path>      Print per-object content fingerprints
     \\                 (--json for a machine-readable array;
     \\                  --class <id> / --path-id <id> filters,
@@ -2626,7 +2629,7 @@ fn warnToStderr(path: []const u8, err: anyerror) void {
 /// Compares two directories file-by-file by content hash, reporting
 /// unchanged/changed/new/deleted files and totals. UnityPy has no tree
 /// comparison.
-fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool, pixels: bool, class_filter: ?i32, stdout: *Io.Writer) !void {
+fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool, pixels: bool, audio: bool, class_filter: ?i32, stdout: *Io.Writer) !void {
     const DirFile = struct { name: []const u8, hash: u64, size: u64 };
     var files_a: std.ArrayList(DirFile) = .empty;
     var files_b: std.ArrayList(DirFile) = .empty;
@@ -2686,10 +2689,10 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
             } else {
                 unchanged += 1;
             }
-            // The pixel pass runs on every matched pair, not only changed
-            // files: streamed pixels live outside the file's serialized
-            // bytes, so the file hash cannot see .resS edits.
-            if (pixels) {
+            // The pixel/audio passes run on every matched pair, not only
+            // changed files: streamed pixels/audio live outside the file's
+            // serialized bytes, so the file hash cannot see .resS edits.
+            if (pixels or audio) {
                 const pa = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_a, fa.name });
                 defer std.heap.page_allocator.free(pa);
                 const pb = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_b, fb.name });
@@ -2701,10 +2704,16 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
                 const ka = unityz.container.sniff(data_a).container;
                 const kb = unityz.container.sniff(data_b).container;
                 if (ka == kb and (ka == .serialized or ka == .bundle or ka == .webfile)) {
-                    try stdout.print("  pixels in {s}:\n", .{fa.name});
                     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
                     defer arena_state.deinit();
-                    try pixelPass(arena_state.allocator(), data_a, data_b, class_filter, stdout);
+                    if (pixels) {
+                        try stdout.print("  pixels in {s}:\n", .{fa.name});
+                        try pixelPass(arena_state.allocator(), data_a, data_b, class_filter, stdout);
+                    }
+                    if (audio) {
+                        try stdout.print("  audio in {s}:\n", .{fa.name});
+                        try audioPass(arena_state.allocator(), data_a, data_b, class_filter, stdout);
+                    }
                 }
             }
             break;
@@ -2934,6 +2943,119 @@ fn pixelPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
     }
 }
 
+/// `diff --audio`: compares the resolved stream data of every matched
+/// AudioClip in two files (embedded or streamed from a sibling
+/// `.resource` sidecar). Stream bytes live outside the serialized
+/// payload, so an edited stream byte changes no object hash - only this
+/// pass sees it.
+fn audioPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, class_filter: ?i32, stdout: *Io.Writer) !void {
+    var a_list: std.ArrayList(Fp) = .empty;
+    var b_list: std.ArrayList(Fp) = .empty;
+    try collectFingerprints(arena, a_bytes, class_filter, null, &a_list);
+    try collectFingerprints(arena, b_bytes, class_filter, null, &b_list);
+    var compared: usize = 0;
+    var differ: usize = 0;
+    for (a_list.items) |fa| {
+        if (fa.class_id != 83) continue;
+        for (b_list.items) |fb| {
+            if (fb.path_id != fa.path_id or !sameNode(fb.node, fa.node)) continue;
+            compared += 1;
+            const sa = try findObjectStream(arena, a_bytes, fa);
+            const sb = try findObjectStream(arena, b_bytes, fa);
+            if (sa == null or sb == null) {
+                try stdout.print("    (audio: object {d} (AudioClip) could not be resolved in one or both files)\n", .{fa.path_id});
+                differ += 1;
+            } else if (sa.?.len != sb.?.len) {
+                try stdout.print("    (audio: object {d} (AudioClip) size differs {d} vs {d})\n", .{ fa.path_id, sa.?.len, sb.?.len });
+                differ += 1;
+            } else if (!std.mem.eql(u8, sa.?, sb.?)) {
+                var first: usize = sa.?.len;
+                for (sa.?, 0..) |c, i| {
+                    if (c != sb.?[i]) {
+                        first = i;
+                        break;
+                    }
+                }
+                try stdout.print("    (audio: object {d} (AudioClip) {d} bytes, first difference at offset {d})\n", .{ fa.path_id, sa.?.len, first });
+                differ += 1;
+            }
+            break;
+        }
+    }
+    try stdout.print("    (audio: {d} clips compared, {d} differ)\n", .{ compared, differ });
+}
+
+/// Resolves an AudioClip object's stream data from a file (container-aware,
+/// resolving `.resource` sidecar nodes inside the same container), or null
+/// when absent or unresolvable.
+fn findObjectStream(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?[]const u8 {
+    var out: ?[]const u8 = null;
+    switch (unityz.container.sniff(bytes).container) {
+        .bundle => {
+            const b = try unityz.bundle.parse(arena, bytes);
+            var sidecars: std.ArrayList(Sidecar) = .empty;
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) {
+                    try sidecars.append(arena, .{ .path = n.path, .data = n.data });
+                }
+            }
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) continue;
+                if (fa.node) |sn| {
+                    if (!std.mem.eql(u8, n.path, sn)) continue;
+                }
+                out = try findAudioStreamInSerialized(arena, n.data, fa.path_id, sidecars.items);
+                if (out != null) return out;
+            }
+        },
+        .webfile => {
+            const wf = try unityz.webfile.parse(arena, bytes);
+            var sidecars: std.ArrayList(Sidecar) = .empty;
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) {
+                    try sidecars.append(arena, .{ .path = e.path, .data = e.data });
+                }
+            }
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) continue;
+                if (fa.node) |sn| {
+                    if (!std.mem.eql(u8, e.path, sn)) continue;
+                }
+                out = try findAudioStreamInSerialized(arena, e.data, fa.path_id, sidecars.items);
+                if (out != null) return out;
+            }
+        },
+        .serialized => {
+            if (fa.node != null) return null;
+            out = try findAudioStreamInSerialized(arena, bytes, fa.path_id, &.{});
+        },
+        else => {},
+    }
+    return out;
+}
+
+fn findAudioStreamInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar) !?[]const u8 {
+    const sf = unityz.serialized.parse(arena, bytes) catch return null;
+    const o = for (sf.objects) |*oo| {
+        if (oo.class_id == 83 and oo.path_id == path_id) break oo;
+    } else return null;
+    const data = sf.objectData(o) orelse return null;
+    const ti = o.type_index orelse return null;
+    if (ti >= sf.types.len) return null;
+    const tree = sf.types[ti].type_tree;
+    if (tree.roots.len == 0) return null;
+    var r = unityz.streams.Reader.init(data);
+    r.endian = sf.endian;
+    const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return null;
+    const ac = unityz.classes.AudioClip.fromValue(v);
+    if (ac.audio_data.len != 0) return ac.audio_data;
+    if (ac.resource.size != 0 and ac.resource.path.len != 0) {
+        const slice = resolveSidecar(sidecars, ac.resource.path, ac.resource.offset, ac.resource.size);
+        if (slice.len != 0) return slice;
+    }
+    return null;
+}
+
 /// `diff --pixels`: decodes a Texture2D object in both files and reports
 /// pixel-level differences (per-channel differing-byte counts and the
 /// maximum per-channel delta). Node-aware: `fa.node` selects the container
@@ -3115,6 +3237,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     }
     var json = false;
     var pixels = false;
+    var audio = false;
     var class_filter: ?i32 = null;
     var i: usize = 1;
     while (i < rest.len) : (i += 1) {
@@ -3122,6 +3245,8 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             json = true;
         } else if (std.mem.eql(u8, rest[i], "--pixels")) {
             pixels = true;
+        } else if (std.mem.eql(u8, rest[i], "--audio")) {
+            audio = true;
         } else if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
                 try stdout.print("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
@@ -3144,7 +3269,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         return;
     };
     if (stat_a.kind == .directory or stat_b.kind == .directory) {
-        return diffDirectories(io, path, rest[0], json, pixels, class_filter, stdout);
+        return diffDirectories(io, path, rest[0], json, pixels, audio, class_filter, stdout);
     }
     const other_bytes = std.Io.Dir.cwd().readFileAlloc(io, rest[0], std.heap.page_allocator, .unlimited) catch |err| {
         try stdout.print("unityz: {s}: {s}\n", .{ rest[0], @errorName(err) });
@@ -3234,6 +3359,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         }
     }
     if (pixels) try pixelPass(arena, bytes, other_bytes, class_filter, stdout);
+    if (audio) try audioPass(arena, bytes, other_bytes, class_filter, stdout);
     if (json) {
         try stdout.print("{{\"a\":", .{});
         try writeJsonString(stdout, path);

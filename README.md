@@ -49,10 +49,12 @@ does not offer:
 from both files (sprites rendered through their crop rect, packed
 rotation, alpha merge, and mesh; `.resS` sidecars inside the containers
 resolved) and reported with a per-channel pixel-difference count and max
-delta. The pass runs on matched objects, not only changed ones, so edits
-to streamed pixels - which never touch an object's serialized bytes and
-change no content hash - are caught too. Directory diffs apply the same
-pass to every matched file pair.
+delta. `--audio` does the same for AudioClips, comparing their resolved
+stream data (embedded or `.resource` sidecar slices). Both passes run on
+matched objects, not only changed ones, so edits to streamed data -
+which never touch an object's serialized bytes and change no content
+hash - are caught. Directory diffs apply the passes to every matched
+file pair.
 
 All commands accept a directory and process every file in it.
 
