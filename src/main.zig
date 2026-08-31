@@ -880,7 +880,12 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                             // Vorbis: remux the raw packet stream into a
                             // playable Ogg. Unknown setup CRCs stay .fsb.
                             for (bank.samples, 0..) |s, si| {
-                                const ogg = unityz.vorbis.rebuildOgg(arena, audio, bank.data_start, s) catch null orelse continue;
+                                const ogg = unityz.vorbis.rebuildOgg(arena, audio, bank.data_start, s) catch null orelse {
+                                    if (s.vorbis_crc != null) {
+                                        try stdout.print("  audio {d}: FSB5 vorbis: setup CRC not in the known-headers table, kept .fsb\n", .{o.path_id});
+                                    }
+                                    continue;
+                                };
                                 var ogg_name_buf: [160]u8 = undefined;
                                 const ogg_name = if (bank.samples.len == 1)
                                     try std.fmt.bufPrint(&ogg_name_buf, "audio_{d}_{s}.ogg", .{ o.path_id, base_name })
