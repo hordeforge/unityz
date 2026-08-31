@@ -5571,9 +5571,18 @@ fn verifyEditResult(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Wri
                 try stdout.print("verify failed: bundle parse error: {s}\n", .{@errorName(err)});
                 return false;
             };
+            // The rebuilt bundle's streamed references must resolve against
+            // its own sidecar nodes, like `verify` does; without them every
+            // streamed AudioClip/Texture2D would fail this check.
+            var sidecars: std.ArrayList(Sidecar) = .empty;
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) {
+                    try sidecars.append(arena, .{ .path = n.path, .data = n.data });
+                }
+            }
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                try verifySerializedBytes(arena, n.data, null, null, null, true, &report, stdout, "", null);
+                try verifySerializedBytesSidecars(arena, n.data, null, null, null, true, &report, stdout, sidecars.items, "", null);
             }
         },
         .webfile => {
@@ -5581,9 +5590,15 @@ fn verifyEditResult(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Wri
                 try stdout.print("verify failed: webfile parse error: {s}\n", .{@errorName(err)});
                 return false;
             };
+            var sidecars: std.ArrayList(Sidecar) = .empty;
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) {
+                    try sidecars.append(arena, .{ .path = e.path, .data = e.data });
+                }
+            }
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try verifySerializedBytes(arena, e.data, null, null, null, true, &report, stdout, "", null);
+                try verifySerializedBytesSidecars(arena, e.data, null, null, null, true, &report, stdout, sidecars.items, "", null);
             }
         },
         .serialized => try verifySerializedBytes(arena, bytes, null, null, null, true, &report, stdout, "", null),

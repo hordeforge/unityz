@@ -330,6 +330,40 @@ pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []c
     var total: usize = 0;
     for (data) |d| total += d.len;
 
+    // Keep the source bundle's compression: when any source block was
+    // compressed, the single output block is written LZ4-compressed (the
+    // cheapest encoder; LZMA/LZHAM inputs convert losslessly). If the
+    // compressed form is not smaller, the block stays uncompressed, like
+    // Unity's own writer.
+    var any_compressed = false;
+    for (b.blocks) |blk| {
+        if (blockCompressionType(blk.flags) != .none) {
+            any_compressed = true;
+            break;
+        }
+    }
+    // One owner per buffer: `compressed` holds the LZ4 block, `raw_payload`
+    // the fallback uncompressed copy; `block_data` borrows whichever applies.
+    var compressed: ?[]u8 = null;
+    defer if (compressed) |c| allocator.free(c);
+    var raw_payload: ?[]u8 = null;
+    defer if (raw_payload) |p| allocator.free(p);
+    if (any_compressed) {
+        var sw: streams.Writer = .init(allocator);
+        defer sw.deinit();
+        for (data) |d| try sw.writeBytes(d);
+        const payload = sw.getWritten();
+        const c = try lz4.compress(allocator, payload);
+        if (c.len < total) {
+            compressed = c;
+        } else {
+            allocator.free(c);
+            raw_payload = try allocator.dupe(u8, payload);
+        }
+    }
+    const block_data: []const u8 = if (compressed) |c| c else if (raw_payload) |p| p else &.{};
+    const block_flags: u16 = if (compressed != null) 0x40 | @intFromEnum(CompressionType.lz4) else 0;
+
     // header info (big endian)
     var info: streams.Writer = .init(allocator);
     defer info.deinit();
@@ -337,8 +371,8 @@ pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []c
     try info.writeBytes(&[_]u8{0} ** 16); // data hash
     try info.writeInt(u32, 1); // one block
     try info.writeInt(u32, @intCast(total));
-    try info.writeInt(u32, @intCast(total));
-    try info.writeInt(u16, 0); // block flags: uncompressed
+    try info.writeInt(u32, @intCast(if (compressed) |c| c.len else total));
+    try info.writeInt(u16, block_flags); // 0 uncompressed, 0x40|lz4 compressed
     try info.writeInt(u32, @intCast(b.nodes.len));
     var offset: u64 = 0;
     for (b.nodes, 0..) |n, i| {
@@ -370,7 +404,11 @@ pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []c
         for (0..(16 - rem) % 16) |_| try out.writeByte(0);
     }
     try out.writeBytes(info_bytes);
-    for (data) |d| try out.writeBytes(d);
+    if (block_data.len != 0) {
+        try out.writeBytes(block_data);
+    } else {
+        for (data) |d| try out.writeBytes(d);
+    }
 
     // patch the size field: after signature(8) + version(4) [+ unity + revision]
     var size_off: usize = 12;
@@ -544,6 +582,63 @@ test "parse an lz4-compressed unityfs bundle, info at end" {
     try std.testing.expectEqual(@as(u32, 0x82), b.flags);
     try std.testing.expectEqualStrings(payload, b.nodes[0].data);
     try std.testing.expectEqualStrings("2020.3.33f1", b.unity_version);
+}
+
+test "rebuild keeps compression for a compressed source bundle" {
+    const a = std.testing.allocator;
+    // A compressible payload so LZ4 actually shrinks it.
+    const payload = "abababababababababab";
+    // A hand-built LZ4 block: "ab" + match len 18 at offset 2.
+    const lz4_compressed = [_]u8{ 0x2E, 'a', 'b', 0x02, 0x00 };
+
+    const bundle_bytes = try buildBundleFixture(a, .{
+        .info_at_end = false,
+        .compression = .lz4,
+        .payload = payload,
+        .payload_path = "CAB-abc",
+        .raw_block = &lz4_compressed,
+        .block_flags = 0x02,
+    });
+    defer a.free(bundle_bytes);
+
+    var b = try parse(a, bundle_bytes);
+    defer b.deinit(a);
+
+    // Rebuild with a replacement: the output block must stay LZ4-compressed
+    // (a compressed source is re-encoded, not flattened to uncompressed).
+    const rebuilt = try rebuild(a, &b, &.{.{ .path = "CAB-abc", .data = "ababababababababababX" }});
+    defer a.free(rebuilt);
+
+    var b2 = try parse(a, rebuilt);
+    defer b2.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), b2.blocks.len);
+    const ctype = blockCompressionType(b2.blocks[0].flags);
+    try std.testing.expect(ctype == .lz4);
+    try std.testing.expect(b2.blocks[0].compressed_size < b2.blocks[0].uncompressed_size);
+    try std.testing.expectEqualStrings("ababababababababababX", b2.nodes[0].data);
+    // the header flags stay uncompressed-info-at-start; only the block
+    // carries its own compression
+    try std.testing.expect((b2.flags & 0x80) == 0);
+}
+
+test "rebuild keeps an uncompressed source uncompressed" {
+    const a = std.testing.allocator;
+    const bundle_bytes = try buildBundleFixture(a, .{
+        .info_at_end = false,
+        .compression = .none,
+        .payload = "CAB-abcdefgh",
+        .payload_path = "CAB-abc",
+    });
+    defer a.free(bundle_bytes);
+    var b = try parse(a, bundle_bytes);
+    defer b.deinit(a);
+
+    const rebuilt = try rebuild(a, &b, &.{.{ .path = "CAB-abc", .data = "NEWDATA" }});
+    defer a.free(rebuilt);
+    var b2 = try parse(a, rebuilt);
+    defer b2.deinit(a);
+    try std.testing.expect(blockCompressionType(b2.blocks[0].flags) == .none);
+    try std.testing.expectEqualStrings("NEWDATA", b2.nodes[0].data);
 }
 
 test "rebuild replaces a node and stays parseable" {
