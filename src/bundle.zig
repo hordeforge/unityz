@@ -182,8 +182,15 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
     );
     errdefer allocator.free(header_info);
 
-    var blocks: []Block = undefined;
-    var nodes: []Node = undefined;
+    // Empty until allocated, with function-scope errdefers: a block-scoped
+    // errdefer is discharged when the block below exits normally, which
+    // would leak both tables on every error raised after it (short block
+    // data, a failed block decompress, ...). Freeing an empty slice is a
+    // no-op, so the errdefers are safe before the allocations happen.
+    var blocks: []Block = &.{};
+    var nodes: []Node = &.{};
+    errdefer allocator.free(blocks);
+    errdefer allocator.free(nodes);
     {
         var hr = streams.Reader.init(header_info);
         hr.endian = .big;
@@ -191,7 +198,6 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
         const block_count = try hr.readInt(u32);
         if (block_count > max_entries) return error.Corrupt;
         blocks = try allocator.alloc(Block, block_count);
-        errdefer allocator.free(blocks);
         for (blocks) |*b| {
             b.uncompressed_size = try hr.readInt(u32);
             b.compressed_size = try hr.readInt(u32);
@@ -201,7 +207,6 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
         const node_count = try hr.readInt(u32);
         if (node_count > max_entries) return error.Corrupt;
         nodes = try allocator.alloc(Node, node_count);
-        errdefer allocator.free(nodes);
         for (nodes) |*n| {
             // `alloc` does not apply the struct's field defaults, so `data`
             // has to be set here: a node whose range is rejected below would

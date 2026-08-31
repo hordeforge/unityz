@@ -5,7 +5,7 @@
 //! SerializedFiles (formats 2-22) parse; objects decode through their type
 //! trees into a JSON-serializable value model and serialize back;
 //! Texture2D/TextAsset objects extract to PNG/files (RGB/RGBA, DXT1/3/5,
-//! BC4/5, BC7, BC6H, ETC1/ETC2/ETC2-RGBA8, and the crunch variants
+//! BC4/5, BC7, ETC1/ETC2/ETC2-RGBA8, and the crunch variants
 //! ETC_RGB4Crunched/ETC2_RGBA8Crunched/DXT1Crunched/DXT5Crunched, ASTC
 //! incl. HDR; packed sprites merge their separate alpha texture and render
 //! tight/polygon meshes); MonoBehaviours resolve their
