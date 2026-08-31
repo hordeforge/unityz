@@ -1815,3 +1815,11 @@ rebuildOgg - 100,000 iterations across 5 seeds, zero crashes, the
 bounds checks and the OggStream's growable buffers degrade cleanly.
 extract now prints a note (instead of failing silently) when a
 vorbis bank's setup CRC is not in the table and the clip stays .fsb.
+
+The FSB5 metadata sidecar also gained the codec name (`codec`:
+"PCM16", "Vorbis", ...) and, for mode-15 samples, the setup-header
+CRC (`setupCrc`) - the identifier that maps to the known encoder
+configs - alongside the raw mode number. Verified on char_118: every
+clip's sidecar reports codec Vorbis / mode 15 with a setupCrc
+matching the reconstruction table (3605052372 is the same FMOD
+config as Fmod5Sharp's short/long_vorbis banks). 289/289 tests.
