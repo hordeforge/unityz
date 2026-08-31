@@ -356,11 +356,19 @@ pub const Sprite = struct {
         const ry_f = @floor(rect[1]);
         const r1_f = @ceil(rect[0] + rect[2]);
         const r2_f = @ceil(rect[1] + rect[3]);
-        if (rx_f < 0 or ry_f < 0 or r1_f <= rx_f or r2_f <= ry_f) return error.RectOutsideTexture;
+        const tw_f: f32 = @floatFromInt(tw);
+        const th_f: f32 = @floatFromInt(th);
+        // Stated in the positive so a NaN rect fails it: `rect` is
+        // file-supplied, and @intFromFloat on a NaN or on an extent past the
+        // usize range is illegal behavior, not a clamp. The upper end is
+        // clamped in the float domain instead of rejected, since the box is
+        // clipped to the texture bounds below anyway.
+        if (!(rx_f >= 0 and ry_f >= 0 and r1_f > rx_f and r2_f > ry_f)) return error.RectOutsideTexture;
+        if (!(rx_f <= tw_f and ry_f <= th_f)) return error.RectOutsideTexture;
         const rx: usize = @intFromFloat(rx_f);
         const ry: usize = @intFromFloat(ry_f);
-        var rw: usize = @as(usize, @intFromFloat(r1_f)) - rx;
-        var rh: usize = @as(usize, @intFromFloat(r2_f)) - ry;
+        var rw: usize = @as(usize, @intFromFloat(@min(r1_f, tw_f))) - rx;
+        var rh: usize = @as(usize, @intFromFloat(@min(r2_f, th_f))) - ry;
         if (rx >= tw or ry >= th) return error.RectOutsideTexture;
         rw = @min(rw, tw - rx); // PIL clamps to the image bounds
         rh = @min(rh, th - ry);
@@ -593,6 +601,8 @@ fn paintTriangle(
     const max_x: usize = @intFromFloat(@ceil(std.math.clamp(@max(@max(dp0[0], dp1[0]), dp2[0]), 0, sw_f)));
     const min_y: usize = @intFromFloat(@floor(std.math.clamp(@min(@min(dp0[1], dp1[1]), dp2[1]), 0, sh_f)));
     const max_y: usize = @intFromFloat(@ceil(std.math.clamp(@max(@max(dp0[1], dp1[1]), dp2[1]), 0, sh_f)));
+    const src_w_f: f32 = @floatFromInt(src_w);
+    const src_h_f: f32 = @floatFromInt(src_h);
     const area = (dp1[0] - dp0[0]) * (dp2[1] - dp0[1]) - (dp2[0] - dp0[0]) * (dp1[1] - dp0[1]);
     if (area == 0) return; // degenerate
     // Barycentric weights (share a common area sign); interior for either
@@ -610,8 +620,14 @@ fn paintTriangle(
                 const u = l1 * sp0[0] + l2 * sp1[0] + l0 * sp2[0];
                 const vv = l1 * sp0[1] + l2 * sp1[1] + l0 * sp2[1];
                 // nearest-neighbour: the texel containing the sampled point
-                const uf = @floor(@max(u, 0));
-                const vf = @floor(@max(vv, 0));
+                // Clamp both ends before the conversion: `sp` derives from
+                // file-supplied UVs, so u/vv can be Inf or huge, and
+                // @intFromFloat outside the usize range is illegal behavior
+                // rather than something clampUsize can still catch. @max
+                // first (not std.math.clamp, which puts a NaN on the upper
+                // bound) keeps a NaN UV sampling texel 0 as before.
+                const uf = @floor(@min(@max(u, 0), src_w_f));
+                const vf = @floor(@min(@max(vv, 0), src_h_f));
                 const sx = clampUsize(@intFromFloat(uf), src_w);
                 const sy = clampUsize(@intFromFloat(vf), src_h);
                 @memcpy(sprite[(r * sw + c) * 4 ..][0..4], src[(sy * src_w + sx) * 4 ..][0..4]);

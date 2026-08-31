@@ -1159,7 +1159,14 @@ fn writeMeshObj(
 
                 const index_count = unityz.classes.intField(sub, "indexCount") orelse 0;
                 const start = index_cursor;
-                const end = start + @as(usize, @intCast(@max(index_count, 0)));
+                // `indexCount` is file-supplied and need not match the index
+                // buffer: clamp it to the slots that actually exist, or
+                // `start + count` overflows usize (and the face loop spins
+                // over billions of slots writeFace would skip anyway).
+                const index_slots = mesh.index_buffer.len / idx_bytes;
+                if (start >= index_slots) break;
+                const want: usize = @intCast(@max(index_count, 0));
+                const end = start + @min(want, index_slots - start);
                 index_cursor = end;
                 const per_face: usize = switch (topology) {
                     0 => 3, // triangles

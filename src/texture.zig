@@ -510,7 +510,10 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
 
 /// Copies `stride`-byte pixels through a converter.
 fn floatToByte(f: f32) u8 {
-    if (f <= 0) return 0;
+    // Written as `!(f > 0)` so a NaN pixel - float-format textures really do
+    // carry them - takes the 0 branch instead of reaching @intFromFloat,
+    // which is illegal behavior on a non-finite value.
+    if (!(f > 0)) return 0;
     if (f >= 1) return 255;
     return @intFromFloat(f * 255);
 }
@@ -1409,7 +1412,13 @@ fn astcSelectColorHdr(v0: i32, v1: i32, weight: i32) u8 {
 }
 
 fn astcF32ToU8(f: f32) u8 {
-    return @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(f * 255.0))), 0, 255));
+    // Clamp before the conversion, not after: HDR void-extent blocks carry
+    // raw f16s from the file, and @intFromFloat on an Inf (half bits 0x7c00)
+    // or a NaN is illegal behavior rather than a clamp. Same positive-form
+    // guard as floatToByte, so a NaN takes the 0 branch.
+    if (!(f > 0)) return 0;
+    if (f >= 1) return 255;
+    return @intFromFloat(@round(f * 255.0));
 }
 
 fn astcF16PtrToU8(ptr: []const u8) u8 {
