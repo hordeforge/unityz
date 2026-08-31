@@ -3429,6 +3429,7 @@ fn valuesEqual(a: unityz.value.Value, b: unityz.value.Value) bool {
         return false;
     }
     if (a == .string and b == .string) return std.mem.eql(u8, a.string, b.string);
+    if (a == .bytes and b == .bytes) return std.mem.eql(u8, a.bytes, b.bytes);
     if (a == .pptr and b == .pptr) return a.pptr.file_id == b.pptr.file_id and a.pptr.path_id == b.pptr.path_id;
     if (a == .bool and b == .bool) return a.bool == b.bool;
     return false;
@@ -3462,8 +3463,15 @@ fn reportLeaf(a: unityz.value.Value, b: unityz.value.Value, path: []const u8, re
     try unityz.value.jsonWrite(b, &aw_b.writer);
     const out_a = aw_a.toArrayList();
     const out_b = aw_b.toArrayList();
-    try stdout.print("    {s} ({s} -> {s})\n", .{ path, out_a.items, out_b.items });
+    // binary leaves (base64) can be huge; show a prefix so the report
+    // stays readable when e.g. a mesh's index buffer changes
+    try stdout.print("    {s} ({s} -> {s})\n", .{ path, truncateLeaf(out_a.items), truncateLeaf(out_b.items) });
     reported.* += 1;
+}
+
+fn truncateLeaf(s: []const u8) []const u8 {
+    if (s.len <= 72) return s;
+    return s[0..72];
 }
 
 /// Reads an object's value tree from a file (container-aware), or null
