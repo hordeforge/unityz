@@ -24,6 +24,8 @@ Run the CLI:
 ./zig-out/bin/unityz verify path/to/asset
 ./zig-out/bin/unityz stats path/to/asset
 ./zig-out/bin/unityz find path/to/asset Player
+./zig-out/bin/unityz show path/to/asset 100
+./zig-out/bin/unityz hash path/to/asset
 ./zig-out/bin/unityz diff asset_a asset_b
 ./zig-out/bin/unityz skin path/to/asset
 ```
@@ -81,8 +83,9 @@ a script needs is plain text and a non-zero exit code on failure.
 - a **library** (`src/lib.zig`, imported as `@import("unityz")`) with parsers
   for Unity's asset formats, and
 - a **CLI** (`src/main.zig`, `unityz`) with `info`, `extract`, `edit`,
-  `verify`, `stats`, `find`, `show`, and `diff` subcommands for
-  inspecting, pulling out, modifying, checking, and comparing assets.
+  `verify`, `stats`, `find`, `show`, `diff`, `hash`, and `skin`
+  subcommands for inspecting, pulling out, modifying, checking, and
+  comparing assets. `unityz --help` is the authoritative flag reference.
 
 Targeted formats: SerializedFile (`.assets`), asset bundles (`.unity3d` /
 `.bundle`), and `.resources` / `.resS` sidecar files.
@@ -94,9 +97,9 @@ UnityFS bundles, WebFiles, and SerializedFiles (`.assets` and friends)
 and prints what it found (header, type tree presence, object table with
 per-class counts for serialized files, nodes for bundles). With `--dump`,
 objects of a serialized file are read through their type trees and printed
-as JSON. Formats 2-22 are supported; decompression covers none
-(uncompressed), LZ4 (in-tree), and LZMA (via std), with LZHAM detected
-but unsupported.
+as JSON. Serialized formats 2-22 are supported except version 4, which is
+rejected; decompression covers none (uncompressed), LZ4 (in-tree), and
+LZMA (via std), with LZHAM detected but unsupported.
 
 The generic object reader is in: object payloads are decoded through
 their type trees into a JSON-serializable value model (primitives, strings,
@@ -112,8 +115,8 @@ ATC (RGB4/RGBA8), EAC (R/RG, signed and unsigned), ETC1/ETC2/ETC2-RGBA8,
 ASTC, ASTC HDR (66-71), plus the crunch-crunched formats (ETC_RGB4,
 ETC2_RGBA8, DXT1, DXT5) through a vendored ZLIB-licensed unitycrunch
 decompressor (hardened against corrupt streams). The 3DS ETC variants
-are detected but not yet
-decoded.
+(TextureFormat 60/61) and ETC2_RGBA1 are not decoded; `decode` reports
+them as `error.UnsupportedFormat`.
 
 ETC2, the BC family, and the crunch variants decode pixel-identical to
 UnityPy (ASTC decodes within ±1 per channel on a small fraction of
@@ -154,7 +157,7 @@ AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
 MP3) with an FSB5 metadata sidecar (sample rate, channels, loop points,
 format - UnityPy never surfaces these), and objects reserialize
 byte-exactly and can be edited in place
-across formats 2-22 (legacy rewrites included).
+across formats 2-22 except 4 (legacy rewrites included).
 
 UnityFS bundles parse
 real big-endian files across format versions 6-22 (Unity 5.x through
@@ -179,13 +182,18 @@ interpolation.
 - `src/main.zig` - CLI entry point and subcommand dispatch
 - `src/streams.zig` - endian-aware binary reader/writer
 - `src/container.zig` - file type detection by magic/header
-- `src/webfile.zig` - WebFile container parser
+- `src/webfile.zig` - WebFile container parser and rebuilder (transparently
+  decompresses gzip-wrapped files)
 - `src/bundle.zig` - UnityFS bundle parser (with LZ4/LZMA blocks)
 - `src/lz4.zig` - LZ4 block decompression
 - `src/serialized.zig` - SerializedFile parser (`.assets` and friends)
 - `src/typetree.zig` - TypeTree parsing + Unity common-string table
 - `src/value.zig` - generic object value model + JSON output
 - `src/object_reader.zig` - type-tree-driven object reader
+- `src/object_writer.zig` - type-tree-driven object serializer (the inverse
+  of the reader)
+- `src/serialized_writer.zig` - SerializedFile rewrite: rebuilds the object
+  table and data section around replaced object payloads
 - `src/classes.zig` - typed views for the common classes
 - `src/fsb5.zig` - FSB5 audio bank metadata parser (sample rate, channels,
   loop points, format)
@@ -194,8 +202,9 @@ interpolation.
   a bone-matrix binding)
 - `src/texture.zig` - texture format decoding to RGBA8 (uncompressed
   RGB/RGBA layouts, half/float/16-bit/signed raw formats, DXT1/3/5,
-  BC4/5, BC7, ETC1/ETC2/ETC2-RGBA8, ASTC, ASTC HDR (66-71), crunch
-  ETC_RGB4/ETC2_RGBA8/DXT1/DXT5 via `src/vendor/unitycrunch/`)
+  BC4/5, BC6H, BC7, PVRTC, ATC, EAC, ETC1/ETC2/ETC2-RGBA8, ASTC,
+  ASTC HDR (66-71), crunch ETC_RGB4/ETC2_RGBA8/DXT1/DXT5 via
+  `src/vendor/unitycrunch/`)
 - `src/png.zig` - minimal PNG encoder
 - `src/vendor/unitycrunch/` - vendored unitycrunch decompressor
   (ZLIB-licensed C++, built with `-DNDEBUG` so corrupt input can't abort)

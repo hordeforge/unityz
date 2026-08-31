@@ -56,6 +56,17 @@ pub const archive_magic = "UnityArchive\x00";
 /// the rest of the file and stay far below any real-world metadata block.
 const max_metadata_size: u32 = 64 * 1024 * 1024;
 
+/// Identifies the container framing of `data` from its leading bytes.
+///
+/// A recognized container is not a parseable one: legacy `UnityWeb`/
+/// `UnityRaw` bundles sniff as `.bundle` but `bundle.parse` rejects them,
+/// and a `serialized_version` outside `serialized.supportedVersion` is
+/// never reported (such files come back `.unknown`). Callers must still
+/// handle the per-format parser's errors.
+///
+/// Gzip magic is reported as `.webfile`, since `webfile.parse` is the
+/// only entry point that decompresses; the plaintext inside is
+/// re-validated there.
 pub fn sniff(data: []const u8) SniffResult {
     if (std.mem.startsWith(u8, data, webfile_magic)) {
         return .{ .container = .webfile };

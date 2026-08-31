@@ -2,8 +2,8 @@
 //!
 //! Status: read and write paths are both functional for the modern
 //! formats. WebFiles, UnityFS bundles (LZ4/LZMA blocks), and
-//! SerializedFiles (formats 2-22) parse; objects decode through their type
-//! trees into a JSON-serializable value model and serialize back;
+//! SerializedFiles (formats 2-22 except 4) parse; objects decode through
+//! their type trees into a JSON-serializable value model and serialize back;
 //! Texture2D/TextAsset objects extract to PNG/files (RGB/RGBA, DXT1/3/5,
 //! BC4/5, BC7, ETC1/ETC2/ETC2-RGBA8, and the crunch variants
 //! ETC_RGB4Crunched/ETC2_RGBA8Crunched/DXT1Crunched/DXT5Crunched, ASTC
@@ -11,7 +11,8 @@
 //! tight/polygon meshes); MonoBehaviours resolve their
 //! MonoScript identity and export the raw serialized script payload;
 //! managed-reference registries decode through their type trees. Objects
-//! can be edited in place across all supported serialized formats (2-22).
+//! can be edited in place across all supported serialized formats
+//! (2-22 except 4).
 
 const std = @import("std");
 
@@ -27,8 +28,10 @@ pub const container = @import("container.zig");
 /// WebFile container (`UnityWebData1.0`) parser.
 pub const webfile = @import("webfile.zig");
 
-/// UnityFS bundle parser and LZ4 block decompression.
+/// UnityFS bundle parser.
 pub const bundle = @import("bundle.zig");
+
+/// LZ4 block decompression, as used by UnityFS bundle blocks.
 pub const lz4 = @import("lz4.zig");
 
 /// TypeTree parsing (class layout metadata).
@@ -54,6 +57,8 @@ pub const texture = @import("texture.zig");
 
 /// Minimal PNG encoder.
 pub const png = @import("png.zig");
+
+/// FSB5 audio bank metadata parser (sample rate, channels, loop points).
 pub const fsb5 = @import("fsb5.zig");
 
 /// TypeTree-driven object serializer (inverse of the reader).

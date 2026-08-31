@@ -141,6 +141,11 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
+/// Serialized-file format versions this parser accepts: 2, 3, and 5
+/// through 22. The gap at 4 is deliberate (see the "parse rejects
+/// unsupported version" test) — `parse` returns
+/// `error.UnsupportedVersion` for it. Describe the range as "2-22 except
+/// 4"; a bare "2-22" overstates what the parser handles.
 pub fn supportedVersion(version: u32) bool {
     return switch (version) {
         2, 3, 5...22 => true,

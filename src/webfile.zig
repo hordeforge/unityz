@@ -14,9 +14,12 @@
 //! file data follows at the recorded offsets.
 //! ```
 //!
-//! The whole file may be wrapped in gzip (detected by magic and reported
-//! as unsupported). Entry data borrows from the source buffer; only the
-//! entry array is allocated.
+//! The whole file may be wrapped in gzip (detected by magic); `parse`
+//! decompresses the stream first and the resulting `WebFile` owns the
+//! plaintext. Entry data always borrows — from the caller's buffer for a
+//! plain file, from that owned plaintext for a gzip-wrapped one — so a
+//! `WebFile` must outlive any use of its entries. Only the entry array
+//! and the decompressed buffer are allocated; `deinit` frees both.
 
 const std = @import("std");
 const streams = @import("streams.zig");
@@ -29,7 +32,7 @@ pub const Entry = struct {
 
 pub const WebFile = struct {
     entries: []Entry,
-    /// Owned decompressed source (gzip-wrapped webfiles); empty for
+    /// Owned decompressed source (gzip-wrapped webfiles); null for
     /// plain files, whose entries borrow from the caller's buffer.
     owned: ?[]u8 = null,
 

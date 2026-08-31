@@ -1,0 +1,3 @@
+# Normalize line endings on checkin; check out LF everywhere so shell
+# scripts and Zig sources stay byte-identical across platforms.
+* text=auto eol=lf
