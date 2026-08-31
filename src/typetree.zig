@@ -85,7 +85,7 @@ pub fn parse(
     const encoding: Encoding = switch (format_version) {
         2 => .legacy_v2,
         3 => .legacy_v3,
-        5...9 => .legacy_standard,
+        4, 5...9 => .legacy_standard,
         10 => .blob,
         11 => .legacy_standard,
         12...18 => .blob,
