@@ -33,16 +33,23 @@ requires external .NET assemblies to parse it).
 public format documentation only - no code or data taken from UnityPy.
 
 - `unityz info <file>` prints the file type and, for serialized files, the
-  object table and per-class object counts for any UnityFS bundle, WebFile,
+  format version, Unity version, platform, endianness, type-tree flag, and
+  type/object/external counts for any UnityFS bundle, WebFile,
   `.assets`/`.resources`/`.resS` file produced by Unity 2.5 through current
-  versions.
+  versions. `--objects` adds the object table; per-class object counts are
+  `unityz stats`.
 - `unityz extract <file>` writes embedded assets (textures, text assets,
   meshes, raw bytes of any object) to disk; texture objects are decoded to
   PNG for the supported compressed formats (DXT1/3/5, BC4/5, BC7,
-  ETC1/2, ETC2-RGBA8, ASTC, plus the uncompressed RGB/A family).
+  ETC1/2, ETC2-RGBA8, ASTC LDR and HDR, the DXT/ETC crunch variants, plus
+  the uncompressed RGB/A family and the raw half/float/16-bit/signed
+  family).
 - `unityz edit <file>` rewrites a serialized file after in-memory changes
   (e.g. dumping an object to JSON, editing it, and writing back), producing
   a valid file.
+- Beyond the three commands this plan started from, the CLI ships
+  `verify`, `stats`, `find`, `show`, `diff`, `hash`, and `skin`; the
+  completion notes below record the pass that added each one.
 - The library surface (`src/lib.zig`) exposes containers, object access, and
   raw read/write primitives so other Zig tools can build on it.
 
@@ -77,6 +84,16 @@ bundle encryption variants, asset bundle building from scratch, exotic
 texture formats, audio/movie conversion, .NET assembly extraction beyond
 raw bytes.
 
+Two of those non-goals were reopened by later passes and no longer
+describe the code (see the completion notes): the exotic texture formats
+were taken on after an audit against UnityPy's TextureFormat enum, so
+ASTC HDR, the crunch variants, and the raw half/float/16-bit/signed
+family now decode, with PVRTC/ATC/EAC/3DS still unsupported; and
+AudioClip data is now extracted (container detection, raw PCM wrapped in
+a WAV header) rather than skipped, though nothing is transcoded, so
+audio/movie *conversion* remains out. The other three non-goals still
+hold.
+
 ## Decisions and unknowns
 
 - Zig 0.16.0 (`std.Io` API era) - the scaffold already targets it.
@@ -85,6 +102,10 @@ raw bytes.
 - Compression: implement LZ4 block decompression in-tree (small, stable
   format). LZMA support depends on what std 0.16 ships; if absent, bundles
   using LZMA are detected and reported, not parsed.
+  Resolved: std 0.16 ships a usable decoder, so `bundle.zig` decompresses
+  LZMA blocks through `std.compress.lzma` (normalising Unity's 5-byte
+  props+dict framing to the 13-byte header std expects). See the LZMA
+  verification pass and the v6-bundle pass in the completion notes.
 - TypeTree version differences across Unity releases are handled by parsing
   the tree itself, never by assuming a fixed schema.
 
@@ -151,7 +172,7 @@ Formats 2-22 round-trip
    (per-version object-table layout, tail fields, Legacy16 and
    Standard20 header layouts); v9 and v13 fixtures cover the legacy
    paths.
-10. **CLI + docs** - `info`, `--dump`, `extract`, `edit` wired; README
+11. **CLI + docs** - `info`, `--dump`, `extract`, `edit` wired; README
     status current.
 
 ## Verification
@@ -1119,3 +1140,66 @@ ASAN-diagnosed and patched in crn_decomp.h plus the shim (bounds checks,
 model invalidation on failed init, and level-offset validation before
 decompression); 540 mutated invocations now run at zero crashes. A
 regression test covers the DXT5 three-color mode; 219/219 tests.
+
+2026-08-31 (crunch DXT variants): Unity's DXT1Crunched (28) and
+DXT5Crunched (29) now route through the same vendored unitycrunch
+machinery as the ETC crunch formats: the shim decompresses to raw
+DXT1/DXT5 blocks, which the existing block decoders turn into RGBA.
+Found and fixed a latent off-by-one in the shared 565->888 expansion
+(BCn bit-replication, `(v<<3)|(v>>2)`, not `v*255/31` truncation) that
+made the whole DXT family 1 LSB low on non-maximum colors. Verified
+byte-exact (512x512) against UnityPy's Pillow 'bcn' decode on real
+UNITYCRUNCH_DXT1/DXT5.crn streams.
+
+2026-08-31 (packed sprite alpha-texture + tight meshes): sprite export
+now handles packed sprites. A separate alpha texture (m_RD.alphaTexture,
+or the atlas entry's) is merged into the decoded RGBA before the crop:
+RGB from the main texture, alpha from the alpha texture's R channel
+(UnityPy's Image.merge). Packing rotation (flipH/V, 180, 90) is applied
+to the crop before the final vertical flip, in UnityPy's order.
+
+A tight
+sprite (settingsRaw bit 1 == 0) parses its mesh (positions, UVs,
+triangles) from m_RD via m_VertexData/Channels or the vertices list,
+then masks the crop with the polygon (maskSprite) or texture-maps the
+mesh UVs onto the polygon (renderSpriteMesh), mirroring UnityPy's
+mask_sprite/render_sprite_mesh.
+
+Verified byte-exact against UnityPy on
+the real sprite.assets fixture (rectangle sprite); the tight mesh path
+has no committed Unity fixture, so it is algorithm-faithful to UnityPy
+and unit-tested but not byte-verified against a real tight sprite.
+
+2026-08-31 (shader sub-program blobs + `skin`): `src/shader.zig` decodes a
+Shader's out-of-line per-platform LZ4 sub-program blob (parameter blobs and
+code blobs, each code blob closing with a `ParserBindChannels` block) and
+answers whether a shader's vertex stage skins: it must bind per-vertex bone
+indices/weights (BLENDINDICES/BLENDWEIGHT, mesh-channel sources 9 and 8) and
+bind the per-mesh bone matrices (`unity_SkinnedMeshBoneMatrix` or an
+equivalent per-mesh texture/cbuffer).
+
+The verdict surfaces per Shader in
+`info --json` and through a new `skin <path>` command that exits non-zero
+when a SkinnedMeshRenderer references a shader that does not skin
+(`--json` for a machine-readable report). Shader objects still round-trip
+byte-exactly through `verify`. This is the tenth CLI command; the plan's
+Outcome section lists the full set.
+
+2026-08-31 (untrusted-input hardening): a pass over the values an attacker
+controls in a malformed bundle. `bundle` initialises `Node.data` before the
+header loop (alloc does not apply field defaults, so a rejected node range
+would have been handed out as an undefined slice), rejects blocks that
+decode short, checks node ranges for negative values and overflow instead of
+wrapping into an in-bounds slice, and treats a short LZMA read as a
+decompression failure.
+
+`classes` narrows type-tree integers with
+`std.math.cast`, so a negative or oversized field degrades to the default
+rather than making `@intCast` illegal behaviour. `serialized` rejects counts
+larger than the remaining metadata before they size an allocation.
+`texture` bounds the pixel count so neither the RGBA8 output size nor the
+16-byte-per-pixel stride can overflow into a short allocation.
+
+`main`
+replaces path separators in script class names so an extracted script stays
+a single path component under the extract directory.

@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     });
     crunch_lib.root_module.addCSourceFile(.{
         .file = b.path("src/vendor/unitycrunch_shim.cpp"),
-        .flags = &.{ "-DNDEBUG" },
+        .flags = &.{"-DNDEBUG"},
     });
     lib.linkLibrary(crunch_lib);
 
@@ -71,6 +71,7 @@ pub fn build(b: *std.Build) void {
         "src/value.zig",
         "src/object_reader.zig",
         "src/classes.zig",
+        "src/shader.zig",
         "src/texture.zig",
         "src/png.zig",
         "src/fsb5.zig",

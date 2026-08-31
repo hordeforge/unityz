@@ -26,6 +26,14 @@ pub fn intField(v: value.Value, name: []const u8) ?i64 {
     return f.asInt();
 }
 
+/// Narrows an untrusted type-tree integer to `T`, yielding 0 when it does
+/// not fit. Field values come from the file, so a negative or oversized
+/// integer must degrade to the default the same way a missing field does
+/// rather than make `@intCast` illegal behaviour.
+fn narrow(comptime T: type, v: i64) T {
+    return std.math.cast(T, v) orelse 0;
+}
+
 pub fn boolField(v: value.Value, name: []const u8) ?bool {
     return switch (fieldOf(v, name) orelse return null) {
         .bool => |b| b,
@@ -61,7 +69,7 @@ pub fn pptrField(v: value.Value, name: []const u8) ?value.PPtr {
             // PPtrs with extra fields were read as objects.
             const file = intField(.{ .obj = fields }, "m_FileID") orelse break :blk null;
             const path = intField(.{ .obj = fields }, "m_PathID") orelse break :blk null;
-            break :blk .{ .file_id = @intCast(file), .path_id = path };
+            break :blk .{ .file_id = narrow(i32, file), .path_id = path };
         },
         else => null,
     };
@@ -91,8 +99,8 @@ pub const StreamingInfo = struct {
     pub fn fromValue(v: value.Value) StreamingInfo {
         const f = fieldOf(v, "m_StreamData") orelse return .{};
         return .{
-            .offset = @intCast(intField(f, "offset") orelse intField(f, "m_Offset") orelse 0),
-            .size = @intCast(intField(f, "size") orelse intField(f, "m_Size") orelse 0),
+            .offset = narrow(u32, intField(f, "offset") orelse intField(f, "m_Offset") orelse 0),
+            .size = narrow(u32, intField(f, "size") orelse intField(f, "m_Size") orelse 0),
             .path = stringField(f, "path") orelse stringField(f, "m_Path") orelse "",
         };
     }
@@ -114,12 +122,12 @@ pub const Texture2D = struct {
 
     pub fn fromValue(v: value.Value) Texture2D {
         return .{
-            .width = @intCast(intField(v, "m_Width") orelse 0),
-            .height = @intCast(intField(v, "m_Height") orelse 0),
-            .format = @intCast(intField(v, "m_TextureFormat") orelse 0),
-            .mip_count = @intCast(intField(v, "m_MipCount") orelse 1),
-            .image_count = @intCast(intField(v, "m_ImageCount") orelse 1),
-            .complete_image_size = @intCast(intField(v, "m_CompleteImageSize") orelse 0),
+            .width = narrow(u32, intField(v, "m_Width") orelse 0),
+            .height = narrow(u32, intField(v, "m_Height") orelse 0),
+            .format = narrow(i32, intField(v, "m_TextureFormat") orelse 0),
+            .mip_count = narrow(u32, intField(v, "m_MipCount") orelse 1),
+            .image_count = narrow(u32, intField(v, "m_ImageCount") orelse 1),
+            .complete_image_size = narrow(u32, intField(v, "m_CompleteImageSize") orelse 0),
             .is_readable = boolField(v, "m_IsReadable") orelse false,
             // The pixel payload is named "image data" in modern type trees
             // (2021.2+) and "m_ImageData" in older ones; accept both.
@@ -159,14 +167,14 @@ pub const AudioClip = struct {
         const f = fieldOf(v, "m_Resource") orelse return .{};
         return .{
             .name = stringField(v, "m_Name") orelse "",
-            .channels = @intCast(intField(v, "m_Channels") orelse 0),
-            .frequency = @intCast(intField(v, "m_Frequency") orelse 0),
-            .bits_per_sample = @intCast(intField(v, "m_BitsPerSample") orelse 0),
-            .compression_format = @intCast(intField(v, "m_CompressionFormat") orelse 0),
+            .channels = narrow(u32, intField(v, "m_Channels") orelse 0),
+            .frequency = narrow(u32, intField(v, "m_Frequency") orelse 0),
+            .bits_per_sample = narrow(u32, intField(v, "m_BitsPerSample") orelse 0),
+            .compression_format = narrow(i32, intField(v, "m_CompressionFormat") orelse 0),
             .audio_data = bytesField(v, "m_AudioData") orelse &.{},
             .resource = .{
-                .offset = @intCast(intField(f, "m_Offset") orelse 0),
-                .size = @intCast(intField(f, "m_Size") orelse 0),
+                .offset = narrow(u32, intField(f, "m_Offset") orelse 0),
+                .size = narrow(u32, intField(f, "m_Size") orelse 0),
                 .path = stringField(f, "m_Source") orelse "",
             },
         };
@@ -234,10 +242,29 @@ pub const Transform = struct {
 pub const Sprite = struct {
     name: []const u8 = "",
     texture: ?value.PPtr = null,
+    alpha_texture: ?value.PPtr = null,
     rect: [4]f32 = .{ 0, 0, 0, 0 },
     pixels_to_units: f32 = 100,
     width: u32 = 0,
     height: u32 = 0,
+    /// SpriteRenderData.settingsRaw bitfield (see helpers below).
+    settings_raw: u32 = 0,
+
+    /// bit 0: sprite is atlas-packed.
+    pub fn isPacked(self: *const Sprite) bool {
+        return self.settings_raw & 1 != 0;
+    }
+
+    /// bit 1: 0 = kSPMTight (mesh/polygon), 1 = kSPMRectangle (plain crop).
+    pub fn isTight(self: *const Sprite) bool {
+        return (self.settings_raw >> 1) & 1 == 0;
+    }
+
+    /// bits 2-5: SpritePackingRotation (0 none, 1 flipH, 2 flipV, 3 rot180,
+    /// 4 rot90), matching UnityPy's SpriteSettings.
+    pub fn packingRotation(self: *const Sprite) u32 {
+        return (self.settings_raw >> 2) & 0xf;
+    }
 
     /// Fills `out[4]` with x/y/width/height from a Rectf-shaped value.
     fn readRect(r: value.Value, out: *[4]f32) void {
@@ -258,16 +285,21 @@ pub const Sprite = struct {
         var self = Sprite{
             .name = stringField(v, "m_Name") orelse "",
             .texture = pptrField(v, "m_Texture"),
+            .alpha_texture = pptrField(v, "m_AlphaTexture"),
             .pixels_to_units = ptu,
         };
-        if (intField(v, "m_Width")) |w| self.width = @intCast(w);
-        if (intField(v, "m_Height")) |h| self.height = @intCast(h);
+        if (intField(v, "m_Width")) |w| self.width = narrow(u32, w);
+        if (intField(v, "m_Height")) |h| self.height = narrow(u32, h);
         if (fieldOf(v, "m_Rect")) |r| readRect(r, &self.rect);
         // Modern sprites carry the render data in m_RD (texture + rect);
         // it takes precedence over the legacy top-level fields.
         if (fieldOf(v, "m_RD")) |rd| {
             if (pptrField(rd, "texture")) |t| self.texture = t;
+            if (pptrField(rd, "alphaTexture")) |at| self.alpha_texture = at;
             if (fieldOf(rd, "textureRect")) |r| readRect(r, &self.rect);
+            if (intField(rd, "settingsRaw")) |sr| {
+                self.settings_raw = @truncate(@as(u64, @bitCast(sr)));
+            }
         }
         return self;
     }
@@ -289,7 +321,8 @@ pub const Sprite = struct {
     /// Crops an arbitrary rect (e.g. the atlas's copy for packed sprites)
     /// out of a decoded RGBA texture. Rounds the box the way Pillow's
     /// Image.crop does - floor on x/y, ceil on x+w/y+h - so sprite sizes
-    /// match UnityPy byte-for-byte, and clamps to the texture bounds.
+    /// match UnityPy byte-for-byte, and clamps to the texture bounds, then
+    /// flips the rows vertically (UnityPy flips the final sprite image).
     pub fn spriteRgbaRect(
         allocator: std.mem.Allocator,
         rect: [4]f32,
@@ -297,17 +330,45 @@ pub const Sprite = struct {
         tex_w: u32,
         tex_h: u32,
     ) ![]u8 {
+        const crop = try cropRectNoFlip(allocator, rect, tex_rgba, tex_w, tex_h);
+        return flipRows(allocator, crop.data, crop.w, crop.h);
+    }
+
+    /// A cropped box: `data` is `w x h` RGBA8, top-origin (not flipped).
+    pub const Crop = struct {
+        data: []u8,
+        w: usize,
+        h: usize,
+    };
+
+    /// Crops `rect` out of `tex_rgba` WITHOUT flipping rows, returning the
+    /// top-origin box, sized/rounded exactly like UnityPy/Pillow.
+    pub fn cropRectNoFlip(
+        allocator: std.mem.Allocator,
+        rect: [4]f32,
+        tex_rgba: []const u8,
+        tex_w: u32,
+        tex_h: u32,
+    ) !Crop {
         const tw: usize = tex_w;
         const th: usize = tex_h;
         const rx_f = @floor(rect[0]);
         const ry_f = @floor(rect[1]);
         const r1_f = @ceil(rect[0] + rect[2]);
         const r2_f = @ceil(rect[1] + rect[3]);
-        if (rx_f < 0 or ry_f < 0 or r1_f <= rx_f or r2_f <= ry_f) return error.RectOutsideTexture;
+        const tw_f: f32 = @floatFromInt(tw);
+        const th_f: f32 = @floatFromInt(th);
+        // Stated in the positive so a NaN rect fails it: `rect` is
+        // file-supplied, and @intFromFloat on a NaN or on an extent past the
+        // usize range is illegal behavior, not a clamp. The upper end is
+        // clamped in the float domain instead of rejected, since the box is
+        // clipped to the texture bounds below anyway.
+        if (!(rx_f >= 0 and ry_f >= 0 and r1_f > rx_f and r2_f > ry_f)) return error.RectOutsideTexture;
+        if (!(rx_f <= tw_f and ry_f <= th_f)) return error.RectOutsideTexture;
         const rx: usize = @intFromFloat(rx_f);
         const ry: usize = @intFromFloat(ry_f);
-        var rw: usize = @as(usize, @intFromFloat(r1_f)) - rx;
-        var rh: usize = @as(usize, @intFromFloat(r2_f)) - ry;
+        var rw: usize = @as(usize, @intFromFloat(@min(r1_f, tw_f))) - rx;
+        var rh: usize = @as(usize, @intFromFloat(@min(r2_f, th_f))) - ry;
         if (rx >= tw or ry >= th) return error.RectOutsideTexture;
         rw = @min(rw, tw - rx); // PIL clamps to the image bounds
         rh = @min(rh, th - ry);
@@ -315,15 +376,330 @@ pub const Sprite = struct {
 
         const out = try allocator.alloc(u8, rw * rh * 4);
         for (0..rh) |row| {
-            // UnityPy crops top-origin then flips the result vertically, so
-            // output row r is texture row (ry + rh - 1 - r).
-            const src_row = ry + rh - 1 - row;
+            const src_row = ry + row; // top-origin, no flip
             const src = tex_rgba[(src_row * tw + rx) * 4 ..][0 .. rw * 4];
             @memcpy(out[row * rw * 4 ..][0 .. rw * 4], src);
+        }
+        return .{ .data = out, .w = rw, .h = rh };
+    }
+
+    fn flipRows(allocator: std.mem.Allocator, rgba: []const u8, w: usize, h: usize) ![]u8 {
+        const out = try allocator.alloc(u8, rgba.len);
+        for (0..h) |row| {
+            const src = rgba[(h - 1 - row) * w * 4 ..][0 .. w * 4];
+            @memcpy(out[row * w * 4 ..][0 .. w * 4], src);
         }
         return out;
     }
 };
+
+/// Merges a packed sprite's separate alpha texture into the main RGBA
+/// image: RGB from `main_rgba`, alpha from the alpha texture's R channel
+/// (UnityPy: Image.merge("RGBA", (*main.split()[:3], alpha.split()[0]))).
+/// Both images are `w x h` RGBA8.
+pub fn mergeAlphaTexture(
+    allocator: std.mem.Allocator,
+    main_rgba: []const u8,
+    alpha_rgba: []const u8,
+    w: u32,
+    h: u32,
+) ![]u8 {
+    const n: usize = @as(usize, w) * @as(usize, h);
+    if (main_rgba.len < n * 4 or alpha_rgba.len < n * 4) return error.SizeMismatch;
+    const out = try allocator.alloc(u8, n * 4);
+    for (0..n) |i| {
+        out[i * 4 + 0] = main_rgba[i * 4 + 0];
+        out[i * 4 + 1] = main_rgba[i * 4 + 1];
+        out[i * 4 + 2] = main_rgba[i * 4 + 2];
+        out[i * 4 + 3] = alpha_rgba[i * 4 + 0]; // alpha texture's R channel
+    }
+    return out;
+}
+
+/// Upper bound on a rendered sprite edge in pixels. Only a sanity limit: it
+/// keeps the file-derived extent inside the range where converting it to a
+/// `usize` is defined.
+const max_sprite_dim: f32 = 65536;
+
+/// A sprite's tight/polygon mesh: 3D positions, optional per-vertex UVs,
+/// and triangle indices (grouped by submesh in the source blob).
+pub const SpriteMesh = struct {
+    positions: []const [3]f32,
+    uvs: []const [2]f32, // length == positions.len, or empty
+    triangles: []const u32,
+};
+
+/// A rotated/transposed RGBA image: `data` is `w x h`.
+pub const Rotated = struct {
+    data: []u8,
+    w: u32,
+    h: u32,
+};
+
+/// Applies a `SpritePackingRotation` (0 none, 1 flipH, 2 flipV, 3 rotate180,
+/// 4 rotate90) to a top-origin RGBA image, matching UnityPy's transpose for
+/// packed sprites. Rotation 4 rotates 90° clockwise (PIL ROTATE_270).
+pub fn rotateSprite(
+    allocator: std.mem.Allocator,
+    rgba: []const u8,
+    w: u32,
+    h: u32,
+    rotation: u32,
+) !Rotated {
+    const wi = @as(usize, w);
+    const hi = @as(usize, h);
+    switch (rotation) {
+        0 => return .{ .data = try allocator.dupe(u8, rgba), .w = w, .h = h },
+        1 => { // FLIP_LEFT_RIGHT
+            const out = try allocator.alloc(u8, rgba.len);
+            for (0..hi) |r| {
+                for (0..wi) |c| {
+                    const dst = (r * wi + c) * 4;
+                    const src = (r * wi + (wi - 1 - c)) * 4;
+                    @memcpy(out[dst..][0..4], rgba[src..][0..4]);
+                }
+            }
+            return .{ .data = out, .w = w, .h = h };
+        },
+        2 => { // FLIP_TOP_BOTTOM (reuse the vertical flip)
+            const out = try allocator.alloc(u8, rgba.len);
+            for (0..hi) |r| {
+                const src = (hi - 1 - r) * wi * 4;
+                @memcpy(out[r * wi * 4 ..][0 .. wi * 4], rgba[src..][0 .. wi * 4]);
+            }
+            return .{ .data = out, .w = w, .h = h };
+        },
+        3 => { // ROTATE_180
+            const out = try allocator.alloc(u8, rgba.len);
+            for (0..hi) |r| {
+                for (0..wi) |c| {
+                    const dst = (r * wi + c) * 4;
+                    const src = ((hi - 1 - r) * wi + (wi - 1 - c)) * 4;
+                    @memcpy(out[dst..][0..4], rgba[src..][0..4]);
+                }
+            }
+            return .{ .data = out, .w = w, .h = h };
+        },
+        4 => { // ROTATE_270 (90° clockwise): w and h swap
+            const nw = h;
+            const nh = w;
+            const out = try allocator.alloc(u8, @as(usize, nw) * @as(usize, nh) * 4);
+            for (0..nh) |r| {
+                for (0..nw) |c| {
+                    // new(r, c) = old(old_y = h-1-c, old_x = r)
+                    const src = ((hi - 1 - c) * wi + r) * 4;
+                    const dst = (r * nw + c) * 4;
+                    @memcpy(out[dst..][0..4], rgba[src..][0..4]);
+                }
+            }
+            return .{ .data = out, .w = nw, .h = nh };
+        },
+        else => return .{ .data = try allocator.dupe(u8, rgba), .w = w, .h = h },
+    }
+}
+
+/// Point-in-triangle test (inclusive of edges), matching a non-anti-aliased
+/// polygon fill like PIL's `draw.polygon(..., fill=1)`.
+fn pointInTri(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) bool {
+    const s1 = (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+    const s2 = (cx - bx) * (py - by) - (cy - by) * (px - bx);
+    const s3 = (ax - cx) * (py - cy) - (ay - cy) * (px - cx);
+    const has_neg = s1 < 0 or s2 < 0 or s3 < 0;
+    const has_pos = s1 > 0 or s2 > 0 or s3 > 0;
+    return !(has_pos and has_neg);
+}
+
+/// Masks a `w x h` top-origin crop with the sprite's polygon, zeroing pixels
+/// outside the mesh triangles. The mesh is projected to 2D on x/y (UnityPy
+/// drops the constant axis), normalized by its min, and scaled by
+/// `pixels_to_units`, so the polygon aligns with the crop extent.
+pub fn maskSprite(
+    allocator: std.mem.Allocator,
+    mesh: SpriteMesh,
+    pixels_to_units: f32,
+    crop: []const u8,
+    w: u32,
+    h: u32,
+) ![]u8 {
+    const cw = @as(usize, w);
+    const ch = @as(usize, h);
+    if (crop.len < cw * ch * 4) return error.SizeMismatch;
+    if (mesh.positions.len == 0 or mesh.triangles.len == 0) return error.NoMesh;
+    const ptu = pixels_to_units;
+
+    var min_x: f32 = mesh.positions[0][0];
+    var min_y: f32 = mesh.positions[0][1];
+    for (mesh.positions) |p| {
+        if (p[0] < min_x) min_x = p[0];
+        if (p[1] < min_y) min_y = p[1];
+    }
+
+    const out = try allocator.alloc(u8, cw * ch * 4);
+    const tri_count = mesh.triangles.len / 3;
+    for (0..ch) |r| {
+        for (0..cw) |c| {
+            const px: f32 = @as(f32, @floatFromInt(c)) + 0.5;
+            const py: f32 = @as(f32, @floatFromInt(r)) + 0.5;
+            var inside = false;
+            for (0..tri_count) |t| {
+                const ia = mesh.triangles[t * 3];
+                const ib = mesh.triangles[t * 3 + 1];
+                const ic = mesh.triangles[t * 3 + 2];
+                if (ia >= mesh.positions.len or ib >= mesh.positions.len or ic >= mesh.positions.len) continue;
+                const p0 = mesh.positions[ia];
+                const p1 = mesh.positions[ib];
+                const p2 = mesh.positions[ic];
+                const ax = (p0[0] - min_x) * ptu;
+                const ay = (p0[1] - min_y) * ptu;
+                const bx = (p1[0] - min_x) * ptu;
+                const by = (p1[1] - min_y) * ptu;
+                const cx = (p2[0] - min_x) * ptu;
+                const cy = (p2[1] - min_y) * ptu;
+                if (pointInTri(px, py, ax, ay, bx, by, cx, cy)) {
+                    inside = true;
+                    break;
+                }
+            }
+            if (inside) {
+                @memcpy(out[(r * cw + c) * 4 ..][0..4], crop[(r * cw + c) * 4 ..][0..4]);
+            } else {
+                @memset(out[(r * cw + c) * 4 ..][0..4], 0);
+            }
+        }
+    }
+    return out;
+}
+
+/// Unpacked texture-mapped triangle copy. Fills `sprite` with the triangle's
+/// pixels sampled from the full texture: for each destination pixel we compute
+/// barycentric weights against the destination triangle and apply them to the
+/// source (UV) triangle's vertices, then round to the nearest source pixel.
+/// Renders into `sprite` (RGBA8, `sw x sh`), pixels untouched by a triangle
+/// stay `(0,0,0,0)` (matching UnityPy's render_sprite_mesh blank canvas).
+fn paintTriangle(
+    sprite: []u8,
+    sw: usize,
+    sh: usize,
+    src: []const u8,
+    src_w: usize,
+    src_h: usize,
+    dp0: [2]f32,
+    dp1: [2]f32,
+    dp2: [2]f32,
+    sp0: [2]f32,
+    sp1: [2]f32,
+    sp2: [2]f32,
+) void {
+    // Clamp the bounding box in the float domain: `dp` derives from
+    // file-supplied positions times `m_PixelsToUnits`, so it can be
+    // negative, NaN, or huge, and @intFromFloat outside the destination
+    // range is illegal behavior. (@min/@max drop NaN, so a NaN corner
+    // collapses to the sw/sh end and the loop body never runs.)
+    const sw_f: f32 = @floatFromInt(sw);
+    const sh_f: f32 = @floatFromInt(sh);
+    const min_x: usize = @intFromFloat(@floor(std.math.clamp(@min(@min(dp0[0], dp1[0]), dp2[0]), 0, sw_f)));
+    const max_x: usize = @intFromFloat(@ceil(std.math.clamp(@max(@max(dp0[0], dp1[0]), dp2[0]), 0, sw_f)));
+    const min_y: usize = @intFromFloat(@floor(std.math.clamp(@min(@min(dp0[1], dp1[1]), dp2[1]), 0, sh_f)));
+    const max_y: usize = @intFromFloat(@ceil(std.math.clamp(@max(@max(dp0[1], dp1[1]), dp2[1]), 0, sh_f)));
+    const src_w_f: f32 = @floatFromInt(src_w);
+    const src_h_f: f32 = @floatFromInt(src_h);
+    const area = (dp1[0] - dp0[0]) * (dp2[1] - dp0[1]) - (dp2[0] - dp0[0]) * (dp1[1] - dp0[1]);
+    if (area == 0) return; // degenerate
+    // Barycentric weights (share a common area sign); interior for either
+    // winding is "all >= 0" or "all <= 0".
+    for (min_y..max_y) |r| {
+        for (min_x..max_x) |c| {
+            const px: f32 = @as(f32, @floatFromInt(c)) + 0.5;
+            const py: f32 = @as(f32, @floatFromInt(r)) + 0.5;
+            const l0 = ((dp1[0] - dp0[0]) * (py - dp0[1]) - (dp1[1] - dp0[1]) * (px - dp0[0])) / area; // weight of C
+            const l1 = ((dp2[0] - dp1[0]) * (py - dp1[1]) - (dp2[1] - dp1[1]) * (px - dp1[0])) / area; // weight of A
+            const l2 = ((dp0[0] - dp2[0]) * (py - dp2[1]) - (dp0[1] - dp2[1]) * (px - dp2[0])) / area; // weight of B
+            const inside = (l0 >= 0 and l1 >= 0 and l2 >= 0) or (l0 <= 0 and l1 <= 0 and l2 <= 0);
+            if (inside) {
+                // u = wA*sp0 + wB*sp1 + wC*sp2 ; here wA=l1, wB=l2, wC=l0
+                const u = l1 * sp0[0] + l2 * sp1[0] + l0 * sp2[0];
+                const vv = l1 * sp0[1] + l2 * sp1[1] + l0 * sp2[1];
+                // nearest-neighbour: the texel containing the sampled point
+                // Clamp both ends before the conversion: `sp` derives from
+                // file-supplied UVs, so u/vv can be Inf or huge, and
+                // @intFromFloat outside the usize range is illegal behavior
+                // rather than something clampUsize can still catch. @max
+                // first (not std.math.clamp, which puts a NaN on the upper
+                // bound) keeps a NaN UV sampling texel 0 as before.
+                const uf = @floor(@min(@max(u, 0), src_w_f));
+                const vf = @floor(@min(@max(vv, 0), src_h_f));
+                const sx = clampUsize(@intFromFloat(uf), src_w);
+                const sy = clampUsize(@intFromFloat(vf), src_h);
+                @memcpy(sprite[(r * sw + c) * 4 ..][0..4], src[(sy * src_w + sx) * 4 ..][0..4]);
+            }
+        }
+    }
+}
+
+fn clampUsize(v: usize, limit: usize) usize {
+    return if (v >= limit) limit - 1 else v;
+}
+
+/// Renders a tightly packed sprite mesh: maps the texture (sampled at the
+/// mesh's UV coordinates) onto the polygon defined by the mesh positions,
+/// producing a tightly cropped sprite. Matches UnityPy's render_sprite_mesh.
+pub fn renderSpriteMesh(
+    allocator: std.mem.Allocator,
+    mesh: SpriteMesh,
+    pixels_to_units: f32,
+    tex_rgba: []const u8,
+    tex_w: u32,
+    tex_h: u32,
+) !Rotated {
+    const tw = @as(usize, tex_w);
+    const th = @as(usize, tex_h);
+    if (mesh.positions.len == 0 or mesh.triangles.len == 0 or mesh.uvs.len == 0) return error.NoMesh;
+    if (tex_rgba.len < tw * th * 4) return error.SizeMismatch;
+    if (mesh.uvs.len != mesh.positions.len) return error.BadMesh;
+
+    // project to 2D on x/y (drop the constant axis)
+    var min_x: f32 = mesh.positions[0][0];
+    var min_y: f32 = mesh.positions[0][1];
+    var max_x: f32 = mesh.positions[0][0];
+    var max_y: f32 = mesh.positions[0][1];
+    for (mesh.positions) |p| {
+        if (p[0] < min_x) min_x = p[0];
+        if (p[1] < min_y) min_y = p[1];
+        if (p[0] > max_x) max_x = p[0];
+        if (p[1] > max_y) max_y = p[1];
+    }
+    const ptu = pixels_to_units;
+    // destination (absolute-pixel) and source (absolute-texel) per vertex
+    const n = mesh.positions.len;
+    const dw_f = @round((max_x - min_x) * ptu);
+    const dh_f = @round((max_y - min_y) * ptu);
+    // Reject before the conversion, not after: positions and
+    // `m_PixelsToUnits` are file-supplied, and @intFromFloat on a negative,
+    // NaN, or out-of-range extent is illegal behavior rather than a clamp.
+    if (!(dw_f >= 0 and dw_f <= max_sprite_dim)) return error.BadMesh;
+    if (!(dh_f >= 0 and dh_f <= max_sprite_dim)) return error.BadMesh;
+    // guard against zero sizes
+    const sprite_w = @max(@as(usize, @intFromFloat(dw_f)), 1);
+    const sprite_h = @max(@as(usize, @intFromFloat(dh_f)), 1);
+    const sprite = try allocator.alloc(u8, sprite_w * sprite_h * 4);
+    @memset(sprite, 0);
+
+    var dp: [][2]f32 = try allocator.alloc([2]f32, n);
+    var sp: [][2]f32 = try allocator.alloc([2]f32, n);
+    for (0..n) |i| {
+        dp[i] = .{ (mesh.positions[i][0] - min_x) * ptu, (mesh.positions[i][1] - min_y) * ptu };
+        sp[i] = .{ mesh.uvs[i][0] * @as(f32, @floatFromInt(tex_w)), mesh.uvs[i][1] * @as(f32, @floatFromInt(tex_h)) };
+    }
+    const tri_count = mesh.triangles.len / 3;
+    for (0..tri_count) |t| {
+        const va = mesh.triangles[t * 3];
+        const vb = mesh.triangles[t * 3 + 1];
+        const vc = mesh.triangles[t * 3 + 2];
+        if (va >= n or vb >= n or vc >= n) continue;
+        paintTriangle(sprite, sprite_w, sprite_h, tex_rgba, tw, th, dp[va], dp[vb], dp[vc], sp[va], sp[vb], sp[vc]);
+    }
+    return .{ .data = sprite, .w = @intCast(sprite_w), .h = @intCast(sprite_h) };
+}
 
 pub const Material = struct {
     name: []const u8 = "",
@@ -458,11 +834,11 @@ pub const Mesh = struct {
 
     pub fn fromValue(v: value.Value) Mesh {
         var m = Mesh{ .name = stringField(v, "m_Name") orelse "" };
-        if (intField(v, "m_IndexFormat")) |f| m.index_format = @intCast(f);
+        if (intField(v, "m_IndexFormat")) |f| m.index_format = narrow(i32, f);
         m.index_buffer = bytesField(v, "m_IndexBuffer") orelse "";
 
         const vd = fieldOf(v, "m_VertexData") orelse return m;
-        if (intField(vd, "m_VertexCount")) |n| m.vertex_count = @intCast(n);
+        if (intField(vd, "m_VertexCount")) |n| m.vertex_count = narrow(u32, n);
         m.vertex_data = bytesField(vd, "m_DataSize") orelse "";
 
         if (fieldOf(vd, "m_Channels")) |chans| {
@@ -471,10 +847,10 @@ pub const Mesh = struct {
                 const n = @min(arr.len, m.channels.len);
                 for (arr[0..n], 0..) |c, i| {
                     m.channels[i] = .{
-                        .stream = @intCast(intField(c, "stream") orelse 0),
-                        .offset = @intCast(intField(c, "offset") orelse 0),
-                        .format = @intCast(intField(c, "format") orelse 0),
-                        .dimension = @intCast(intField(c, "dimension") orelse 0),
+                        .stream = narrow(u32, intField(c, "stream") orelse 0),
+                        .offset = narrow(u32, intField(c, "offset") orelse 0),
+                        .format = narrow(i32, intField(c, "format") orelse 0),
+                        .dimension = narrow(u32, intField(c, "dimension") orelse 0),
                     };
                 }
                 m.channel_count = n;
@@ -589,4 +965,116 @@ test "sprite crop flips vertically like UnityPy" {
     const out_clamped = try clamped.spriteRgba(a, rgba, tex_w, tex_h);
     try std.testing.expectEqual(@as(usize, 4), out_clamped.len);
     try std.testing.expectEqualSlices(u8, &.{ 192, 192, 128, 255 }, out_clamped);
+}
+
+test "sprite reads render settings and alpha texture from m_RD" {
+    // settingsRaw 0x05 = packed(bit0=1), tight(bit1=0), rotate90-flip? (bits2-5=1)
+    const v = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "packed" } },
+        .{ .name = "m_PixelsToUnits", .value = .{ .float = 100 } },
+        .{ .name = "m_RD", .value = .{ .obj = &[_]value.Field{
+            .{ .name = "texture", .value = .{ .pptr = .{ .file_id = 0, .path_id = 10 } } },
+            .{ .name = "alphaTexture", .value = .{ .pptr = .{ .file_id = 0, .path_id = 11 } } },
+            .{ .name = "settingsRaw", .value = .{ .int = 0x05 } },
+            .{ .name = "textureRect", .value = .{ .obj = &[_]value.Field{
+                .{ .name = "x", .value = .{ .float = 0 } },
+                .{ .name = "y", .value = .{ .float = 0 } },
+                .{ .name = "width", .value = .{ .float = 4 } },
+                .{ .name = "height", .value = .{ .float = 4 } },
+            } } },
+        } } },
+    } };
+    const s = Sprite.fromValue(v);
+    try std.testing.expectEqual(@as(u32, 0x05), s.settings_raw);
+    try std.testing.expect(s.isPacked());
+    try std.testing.expect(s.isTight());
+    try std.testing.expectEqual(@as(u32, 1), s.packingRotation());
+    try std.testing.expect(s.alpha_texture != null);
+    try std.testing.expectEqual(@as(i64, 11), s.alpha_texture.?.path_id);
+}
+
+test "mergeAlphaTexture keeps RGB from main, alpha from alpha R channel" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const main = [_]u8{ 10, 20, 30, 255, 40, 50, 60, 255 };
+    const alpha = [_]u8{ 200, 1, 2, 3, 100, 9, 8, 7 };
+    const merged = try mergeAlphaTexture(a, &main, &alpha, 2, 1);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 10, 20, 30, 200, 40, 50, 60, 100 }, merged);
+}
+
+test "rotateSprite applies packing rotations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 2 columns x 1 row: red | green
+    const rgba = [_]u8{ 255, 0, 0, 255, 0, 255, 0, 255 };
+
+    const fh = try rotateSprite(a, &rgba, 2, 1, 1); // flip left-right
+    try std.testing.expectEqual(@as(u32, 2), fh.w);
+    try std.testing.expectEqual(@as(u32, 1), fh.h);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 255, 0, 255, 255, 0, 0, 255 }, fh.data);
+
+    const rot = try rotateSprite(a, &rgba, 2, 1, 4); // rotate90 (90° CW): 1x2 column
+    try std.testing.expectEqual(@as(u32, 1), rot.w);
+    try std.testing.expectEqual(@as(u32, 2), rot.h);
+    // top pixel = old left (red), bottom = old right (green)
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255, 0, 255, 0, 255 }, rot.data);
+}
+
+test "maskSprite keeps the polygon, transparent elsewhere" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 2x2 crop, each pixel tagged by its index in the R channel
+    var crop: [2 * 2 * 4]u8 = undefined;
+    for (0..4) |i| {
+        crop[i * 4] = @intCast(i);
+        crop[i * 4 + 1] = 0;
+        crop[i * 4 + 2] = 0;
+        crop[i * 4 + 3] = 255;
+    }
+    const mesh = SpriteMesh{
+        .positions = &.{ .{ 0, 0, 0 }, .{ 0, 2, 0 }, .{ 2, 0, 0 } },
+        .uvs = &.{},
+        .triangles = &.{ 0, 1, 2 },
+    };
+    const masked = try maskSprite(a, mesh, 1, &crop, 2, 2);
+    // triangle (0,0)-(0,2)-(2,0) keeps pixels 0,1,2 (x+y<=2), zeroes pixel 3
+    try std.testing.expectEqual(@as(u8, 0), masked[0]);
+    try std.testing.expectEqual(@as(u8, 1), masked[4]);
+    try std.testing.expectEqual(@as(u8, 2), masked[8]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0 }, masked[12..16]);
+}
+
+test "renderSpriteMesh texture-maps a quad" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 2x2 texture with distinct texels
+    var tex: [2 * 2 * 4]u8 = undefined;
+    for (0..2) |y| for (0..2) |x| {
+        const p = (y * 2 + x) * 4;
+        tex[p] = @intCast(y * 2 + x);
+        tex[p + 1] = 0;
+        tex[p + 2] = 0;
+        tex[p + 3] = 255;
+    };
+    // quad positions span 0..2, uvs map to texel centres (0.25/0.75)
+    const mesh = SpriteMesh{
+        .positions = &.{ .{ 0, 0, 0 }, .{ 2, 0, 0 }, .{ 0, 2, 0 }, .{ 2, 2, 0 } },
+        .uvs = &.{ .{ 0.25, 0.25 }, .{ 0.75, 0.25 }, .{ 0.25, 0.75 }, .{ 0.75, 0.75 } },
+        .triangles = &.{ 0, 1, 2, 1, 3, 2 },
+    };
+    const out = try renderSpriteMesh(a, mesh, 1, &tex, 2, 2);
+    try std.testing.expectEqual(@as(u32, 2), out.w);
+    try std.testing.expectEqual(@as(u32, 2), out.h);
+    // every dest pixel maps back to a texel; both triangles tile the quad
+    for (0..4) |i| {
+        const r = i / 2;
+        const c = i % 2;
+        const dst = (r * 2 + c) * 4;
+        const expect = @as(u8, @intCast(r * 2 + c));
+        try std.testing.expectEqual(expect, out.data[dst]);
+    }
 }

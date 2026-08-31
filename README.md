@@ -25,6 +25,7 @@ Run the CLI:
 ./zig-out/bin/unityz stats path/to/asset
 ./zig-out/bin/unityz find path/to/asset Player
 ./zig-out/bin/unityz diff asset_a asset_b
+./zig-out/bin/unityz skin path/to/asset
 ```
 
 Beyond the core `info`/`extract`/`edit`, the CLI adds capabilities UnityPy
@@ -33,8 +34,14 @@ it back, compare bytes; non-zero exit on failure), `stats` (per-class
 sizes and duplicate-object detection), `find` (name/class search, with
 `--exact` for whole-name lookups), `show` (one object as JSON, or a hex
 dump of its bytes with `--raw`), `diff` (compare two files' objects by
-content hash, scoped with `--class`, or two directories file-by-file),
-and `hash` (per-object content fingerprints).
+content hash, scoped with `--class`, or two directories file-by-file).
+
+`hash` (per-object content fingerprints) and `skin` (whether every
+Shader's vertex stage applies per-vertex bone matrices, exiting non-zero
+when a `SkinnedMeshRenderer` references a shader that does not) round out
+the set.
+
+All commands accept a directory and process every file in it.
 
 All commands accept a directory and process every file in it. `extract`
 filters with `--class`/`--path-id`/`--raw`, exports value trees with
@@ -53,15 +60,23 @@ selectors (e.g. `show bundle.unity3d CAB-abc123:7` or
 `edit bundle.unity3d CAB-abc123:7 m_Name "renamed"`) so colliding path
 ids in different nodes can be targeted individually.
 
-`info`, `stats`, `hash`, `find`, `diff`, and `verify` also have a `--json`
-mode for scripting: `info --json` summarizes a file or container (adding
-`--objects` includes the per-object table, tagged with its container
-node, and serialized files list their sidecar `externals_list`), `stats --json` gives per-class sizes and duplicates, `hash --json`
-emits per-object content fingerprints, `find --json` emits matching
-objects as a JSON array, `diff --json` emits the changed/new/deleted
-objects (or files, for directory diffs) with counts, scoped to one class
-with `--class <id>` where useful, and `verify --json`
-emits a pass/fail report with per-object failure records.
+`info`, `stats`, `hash`, `find`, `diff`, `verify`, and `skin` also have a
+`--json` mode for scripting.
+
+`info --json` summarizes a file or container (adding `--objects`
+includes the per-object table, tagged with its container node, and
+serialized files list their sidecar `externals_list`; each shader is also
+reported with a `skins` verdict and its bind-channel / bone-matrix
+evidence).
+
+`stats --json` gives per-class sizes and
+duplicates, `hash --json` emits per-object content fingerprints,
+`find --json` emits matching objects as a JSON array, `diff --json`
+emits the changed/new/deleted objects (or files, for directory diffs)
+with counts, scoped to one class with `--class <id>` where useful,
+`verify --json` emits a pass/fail report with per-object failure records,
+and `skin --json` emits the per-shader skinning report plus the
+skinned-mesh failures.
 
 `hash`, `stats`, and `verify` accept `--class <id>` / `--path-id <id>`
 filters; `stats --dups` prints only the duplicate report. Everything else
@@ -102,16 +117,16 @@ landed: textures decode to RGBA8 and write as PNG (RGB/RGBA8, BGR24,
 RGBAFloat/ARGBFloat/RG32, RGB9e5Float, RGB48/RGBA64, the signed variants,
 DXT1/3/5, BC4/5, BC6H (HDR), BC7, PVRTC (2bpp/4bpp RGB and RGBA),
 ATC (RGB4/RGBA8), EAC (R/RG, signed and unsigned), ETC1/ETC2/ETC2-RGBA8,
-ASTC, ASTC HDR
-(66-71), plus the crunch-crunched formats (ETC_RGB4, ETC2_RGBA8, DXT1,
-DXT5) through a vendored ZLIB-licensed unitycrunch decompressor (hardened
-against corrupt streams). The 3DS ETC variants are detected but not yet
+ASTC, ASTC HDR (66-71), plus the crunch-crunched formats (ETC_RGB4,
+ETC2_RGBA8, DXT1, DXT5) through a vendored ZLIB-licensed unitycrunch
+decompressor (hardened against corrupt streams). The 3DS ETC variants
+are detected but not yet
 decoded.
 
-ETC2 and the BC family decode pixel-identical to UnityPy, and ASTC
-decodes within ±1 per channel on a small fraction of pixels (a rounding
-variance between independent spec-compliant decoders; UnityPy itself
-switched from texture2ddecoder to ARM's astc_encoder).
+ETC2, the BC family, and the crunch variants decode pixel-identical to
+UnityPy (ASTC decodes within ±1 per channel on a small fraction of
+pixels, a rounding variance between independent spec-compliant decoders;
+UnityPy itself switched from texture2ddecoder to ARM's astc_encoder).
 
 The raw half/float/16-bit formats use standard documented conversions;
 UnityPy's converters for those are lossy (its half path truncates x*256
@@ -129,13 +144,21 @@ value).
 
 Sprites packed into a SpriteAtlas
 resolve their atlas texture via `m_RenderDataKey` (with a positional
-fallback) and crop with Pillow-compatible rounding, so sprite exports
-match UnityPy byte-for-byte.
+fallback) and crop with Pillow-compatible rounding, so rectangle sprite
+exports match UnityPy byte-for-byte. Packed sprites with a separate
+alpha texture merge its R channel in as the alpha, the packing rotation
+is applied, and tight/polygon sprites render through their sprite mesh
+(vertices/UVs/triangles) - either masked to the polygon or texture-mapped,
+matching UnityPy's mask_sprite/render_sprite_mesh.
 
 Managed-reference registries decode
 through their type trees, MonoBehaviours resolve their MonoScript and
 export the raw script payload, Meshes export as Wavefront OBJ (vertices,
-normals, UVs, faces), Materials and Shaders export as readable text,
+normals, UVs, faces), Materials and Shaders export as readable text.
+
+Additionally, each Shader's compiled sub-program blob is decoded and
+reported as skinning or not (its vertex stage applies per-vertex bone
+matrices), read off the bind-channel block and parameter-blob bindings;
 AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
 MP3) with an FSB5 metadata sidecar (sample rate, channels, loop points,
 format - UnityPy never surfaces these), and objects reserialize
@@ -175,10 +198,13 @@ interpolation.
 - `src/classes.zig` - typed views for the common classes
 - `src/fsb5.zig` - FSB5 audio bank metadata parser (sample rate, channels,
   loop points, format)
+- `src/shader.zig` - Shader (class 48) sub-program blob parsing; reports
+  whether a shader's vertex stage skins (BLENDINDICES/BLENDWEIGHT inputs +
+  a bone-matrix binding)
 - `src/texture.zig` - texture format decoding to RGBA8 (uncompressed
   RGB/RGBA layouts, half/float/16-bit/signed raw formats, DXT1/3/5,
   BC4/5, BC7, ETC1/ETC2/ETC2-RGBA8, ASTC, ASTC HDR (66-71), crunch
-  ETC_RGB4/ETC2_RGBA8 via `src/vendor/unitycrunch/`)
+  ETC_RGB4/ETC2_RGBA8/DXT1/DXT5 via `src/vendor/unitycrunch/`)
 - `src/png.zig` - minimal PNG encoder
 - `src/vendor/unitycrunch/` - vendored unitycrunch decompressor
   (ZLIB-licensed C++, built with `-DNDEBUG` so corrupt input can't abort)

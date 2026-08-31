@@ -313,6 +313,10 @@ fn readNonNegI64(r: *streams.Reader) ParseError!u64 {
 fn readCount(r: *streams.Reader) ParseError!usize {
     const raw = try r.readInt(i32);
     if (raw < 0) return error.Corrupt;
+    // Every entry consumes at least one byte of metadata, so a count past
+    // the remaining metadata is corrupt: reject it before it sizes an
+    // allocation.
+    if (raw > r.remaining()) return error.Corrupt;
     return @intCast(raw);
 }
 

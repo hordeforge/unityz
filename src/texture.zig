@@ -24,17 +24,18 @@
 //! standard documented conversions (clamp+truncate for float, high byte
 //! for 16-bit integer, bias for signed); UnityPy's own converters are
 //! lossy on these (half truncates x*256 and crashes above 1.0, and its
-//! RG32 path reads 16-bit samples). BC6H is validated against
-//! texture2ddecoder's decoder on samples encoded by Microsoft DirectXTex,
-//! and PVRTC (formats 30-33) and ATC against its own test textures, EAC
-//! against its decoders on random blocks, and the DXT1/5-crunched formats
-//! against the stock crunch encoder's output (DXT1 end-to-end; DXT5's
-//! alpha is not verifiable end-to-end because Unity's crunch fork stores
-//! it separately and stock DXT5-crunched alpha decodes non-deterministically
-//! even in UnityPy's decoder - the DXT5 block decode itself is verified on
-//! random blocks). The vendored crunch decoder is hardened against corrupt
-//! streams (huffman bounds + level-offset validation); the 3DS ETC
-//! variants remain unsupported.
+//! RG32 path reads 16-bit samples). The crunched block family covers the
+//! Unity crunch variants: ETC_RGB4Crunched (64), ETC2_RGBA8Crunched (65),
+//! DXT1Crunched (28), and DXT5Crunched (29), all routed through the
+//! vendored unitycrunch decompressor to raw ETC1/ETC2/DXT1/DXT5 blocks
+//! and then decoded by the corresponding block decoder. The crunch C++
+//! is hardened against corrupt streams (huffman bounds + level-offset
+//! validation), and the crunched paths are validated against UnityPy's
+//! texture2ddecoder on real Unity crunch fixtures plus stock-encoder
+//! output (DXT5's alpha is not end-to-end verifiable because Unity's
+//! fork stores it separately - the block decode itself is verified on
+//! random blocks). PVRTC/ATC/EAC are validated against texture2ddecoder's
+//! own test textures; the 3DS ETC variants remain unsupported.
 //!
 //! Block formats are 4x4 pixels, row-major in the data: block (bx, by)
 //! sits at index `by * (width/4) + bx`. Within a block, pixel (x, y) is
@@ -72,6 +73,8 @@ pub const format = struct {
     pub const etc2_rgb: i32 = 45;
     pub const etc2_rgba1: i32 = 46;
     pub const etc2_rgba8: i32 = 47;
+    pub const dxt1_crunched: i32 = 28;
+    pub const dxt5_crunched: i32 = 29;
     pub const etc_rgb4_crunched: i32 = 64;
     pub const etc2_rgba8_crunched: i32 = 65;
     pub const r8: i32 = 63;
@@ -84,8 +87,6 @@ pub const format = struct {
     pub const r_float: i32 = 18;
     pub const rg_float: i32 = 19;
     pub const rgb9e5: i32 = 22;
-    pub const dxt1_crunched: i32 = 28;
-    pub const dxt5_crunched: i32 = 29;
     pub const pvrtc_rgb2: i32 = 30;
     pub const atc_rgb4: i32 = 35;
     pub const atc_rgba8: i32 = 36;
@@ -150,8 +151,7 @@ pub const format = struct {
             34 => "ETC_RGB4",
             45 => "ETC2_RGB",
             46 => "ETC2_RGBA1",
-            47 => "ETC2_RGBA8",
-            64 => "ETC_RGB4Crunched",
+      64 => "ETC_RGB4Crunched",
             65 => "ETC2_RGBA8Crunched",
             63 => "R8",
             6 => "ARGBFloat",
@@ -213,7 +213,12 @@ pub const format = struct {
 pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height: u32, data: []const u8) Error![]u8 {
     const w: usize = @intCast(width);
     const h: usize = @intCast(height);
-    const out = try allocator.alloc(u8, w * h * 4);
+    // Dimensions come from the file. Bound the pixel count so neither the
+    // RGBA8 output size nor the largest `expectedSize` stride (16 bytes per
+    // pixel) can overflow into a short allocation.
+    const pixels = std.math.mul(usize, w, h) catch return error.BadSize;
+    if (pixels > std.math.maxInt(usize) / 16) return error.BadSize;
+    const out = try allocator.alloc(u8, pixels * 4);
     errdefer allocator.free(out);
     const expected = expectedSize(tex_format, width, height) orelse return error.UnsupportedFormat;
     if (data.len < expected) return error.BadSize;
@@ -508,18 +513,22 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
         format.etc2_rgb => try decodeEtc(out, w, h, data, .etc2),
         format.etc2_rgba8 => try decodeEtc2Rgba8(out, w, h, data),
         format.etc_rgb4_crunched, format.etc2_rgba8_crunched, format.dxt1_crunched, format.dxt5_crunched => {
-            // decompress the crunch stream to DXT/ETC blocks, then decode them
+            // decompress the crunch stream to raw blocks (ETC1/ETC2/DXT1/DXT5),
+            // then decode those blocks with the corresponding block decoder
             var out_ptr: ?*anyopaque = null;
             var out_size: u32 = 0;
             if (unitycrunch_unpack(data.ptr, @intCast(data.len), 0, &out_ptr, &out_size) == 0 or out_ptr == null)
                 return error.UnsupportedFormat;
             defer unitycrunch_free(out_ptr);
             const blocks: []const u8 = @as([*]const u8, @ptrCast(out_ptr.?))[0..out_size];
-            const fmt = switch (tex_format) {
+            // The crunch stream names the block format, not the Unity texture
+            // format; map the crunched format number back to its raw blocks.
+            const fmt: i32 = switch (tex_format) {
+                format.etc_rgb4_crunched => format.etc_rgb4,
+                format.etc2_rgba8_crunched => format.etc2_rgba8,
                 format.dxt1_crunched => format.dxt1,
                 format.dxt5_crunched => format.dxt5,
-                format.etc_rgb4_crunched => format.etc_rgb4,
-                else => format.etc2_rgba8,
+                else => return error.UnsupportedFormat,
             };
             return decode(allocator, fmt, width, height, blocks);
         },
@@ -535,7 +544,10 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
 
 /// Copies `stride`-byte pixels through a converter.
 fn floatToByte(f: f32) u8 {
-    if (f <= 0) return 0;
+    // Written as `!(f > 0)` so a NaN pixel - float-format textures really do
+    // carry them - takes the 0 branch instead of reaching @intFromFloat,
+    // which is illegal behavior on a non-finite value.
+    if (!(f > 0)) return 0;
     if (f >= 1) return 255;
     return @intFromFloat(f * 255);
 }
@@ -1627,8 +1639,8 @@ fn interp5(a: u8, b: u8, na: u8, nb: u8) u8 {
 }
 
 fn expand565(v: u16) [3]u8 {
-    // bit replication like the D3D spec and texture2ddecoder's rgb565_le:
-    // (v<<3)|(v>>2) for 5-bit, (v<<2)|(v>>4) for 6-bit channels
+    // BCn 565→888 expansion: replicate the high bits, not `v*255/31`
+    // (which truncates and is off-by-one from the spec's bit replication).
     const r5 = (v >> 11) & 0x1f;
     const g6 = (v >> 5) & 0x3f;
     const b5 = v & 0x1f;
@@ -1640,14 +1652,16 @@ fn expand565(v: u16) [3]u8 {
 }
 
 /// Writes the 4x4 color block of a BC1 block (colors already resolved).
-/// `indices` holds 16 two-bit indices; `palette` has 4 entries.
-fn putColorBlock(out: []u8, block_x: usize, block_y: usize, w: usize, indices: u32, palette: [4][4]u8, alpha_from_palette: bool) void {
+/// `indices` holds 16 two-bit indices; `palette` has 4 entries. Pixels
+/// past the image edge (blocks are padded up to multiples of 4) are
+/// skipped.
+fn putColorBlock(out: []u8, block_x: usize, block_y: usize, w: usize, h: usize, indices: u32, palette: [4][4]u8, alpha_from_palette: bool) void {
     for (0..4) |y| {
         for (0..4) |x| {
             const idx = (indices >> @as(u5, @intCast(2 * (y * 4 + x)))) & 0x3;
             const px = block_x * 4 + x;
             const py = block_y * 4 + y;
-            if (px >= w) continue;
+            if (px >= w or py >= h) continue;
             const dst = out[(py * w + px) * 4 ..][0..4];
             if (alpha_from_palette and idx == 3) {
                 dst[0] = 0;
@@ -1689,7 +1703,7 @@ fn decodeDxt1(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
                 palette[3] = .{ 0, 0, 0, 0 };
                 alpha_from_palette = true;
             }
-            putColorBlock(out, bx, by, w, indices, palette, alpha_from_palette);
+            putColorBlock(out, bx, by, w, h, indices, palette, alpha_from_palette);
         }
     }
 }
@@ -2430,7 +2444,13 @@ fn astcSelectColorHdr(v0: i32, v1: i32, weight: i32) u8 {
 }
 
 fn astcF32ToU8(f: f32) u8 {
-    return @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(f * 255.0))), 0, 255));
+    // Clamp before the conversion, not after: HDR void-extent blocks carry
+    // raw f16s from the file, and @intFromFloat on an Inf (half bits 0x7c00)
+    // or a NaN is illegal behavior rather than a clamp. Same positive-form
+    // guard as floatToByte, so a NaN takes the 0 branch.
+    if (!(f > 0)) return 0;
+    if (f >= 1) return 255;
+    return @intFromFloat(@round(f * 255.0));
 }
 
 fn astcF16PtrToU8(ptr: []const u8) u8 {
@@ -4300,4 +4320,22 @@ test "flipVertical mirrors rows" {
     try std.testing.expectEqual(@as(u8, 1), flipped[8]); // row 1 = old row 1
     try std.testing.expectEqual(@as(u8, 0), flipped[16]); // row 2 = old row 0
     try std.testing.expectError(error.BadSize, flipVertical(a, rgba, 2, 4));
+}
+
+test "dxt1/5 crunched route to the crash-stable decompressor" {
+    // Format numbers 28/29 are Unity's DXT1Crunched / DXT5Crunched; the
+    // crunched stream is variable-length so expectedSize reports "unknown"
+    // (0), and a non-crunch payload must fail gracefully rather than panic.
+    try std.testing.expectEqualStrings("DXT1Crunched", format.name(format.dxt1_crunched));
+    try std.testing.expectEqualStrings("DXT5Crunched", format.name(format.dxt5_crunched));
+    try std.testing.expectEqual(@as(?usize, 0), expectedSize(format.dxt1_crunched, 512, 512));
+    try std.testing.expectEqual(@as(?usize, 0), expectedSize(format.dxt5_crunched, 512, 512));
+
+    // A non-crunch byte stream (not a valid CRN header) must be rejected.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const garbage = try a.dupe(u8, "not a crunch stream, 8 bytes!");
+    try std.testing.expectError(error.UnsupportedFormat, decode(a, format.dxt1_crunched, 4, 4, garbage));
+    try std.testing.expectError(error.UnsupportedFormat, decode(a, format.dxt5_crunched, 4, 4, garbage));
 }

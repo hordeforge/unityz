@@ -47,6 +47,10 @@ const usage =
     \\                 (--json for a machine-readable array;
     \\                  --class <id> / --path-id <id> filters,
     \\                  <id> may be node:path-id)
+    \\  skin <path>      Report whether every Shader (class 48) skins
+    \\                 (exits non-zero when a SkinnedMeshRenderer references
+    \\                  a shader that does not skin; --json for a
+    \\                  machine-readable report)
     \\
     \\Edit usage: unityz edit <file> <path_id> <field> <json-value> [<field> <json-value> ...]
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
@@ -173,7 +177,7 @@ pub fn main(init: std.process.Init) !void {
     if (verify_failed_flag) std.process.exit(1);
 }
 
-const Command = enum { info, extract, edit, verify, stats, find, show, diff, hash };
+const Command = enum { info, extract, edit, verify, stats, find, show, diff, hash, skin };
 
 fn parseCommand(arg: []const u8) ?Command {
     inline for (std.meta.fields(Command)) |field| {
@@ -210,6 +214,7 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
         .show => return cmdShow(path, rest, bytes, stdout),
         .diff => return cmdDiff(path, rest, bytes, stdout),
         .hash => return cmdHash(path, rest, bytes, stdout),
+        .skin => return cmdSkin(path, rest, bytes, stdout),
     }
 }
 
@@ -429,13 +434,15 @@ fn resolveSidecar(sidecars: []const Sidecar, stream_path: []const u8, offset: u6
     return &.{};
 }
 
-
 /// One hit from a SpriteAtlas lookup: the texture the sprite was packed
-/// into, plus the atlas's textureRect for it (mirrors UnityPy, which crops
-/// the atlas's rect rather than the sprite's own copy).
+/// into, plus the atlas's textureRect, alphaTexture and settingsRaw for it
+/// (mirrors UnityPy, which crops the atlas's rect rather than the sprite's
+/// own copy).
 const AtlasHit = struct {
     texture: unityz.value.PPtr,
     rect: [4]f32,
+    alpha_texture: ?unityz.value.PPtr = null,
+    settings_raw: u32 = 0,
 };
 
 /// Compares two m_RenderDataKey values: `[Hash128, int]` where Hash128 is
@@ -467,12 +474,17 @@ fn atlasEntryHit(entry: unityz.value.Value) ?AtlasHit {
     var hit = AtlasHit{ .texture = undefined, .rect = .{ 0, 0, 0, 0 } };
     for (val.obj) |f| {
         if (f.value == .pptr and std.mem.eql(u8, f.name, "texture")) hit.texture = f.value.pptr;
+        if (f.value == .pptr and std.mem.eql(u8, f.name, "alphaTexture")) hit.alpha_texture = f.value.pptr;
         if (f.value == .obj and std.mem.eql(u8, f.name, "textureRect")) {
             const comps = [_][]const u8{ "x", "y", "width", "height" };
             for (comps, 0..) |c, i| {
                 const cf = unityz.classes.fieldOf(f.value, c) orelse continue;
                 if (cf.asFloat()) |fv| hit.rect[i] = @floatCast(fv);
             }
+        }
+        if (f.value.asInt() != null and std.mem.eql(u8, f.name, "settingsRaw")) {
+            const sr = f.value.asInt().?;
+            hit.settings_raw = @truncate(@as(u64, @bitCast(sr)));
         }
     }
     if (hit.texture.path_id == 0) return null;
@@ -724,35 +736,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ name, shd.len });
                 extracted += 1;
             },
-            213 => { // Sprite -> cropped PNG from its texture
+            213 => { // Sprite -> cropped / mesh-rendered PNG
+                const rr = renderSprite(arena, &sf, sidecars, v, o.path_id) orelse continue;
+                const png = unityz.png.encode(arena, rr.w, rr.h, rr.data) catch continue;
                 const sprite = unityz.classes.Sprite.fromValue(v);
-                // A {0,0} PPtr is the null reference: atlas-packed sprites
-                // leave m_RD.texture empty and name the atlas texture instead.
-                const hit = if (sprite.texture) |t| blk: {
-                    if (t.path_id != 0) break :blk AtlasHit{ .texture = t, .rect = sprite.rect };
-                    break :blk (atlasTextureFor(arena, &sf, v, o.path_id) orelse continue);
-                } else (atlasTextureFor(arena, &sf, v, o.path_id) orelse continue);
-                if (hit.texture.file_id != 0) continue; // external file not resolvable here
-                const tex_value = readObjectValue(arena, &sf, hit.texture.path_id) orelse continue;
-                const t = unityz.classes.Texture2D.fromValue(tex_value);
-                if (t.width == 0 or t.height == 0) continue;
-                var pixels: []const u8 = t.image_data;
-                if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
-                    const start: usize = @intCast(sf.data_offset + t.stream.offset);
-                    const end = start + t.stream.size;
-                    if (end <= sf.source.len) pixels = sf.source[start..end];
-                }
-                if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
-                    // streamed from a sibling .resS/.resource node
-                    pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
-                }
-                if (pixels.len == 0) continue;
-                const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch continue;
-                const cropped = unityz.classes.Sprite.spriteRgbaRect(arena, hit.rect, rgba, t.width, t.height) catch continue;
-                // PNG dims must match the crop's floor/ceil rounding, not int(rect)
-                const pw: u32 = @as(u32, @intFromFloat(@ceil(hit.rect[0] + hit.rect[2]))) - @as(u32, @intFromFloat(@floor(hit.rect[0])));
-                const ph: u32 = @as(u32, @intFromFloat(@ceil(hit.rect[1] + hit.rect[3]))) - @as(u32, @intFromFloat(@floor(hit.rect[1])));
-                const png = unityz.png.encode(arena, pw, ph, cropped) catch continue;
                 var name_buf: [160]u8 = undefined;
                 const sprite_name = std.mem.trimEnd(u8, sprite.name, "\x00");
                 const name = if (sprite_name.len != 0)
@@ -760,7 +747,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 else
                     try std.fmt.bufPrint(&name_buf, "sprite_{d}.png", .{o.path_id});
                 try extractFile(subdir, name, png);
-                try stdout.print("extracted {s} ({d}x{d})\n", .{ name, pw, ph });
+                try stdout.print("extracted {s} ({d}x{d})\n", .{ name, rr.w, rr.h });
                 extracted += 1;
             },
             114 => { // MonoBehaviour
@@ -795,7 +782,13 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const qual = if (ms_ns.len != 0)
                     try std.fmt.bufPrint(&qual_buf, "{s}.{s}", .{ ms_ns, ms_cn })
                 else
-                    ms_cn;
+                    try std.fmt.bufPrint(&qual_buf, "{s}", .{ms_cn});
+                // The name comes from the file: keep it one path component
+                // so it cannot steer the output path out of the extract dir.
+                for (qual) |*c| switch (c.*) {
+                    '/', '\\' => c.* = '_',
+                    else => {},
+                };
                 var fname_buf: [192]u8 = undefined;
                 const fname = try std.fmt.bufPrint(&fname_buf, "script_{d}_{s}.bin", .{ o.path_id, if (qual.len != 0) qual else "unnamed" });
                 try extractFile(subdir, fname, payload);
@@ -875,6 +868,239 @@ fn readObjectValue(
         return unityz.object_reader.readObject(arena, &r2, &tree.roots[0]) catch null;
     }
     return null;
+}
+
+/// A decoded RGBA texture plus its dimensions.
+const DecodedTexture = struct { rgba: []const u8, w: u32, h: u32 };
+
+/// Decodes a file-local (file_id 0) Texture2D at `path_id` to RGBA, reading
+/// embedded image data, the in-file stream, or a sibling .resS sidecar.
+fn decodeSpriteTexture(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    sidecars: []const Sidecar,
+    path_id: i64,
+) ?DecodedTexture {
+    const tex_value = readObjectValue(arena, sf, path_id) orelse return null;
+    const t = unityz.classes.Texture2D.fromValue(tex_value);
+    if (t.width == 0 or t.height == 0) return null;
+    var pixels: []const u8 = t.image_data;
+    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
+        const start: usize = @intCast(sf.data_offset + t.stream.offset);
+        const end = start + t.stream.size;
+        if (end <= sf.source.len) pixels = sf.source[start..end];
+    }
+    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
+        pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
+    }
+    if (pixels.len == 0) return null;
+    const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
+    return .{ .rgba = rgba, .w = t.width, .h = t.height };
+}
+
+/// Reads the m_VertexData (channel-packed) style sprite mesh: positions from
+/// channel 0, UV0 from the version-dependent channel, using the same layout
+/// rules as a Mesh object.
+const ChannelMesh = struct { positions: []const [3]f32, uvs: []const [2]f32 };
+
+fn readChannelMesh(
+    arena: std.mem.Allocator,
+    vd: unityz.value.Value,
+    sf: *const unityz.serialized.SerializedFile,
+) ?ChannelMesh {
+    var m = unityz.classes.Mesh{};
+    m.vertex_count = @intCast(unityz.classes.intField(vd, "m_VertexCount") orelse 0);
+    m.vertex_data = unityz.classes.bytesField(vd, "m_DataSize") orelse "";
+    if (unityz.classes.fieldOf(vd, "m_Channels")) |chans| {
+        if (chans == .array) {
+            const n = @min(chans.array.len, m.channels.len);
+            for (chans.array[0..n], 0..) |c, i| {
+                m.channels[i] = .{
+                    .stream = @intCast(unityz.classes.intField(c, "stream") orelse 0),
+                    .offset = @intCast(unityz.classes.intField(c, "offset") orelse 0),
+                    .format = @intCast(unityz.classes.intField(c, "format") orelse 0),
+                    .dimension = @intCast(unityz.classes.intField(c, "dimension") orelse 0),
+                };
+            }
+            m.channel_count = n;
+        }
+    }
+    const pos = m.channel(0) orelse return null;
+    if (pos.format != 0 or pos.dimension < 3) return null;
+    const stride = m.stride() orelse return null;
+    const vcount: usize = m.vertex_count;
+    if (m.vertex_data.len < stride * vcount) return null;
+    const ps = arena.alloc([3]f32, vcount) catch return null;
+    for (0..vcount) |i| {
+        const base = i * stride;
+        ps[i] = .{
+            readF32(m.vertex_data, base + pos.offset, sf.endian),
+            readF32(m.vertex_data, base + pos.offset + 4, sf.endian),
+            readF32(m.vertex_data, base + pos.offset + 8, sf.endian),
+        };
+    }
+    const uv_major = unityMajor(sf.unity_version);
+    const uv = m.channel(if (uv_major >= 2018) 4 else 3);
+    var uvs: []const [2]f32 = &.{};
+    if (uv) |t| {
+        if (t.format == 0 and t.dimension >= 2) {
+            const us = arena.alloc([2]f32, vcount) catch return null;
+            for (0..vcount) |i| {
+                const base = i * stride;
+                us[i] = .{
+                    readF32(m.vertex_data, base + t.offset, sf.endian),
+                    readF32(m.vertex_data, base + t.offset + 4, sf.endian),
+                };
+            }
+            uvs = us;
+        }
+    }
+    return .{ .positions = ps, .uvs = uvs };
+}
+
+/// Reads the sprite triangle index list from the render data's index buffer
+/// (bytes of u16) or one of the integer-array fields Unity writes.
+fn readSpriteTriangles(arena: std.mem.Allocator, rd: unityz.value.Value) ?[]const u32 {
+    if (unityz.classes.bytesField(rd, "m_IndexBuffer")) |buf| {
+        if (buf.len >= 6) {
+            const n = buf.len / 2;
+            const tris = arena.alloc(u32, n) catch return null;
+            for (0..n) |i| tris[i] = std.mem.readInt(u16, buf[i * 2 ..][0..2], .little);
+            return tris;
+        }
+    }
+    for ([_][]const u8{ "m_IndexBuffer", "indices", "triangles" }) |name| {
+        const f = unityz.classes.fieldOf(rd, name) orelse continue;
+        if (f == .array and f.array.len > 0) {
+            const n = f.array.len;
+            const tris = arena.alloc(u32, n) catch return null;
+            for (f.array, 0..) |x, i| tris[i] = @intCast(x.asInt() orelse @as(i64, 0));
+            return tris;
+        }
+    }
+    return null;
+}
+
+/// Reads a Sprite's tight/polygon mesh out of its own m_RD (positions, UVs,
+/// triangle indices), mirroring UnityPy's MeshHandler over SpriteRenderData.
+/// Returns null when the render data has no parseable mesh.
+fn spriteMeshFromValue(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    v: unityz.value.Value,
+) ?unityz.classes.SpriteMesh {
+    const rd = unityz.classes.fieldOf(v, "m_RD") orelse return null;
+    var positions: []const [3]f32 = &.{};
+    var uvs: []const [2]f32 = &.{};
+    if (unityz.classes.fieldOf(rd, "m_VertexData")) |vd| {
+        const cm = readChannelMesh(arena, vd, sf) orelse return null;
+        positions = cm.positions;
+        uvs = cm.uvs;
+    } else if (unityz.classes.fieldOf(rd, "vertices")) |verts| {
+        if (verts == .array and verts.array.len > 0) {
+            const n = verts.array.len;
+            const ps = arena.alloc([3]f32, n) catch return null;
+            const us = arena.alloc([2]f32, n) catch return null;
+            @memset(us, .{ 0, 0 });
+            for (verts.array, 0..) |ev, i| {
+                if (unityz.classes.vec3Field(ev, "pos")) |p| ps[i] = p;
+                if (unityz.classes.fieldOf(ev, "uv")) |uvf| {
+                    if (unityz.classes.floatField(uvf, "x")) |x| us[i][0] = @floatCast(x);
+                    if (unityz.classes.floatField(uvf, "y")) |y| us[i][1] = @floatCast(y);
+                }
+            }
+            positions = ps;
+            uvs = us;
+        }
+    }
+    const triangles = readSpriteTriangles(arena, rd) orelse return null;
+    if (positions.len == 0 or triangles.len == 0) return null;
+    return .{ .positions = positions, .uvs = uvs, .triangles = triangles };
+}
+
+/// The final (vertically flipped) RGBA sprite image and its dimensions.
+const RenderResult = struct { data: []const u8, w: u32, h: u32 };
+
+/// Produces the final flipped RGBA sprite image, following UnityPy's
+/// get_image_from_sprite: resolve the texture (and alpha texture), crop the
+/// rect, apply the packed rotation, then either mask the tight polygon or
+/// render the mesh; rows are always flipped last.
+fn renderSprite(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    sidecars: []const Sidecar,
+    v: unityz.value.Value,
+    sprite_path_id: i64,
+) ?RenderResult {
+    const sprite = unityz.classes.Sprite.fromValue(v);
+    // A {0,0} PPtr is the null reference: atlas-packed sprites leave
+    // m_RD.texture empty and name the atlas texture instead.
+    const hit = if (sprite.texture) |t| blk: {
+        if (t.path_id != 0) break :blk AtlasHit{
+            .texture = t, .rect = sprite.rect,
+            .alpha_texture = sprite.alpha_texture,
+            .settings_raw = sprite.settings_raw,
+        };
+        break :blk (atlasTextureFor(arena, sf, v, sprite_path_id) orelse return null);
+    } else (atlasTextureFor(arena, sf, v, sprite_path_id) orelse return null);
+    if (hit.texture.file_id != 0) return null; // external file not resolvable here
+
+    const tex = decodeSpriteTexture(arena, sf, sidecars, hit.texture.path_id) orelse return null;
+    var rgba: []const u8 = tex.rgba;
+    // Merge a separate alpha texture if present (packed sprites).
+    if (hit.alpha_texture) |at| {
+        if (at.path_id != 0 and at.file_id == 0) {
+            if (decodeSpriteTexture(arena, sf, sidecars, at.path_id)) |alpha_tex| {
+                if (alpha_tex.w == tex.w and alpha_tex.h == tex.h) {
+                    rgba = unityz.classes.mergeAlphaTexture(arena, rgba, alpha_tex.rgba, tex.w, tex.h) catch return null;
+                }
+            }
+        }
+    }
+
+    // Crop the rect (top-origin), then apply the packed rotation, matching
+    // UnityPy's order.
+    var crop = unityz.classes.Sprite.cropRectNoFlip(arena, hit.rect, rgba, tex.w, tex.h) catch return null;
+    if (sprite.isPacked()) {
+        const rot = unityz.classes.rotateSprite(arena, crop.data, @intCast(crop.w), @intCast(crop.h), sprite.packingRotation()) catch return null;
+        crop = .{ .data = rot.data, .w = rot.w, .h = rot.h };
+    }
+
+    var data: []const u8 = crop.data;
+    var w: u32 = @intCast(crop.w);
+    var h: u32 = @intCast(crop.h);
+
+    if (sprite.isTight()) {
+        // Fall back to the plain crop when the mesh is unparseable, so a
+        // tight sprite at least emits something rather than being dropped.
+        if (spriteMeshFromValue(arena, sf, v)) |mesh| {
+            var has_nonzero_uv = false;
+            if (mesh.uvs.len == mesh.positions.len and mesh.uvs.len > 0) {
+                for (mesh.uvs) |u| {
+                    if (u[0] != 0 or u[1] != 0) {
+                        has_nonzero_uv = true;
+                        break;
+                    }
+                }
+            }
+            if (has_nonzero_uv) {
+                // texture-mapped mesh produces its own tightly-cropped image
+                const rendered = unityz.classes.renderSpriteMesh(arena, mesh, sprite.pixels_to_units, rgba, tex.w, tex.h) catch return null;
+                data = rendered.data;
+                w = rendered.w;
+                h = rendered.h;
+            } else {
+                // polygon mask applied to the (rotated) crop
+                const masked = unityz.classes.maskSprite(arena, mesh, sprite.pixels_to_units, crop.data, @intCast(crop.w), @intCast(crop.h)) catch return null;
+                data = masked;
+                w = @intCast(crop.w);
+                h = @intCast(crop.h);
+            }
+        }
+    }
+
+    const flipped = unityz.texture.flipVertical(arena, data, w, h) catch return null;
+    return .{ .data = flipped, .w = w, .h = h };
 }
 
 /// Little-endian f32 at `data[pos..pos+4]` (the vertex data is packed in
@@ -968,7 +1194,14 @@ fn writeMeshObj(
 
                 const index_count = unityz.classes.intField(sub, "indexCount") orelse 0;
                 const start = index_cursor;
-                const end = start + @as(usize, @intCast(@max(index_count, 0)));
+                // `indexCount` is file-supplied and need not match the index
+                // buffer: clamp it to the slots that actually exist, or
+                // `start + count` overflows usize (and the face loop spins
+                // over billions of slots writeFace would skip anyway).
+                const index_slots = mesh.index_buffer.len / idx_bytes;
+                if (start >= index_slots) break;
+                const want: usize = @intCast(@max(index_count, 0));
+                const end = start + @min(want, index_slots - start);
                 index_cursor = end;
                 const per_face: usize = switch (topology) {
                     0 => 3, // triangles
@@ -1174,6 +1407,7 @@ fn printWebFile(path: []const u8, bytes: []const u8, dump: bool, objects: bool, 
             }
             try stdout.print("]", .{});
         }
+        try emitShadersJson(arena, wf.entries, stdout);
         try stdout.print("}}\n", .{});
         return;
     }
@@ -1196,6 +1430,76 @@ fn printWebFile(path: []const u8, bytes: []const u8, dump: bool, objects: bool, 
             try dumpSerializedBytes(arena, e.data, stdout);
         }
     }
+}
+
+/// A Shader's display name: `m_ParsedForm.m_Name` (its authored name),
+/// trimmed of the trailing NUL, falling back to the top-level `m_Name`.
+fn shaderDisplayName(v: unityz.value.Value) []const u8 {
+    if (unityz.classes.fieldOf(v, "m_ParsedForm")) |pf| {
+        if (unityz.classes.stringField(pf, "m_Name")) |n| {
+            return std.mem.trimEnd(u8, n, "\x00");
+        }
+    }
+    return unityz.classes.stringField(v, "m_Name") orelse "";
+}
+
+/// Appends `{"name":...,"skins":...}` per Shader object of `sf` to the
+/// current JSON field, threading the `first` flag cumulatively. `--json`
+/// `info` uses this to report whether each shader skins. Entries are printed
+/// one per object; undetermined shaders (no d3d11 blob or multi-tier) report
+/// `skins:null`.
+fn emitShaderSkinsJson(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, stdout: *Io.Writer, first: *bool) !void {
+    for (sf.objects) |*o| {
+        if (o.class_id != 48) continue;
+        const ti = o.type_index orelse continue;
+        if (ti >= sf.types.len) continue;
+        const tree = sf.types[ti].type_tree;
+        if (tree.roots.len == 0) continue;
+        const data = sf.objectData(o) orelse continue;
+        var r = unityz.streams.Reader.init(data);
+        r.endian = sf.endian;
+        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+        const name = shaderDisplayName(v);
+        if (!first.*) try stdout.writeByte(',');
+        first.* = false;
+
+        const info = (try unityz.shader.skinInfo(arena, v)) orelse {
+            try stdout.print("{{\"name\":", .{});
+            try writeJsonString(stdout, name);
+            try stdout.print(",\"skins\":null,\"determined\":false}}", .{});
+            continue;
+        };
+        try stdout.print("{{\"name\":", .{});
+        try writeJsonString(stdout, name);
+        try stdout.print(",\"skins\":{s},\"determined\":true,\"blend_channels\":{s},\"blend_sources\":[", .{
+            if (info.skins) "true" else "false",
+            if (info.blend_channels) "true" else "false",
+        });
+        for (info.blend_sources, 0..) |s, i| {
+            if (i != 0) try stdout.writeByte(',');
+            try stdout.print("{d}", .{s});
+        }
+        try stdout.print("],\"bone_bindings\":[", .{});
+        for (info.bone_bindings, 0..) |b, i| {
+            if (i != 0) try stdout.writeByte(',');
+            try writeJsonString(stdout, b);
+        }
+        try stdout.print("],\"vertex_programs\":{d},\"parameter_blobs\":{d}}}", .{ info.vertex_programs, info.parameter_blobs });
+    }
+}
+
+/// Emits the `,"shaders":[...]` field for the serialized nodes of a
+/// bundle/webfile (any slice whose elements expose a `data` byte range). The
+/// caller manages the surrounding JSON.
+fn emitShadersJson(arena: std.mem.Allocator, nodes: anytype, stdout: *Io.Writer) !void {
+    try stdout.print(",\"shaders\":[", .{});
+    var first = true;
+    for (nodes) |n| {
+        if (unityz.container.sniff(n.data).container != .serialized) continue;
+        const ns = unityz.serialized.parse(arena, n.data) catch continue;
+        try emitShaderSkinsJson(arena, &ns, stdout, &first);
+    }
+    try stdout.print("]", .{});
 }
 
 fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
@@ -1225,6 +1529,7 @@ fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, j
             }
             try stdout.print("]", .{});
         }
+        try emitShadersJson(arena, b.nodes, stdout);
         try stdout.print("}}\n", .{});
         return;
     }
@@ -1264,10 +1569,9 @@ fn printSerialized(path: []const u8, bytes: []const u8, dump: bool, objects: boo
     };
     if (json) {
         try stdout.print("{{\"type\":\"SerializedFile\",\"version\":{d},\"unity\":\"{s}\",\"platform\":{d},\"endian\":\"{s}\",\"type_tree\":{s},\"types\":{d},\"objects\":{d},\"externals\":{d}", .{
-            sf.version, sf.unity_version, sf.target_platform,
-            if (sf.endian == .little) "little" else "big",
-            if (sf.enable_type_tree) "true" else "false",
-            sf.types.len, sf.objects.len, sf.externals.len,
+            sf.version,                                    sf.unity_version,                             sf.target_platform,
+            if (sf.endian == .little) "little" else "big", if (sf.enable_type_tree) "true" else "false", sf.types.len,
+            sf.objects.len,                                sf.externals.len,
         });
         if (objects) {
             try stdout.print(",\"object_list\":[", .{});
@@ -1283,6 +1587,10 @@ fn printSerialized(path: []const u8, bytes: []const u8, dump: bool, objects: boo
             for (e.guid) |b| try stdout.print("{x:0>2}", .{b});
             try stdout.print("\",\"type\":{d}}}", .{e.type_});
         }
+        try stdout.print("]", .{});
+        try stdout.print(",\"shaders\":[", .{});
+        var first_shader = true;
+        try emitShaderSkinsJson(arena, &sf, stdout, &first_shader);
         try stdout.print("]}}\n", .{});
         return;
     }
@@ -1621,6 +1929,263 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
     if (!json) try stdout.print("  {d} object(s) checked, {d} failed\n", .{ checked, failed });
 }
 
+/// One Shader's skinning summary, as reported by `skin <path>`.
+const ShaderSummary = struct {
+    node: ?[]const u8,
+    path_id: i64,
+    name: []const u8,
+    skins: bool,
+    blend_channels: bool,
+    determined: bool,
+    blend_sources: []const u32,
+    bone_bindings: []const []const u8,
+};
+
+/// A `SkinnedMeshRenderer` referencing a shader that does not skin — the
+/// reason `skin <path>` exits non-zero.
+const SkinFailure = struct {
+    node: ?[]const u8,
+    path_id: i64,
+    shader_name: []const u8,
+    renderer_path_id: i64,
+};
+
+/// Interpret a value as a `PPtr`, accepting both the native `.pptr` form and
+/// an object with extra fields that the reader produced as an `.obj`.
+fn asPPtr(v: unityz.value.Value) ?unityz.value.PPtr {
+    return switch (v) {
+        .pptr => |p| p,
+        .obj => |fields| blk: {
+            var file: i32 = 0;
+            var path: i64 = 0;
+            var seen = false;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "m_FileID")) {
+                    file = @intCast(f.value.asInt() orelse 0);
+                    seen = true;
+                } else if (std.mem.eql(u8, f.name, "m_PathID")) {
+                    path = f.value.asInt() orelse 0;
+                    seen = true;
+                }
+            }
+            if (!seen) break :blk null;
+            break :blk .{ .file_id = file, .path_id = path };
+        },
+        else => null,
+    };
+}
+
+/// Reads a Shader object's value tree (borrowing from `sf`), returning null
+/// when the object has no decodable type tree.
+fn shaderObjectValue(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, o: *const unityz.serialized.ObjectInfo) ?unityz.value.Value {
+    const ti = o.type_index orelse return null;
+    if (ti >= sf.types.len) return null;
+    const tree = sf.types[ti].type_tree;
+    if (tree.roots.len == 0) return null;
+    const od = sf.objectData(o) orelse return null;
+    var r = unityz.streams.Reader.init(od);
+    r.endian = sf.endian;
+    return unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch null;
+}
+
+/// Collects skinning summaries for every Shader of `bytes`, and records a
+/// failure for any `SkinnedMeshRenderer` whose material's shader does not
+/// skin. `shaders`/`failures` are appended to across nodes.
+fn skinSerializedBytes(
+    arena: std.mem.Allocator,
+    bytes: []const u8,
+    node: ?[]const u8,
+    shaders: *std.ArrayList(ShaderSummary),
+    failures: *std.ArrayList(SkinFailure),
+) !void {
+    const sf = unityz.serialized.parse(arena, bytes) catch return;
+
+    // Per-shader skinning summary.
+    for (sf.objects) |*o| {
+        if (o.class_id != 48) continue;
+        const v = shaderObjectValue(arena, &sf, o) orelse continue;
+        const name = shaderDisplayName(v);
+        const info = try unityz.shader.skinInfo(arena, v);
+        if (info) |inf| {
+            try shaders.append(arena, .{
+                .node = node,
+                .path_id = o.path_id,
+                .name = name,
+                .skins = inf.skins,
+                .blend_channels = inf.blend_channels,
+                .determined = inf.determined,
+                .blend_sources = inf.blend_sources,
+                .bone_bindings = inf.bone_bindings,
+            });
+        } else {
+            // blob not decodable (no d3d11 platform, or multi-tier): unknown.
+            try shaders.append(arena, .{
+                .node = node,
+                .path_id = o.path_id,
+                .name = name,
+                .skins = false,
+                .blend_channels = false,
+                .determined = false,
+                .blend_sources = &[_]u32{},
+                .bone_bindings = &[_][]const u8{},
+            });
+        }
+    }
+
+    // A SkinnedMeshRenderer only renders if its shader skins. Resolve
+    // renderer -> materials -> shader (same-file references only) and flag a
+    // shader that is deterministically non-skinning.
+    for (sf.objects) |*o| {
+        if (o.class_id != 137) continue;
+        const rv = shaderObjectValue(arena, &sf, o) orelse continue;
+        const mats = unityz.classes.fieldOf(rv, "m_Materials") orelse continue;
+        const arr = switch (mats) {
+            .array => |a| a,
+            else => continue,
+        };
+        for (arr) |mat_ref| {
+            const mp = asPPtr(mat_ref) orelse continue;
+            if (mp.file_id != 0 or mp.path_id == 0) continue; // external or null
+            const mv = readObjectValue(arena, &sf, mp.path_id) orelse continue;
+            const sp = unityz.classes.pptrField(mv, "m_Shader") orelse continue;
+            if (sp.file_id != 0 or sp.path_id == 0) continue;
+            const sv = readObjectValue(arena, &sf, sp.path_id) orelse continue;
+            const sname = shaderDisplayName(sv);
+            const info = (try unityz.shader.skinInfo(arena, sv)) orelse continue; // unknown -> no verdict
+            if (!info.skins) {
+                try failures.append(arena, .{
+                    .node = node,
+                    .path_id = sp.path_id,
+                    .shader_name = sname,
+                    .renderer_path_id = o.path_id,
+                });
+            }
+        }
+    }
+}
+
+/// `skin <path> [--json]` — report whether each Shader (class 48) skins, and
+/// exit non-zero when a `SkinnedMeshRenderer` references a shader that does
+/// not skin. Recurse into bundle/webfile serialized nodes.
+fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+    var json = false;
+    for (rest) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+        } else {
+            try stdout.print("unityz: unknown skin option '{s}'\n", .{arg});
+            return;
+        }
+    }
+
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var shaders: std.ArrayList(ShaderSummary) = .empty;
+    defer shaders.deinit(arena);
+    var failures: std.ArrayList(SkinFailure) = .empty;
+    defer failures.deinit(arena);
+
+    switch (unityz.container.sniff(bytes).container) {
+        .serialized => try skinSerializedBytes(arena, bytes, null, &shaders, &failures),
+        .bundle => {
+            const b = unityz.bundle.parse(arena, bytes) catch |err| {
+                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                return;
+            };
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) continue;
+                try skinSerializedBytes(arena, n.data, n.path, &shaders, &failures);
+            }
+        },
+        .webfile => {
+            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
+                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                return;
+            };
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) continue;
+                try skinSerializedBytes(arena, e.data, e.path, &shaders, &failures);
+            }
+        },
+        .archive => {
+            try stdout.print("{s}: UnityArchive files are not supported yet\n", .{path});
+            return;
+        },
+        .unknown => {
+            try stdout.print("{s}: not a recognized Unity asset file\n", .{path});
+            return;
+        },
+    }
+
+    if (json) {
+        try stdout.print("{{\"shaders\":[", .{});
+        for (shaders.items, 0..) |s, i| {
+            if (i != 0) try stdout.writeByte(',');
+            try stdout.print("{{\"path_id\":{d},\"name\":", .{s.path_id});
+            try writeJsonString(stdout, s.name);
+            try stdout.print(",\"skins\":{s},\"determined\":{s},\"blend_channels\":{s},\"blend_sources\":[", .{
+                if (s.skins) "true" else "false",
+                if (s.determined) "true" else "false",
+                if (s.blend_channels) "true" else "false",
+            });
+            for (s.blend_sources, 0..) |src, si| {
+                if (si != 0) try stdout.writeByte(',');
+                try stdout.print("{d}", .{src});
+            }
+            try stdout.print("],\"bone_bindings\":[", .{});
+            for (s.bone_bindings, 0..) |b, bi| {
+                if (bi != 0) try stdout.writeByte(',');
+                try writeJsonString(stdout, b);
+            }
+            try stdout.print("]}}", .{});
+        }
+        try stdout.print("],\"failures\":[", .{});
+        for (failures.items, 0..) |f, i| {
+            if (i != 0) try stdout.writeByte(',');
+            try stdout.print("{{\"path_id\":{d},\"renderer_path_id\":{d},\"shader\":", .{ f.path_id, f.renderer_path_id });
+            try writeJsonString(stdout, f.shader_name);
+            try stdout.print("}}", .{});
+        }
+        try stdout.print("]}}\n", .{});
+    } else {
+        for (shaders.items) |s| {
+            if (s.node) |n| try stdout.print("{s}:", .{n});
+            try stdout.print(" object {d} {s}: skins {s}", .{
+                s.path_id,
+                s.name,
+                if (!s.determined) "unknown" else if (s.skins) "true" else "false",
+            });
+            if (s.determined) {
+                try stdout.print(" (blend channels:", .{});
+                for (s.blend_sources, 0..) |src, i| {
+                    if (i != 0) try stdout.writeByte(',');
+                    try stdout.print("{d}", .{src});
+                }
+                try stdout.print("; bone bindings:", .{});
+                for (s.bone_bindings, 0..) |b, i| {
+                    if (i != 0) try stdout.writeByte(',');
+                    try stdout.print(" {s}", .{b});
+                }
+                try stdout.print(")", .{});
+            }
+            try stdout.print("\n", .{});
+        }
+        if (failures.items.len != 0) {
+            for (failures.items) |f| {
+                if (f.node) |n| try stdout.print("{s}:", .{n});
+                try stdout.print(" object {d} (renderer {d}): shader {s} does not skin\n", .{ f.path_id, f.renderer_path_id, f.shader_name });
+            }
+            try stdout.print("{d} skinned-mesh shader(s) do not skin\n", .{failures.items.len});
+        } else {
+            try stdout.print("all skinned-mesh shaders skin\n", .{});
+        }
+    }
+
+    if (failures.items.len != 0) verify_failed_flag = true;
+}
+
 /// Compares two directories file-by-file by content hash, reporting
 /// unchanged/changed/new/deleted files and totals. UnityPy has no tree
 /// comparison.
@@ -1839,12 +2404,12 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         for (entries.items, 0..) |fp, idx| {
             if (idx != 0) try stdout.writeByte(',');
             try stdout.writeByte('{');
-        if (fp.node) |n| {
-            try stdout.print("\"node\":", .{});
-            try writeJsonString(stdout, n);
-            try stdout.writeByte(',');
-        }
-        try stdout.print("\"path_id\":{d},\"hash\":\"{x:0>16}\",\"class\":{d},\"size\":{d}}}", .{ fp.path_id, fp.hash, fp.class_id, fp.size });
+            if (fp.node) |n| {
+                try stdout.print("\"node\":", .{});
+                try writeJsonString(stdout, n);
+                try stdout.writeByte(',');
+            }
+            try stdout.print("\"path_id\":{d},\"hash\":\"{x:0>16}\",\"class\":{d},\"size\":{d}}}", .{ fp.path_id, fp.hash, fp.class_id, fp.size });
         }
         try stdout.print("]\n", .{});
     }
@@ -3244,17 +3809,23 @@ fn setFieldPath(v: unityz.value.Value, segs: []const PathSeg, i: usize, new_valu
     return replaceArrayIndex(arr, idx, new_child);
 }
 
+/// Nesting limit for `parseJsonLiteral`. The parser recurses once per
+/// `[`/`{`, so without a bound a deeply nested literal overflows the stack
+/// instead of reporting a bad patch. Mirrors `typetree.max_depth`.
+const max_json_depth: u32 = 512;
+
 /// Minimal JSON literal parser: ints, floats, bools, null, quoted strings,
 /// and nested arrays/objects. Enough for `edit`.
 fn parseJsonLiteral(text: []const u8) !unityz.value.Value {
     var pos: usize = 0;
-    const v = try parseJsonValue(text, &pos);
+    const v = try parseJsonValue(text, &pos, 0);
     while (pos < text.len and (text[pos] == ' ' or text[pos] == '\t' or text[pos] == '\n')) pos += 1;
     if (pos != text.len) return error.TrailingInput;
     return v;
 }
 
-fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
+fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value {
+    if (depth > max_json_depth) return error.TooDeep;
     skipWs(text, pos);
     if (pos.* >= text.len) return error.UnexpectedEnd;
     const c = text[pos.*];
@@ -3286,7 +3857,7 @@ fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
             return .{ .array = try list.toOwnedSlice(std.heap.page_allocator) };
         }
         while (true) {
-            try list.append(std.heap.page_allocator, try parseJsonValue(text, pos));
+            try list.append(std.heap.page_allocator, try parseJsonValue(text, pos, depth + 1));
             skipWs(text, pos);
             if (pos.* >= text.len) return error.UnterminatedArray;
             if (text[pos.*] == ',') {
@@ -3313,11 +3884,11 @@ fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
         while (true) {
             skipWs(text, pos);
             if (pos.* >= text.len or text[pos.*] != '"') return error.BadObject;
-            const key = try parseJsonValue(text, pos);
+            const key = try parseJsonValue(text, pos, depth + 1);
             skipWs(text, pos);
             if (pos.* >= text.len or text[pos.*] != ':') return error.BadObject;
             pos.* += 1;
-            const val = try parseJsonValue(text, pos);
+            const val = try parseJsonValue(text, pos, depth + 1);
             try list.append(std.heap.page_allocator, .{ .name = key.string, .value = val });
             skipWs(text, pos);
             if (pos.* >= text.len) return error.UnterminatedObject;
@@ -3409,7 +3980,6 @@ test "parseCommand recognizes known subcommands" {
 }
 
 test "parseFieldPath splits dotted and indexed paths" {
-
     const p1 = try parseFieldPath("m_Name");
     try std.testing.expectEqual(@as(usize, 1), p1.len);
     try std.testing.expectEqualStrings("m_Name", p1[0].name);
