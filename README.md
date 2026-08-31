@@ -34,10 +34,14 @@ it back, compare bytes; non-zero exit on failure), `stats` (per-class
 sizes and duplicate-object detection), `find` (name/class search, with
 `--exact` for whole-name lookups), `show` (one object as JSON, or a hex
 dump of its bytes with `--raw`), `diff` (compare two files' objects by
-content hash, scoped with `--class`, or two directories file-by-file),
-`hash` (per-object content fingerprints), and `skin` (whether every Shader
-skins — whether its vertex stage applies per-vertex bone matrices — exiting
-non-zero when a `SkinnedMeshRenderer` references a shader that does not).
+content hash, scoped with `--class`, or two directories file-by-file).
+
+`hash` (per-object content fingerprints) and `skin` (whether every
+Shader's vertex stage applies per-vertex bone matrices, exiting non-zero
+when a `SkinnedMeshRenderer` references a shader that does not) round out
+the set.
+
+All commands accept a directory and process every file in it.
 
 All commands accept a directory and process every file in it. `extract`
 filters with `--class`/`--path-id`/`--raw`, exports value trees with
@@ -57,11 +61,15 @@ selectors (e.g. `show bundle.unity3d CAB-abc123:7` or
 ids in different nodes can be targeted individually.
 
 `info`, `stats`, `hash`, `find`, `diff`, `verify`, and `skin` also have a
-`--json` mode for scripting: `info --json` summarizes a file or container
-(adding `--objects` includes the per-object table, tagged with its
-container node, and serialized files list their sidecar `externals_list`;
-each shader is also reported with a `skins` verdict and its bind-channel /
-bone-matrix evidence), `stats --json` gives per-class sizes and
+`--json` mode for scripting.
+
+`info --json` summarizes a file or container (adding `--objects`
+includes the per-object table, tagged with its container node, and
+serialized files list their sidecar `externals_list`; each shader is also
+reported with a `skins` verdict and its bind-channel / bone-matrix
+evidence).
+
+`stats --json` gives per-class sizes and
 duplicates, `hash --json` emits per-object content fingerprints,
 `find --json` emits matching objects as a JSON array, `diff --json`
 emits the changed/new/deleted objects (or files, for directory diffs)
@@ -108,10 +116,12 @@ Texture decoding, reserialization, and the `extract`/`edit` commands have
 landed: textures decode to RGBA8 and write as PNG (RGB/RGBA8, BGR24,
 16-bit R16/RG16, half/float RHalf/RGHalf/RGBAHalf/RFloat/RGFloat/
 RGBAFloat/ARGBFloat/RG32, RGB9e5Float, RGB48/RGBA64, the signed variants,
-DXT1/3/5, BC4/5, BC7, ETC1/ETC2/ETC2-RGBA8, ASTC, ASTC HDR (66-71), plus
-Unity crunch ETC_RGB4Crunched, ETC2_RGBA8Crunched, DXT1Crunched, and
-DXT5Crunched through a vendored ZLIB-licensed unitycrunch decompressor).
-PVRTC, ATC, EAC, and the 3DS ETC variants are detected but not yet
+DXT1/3/5, BC4/5, BC6H (HDR), BC7, PVRTC (2bpp/4bpp RGB and RGBA),
+ATC (RGB4/RGBA8), EAC (R/RG, signed and unsigned), ETC1/ETC2/ETC2-RGBA8,
+ASTC, ASTC HDR (66-71), plus the crunch-crunched formats (ETC_RGB4,
+ETC2_RGBA8, DXT1, DXT5) through a vendored ZLIB-licensed unitycrunch
+decompressor (hardened against corrupt streams). The 3DS ETC variants
+are detected but not yet
 decoded.
 
 ETC2, the BC family, and the crunch variants decode pixel-identical to
@@ -145,12 +155,15 @@ matching UnityPy's mask_sprite/render_sprite_mesh.
 Managed-reference registries decode
 through their type trees, MonoBehaviours resolve their MonoScript and
 export the raw script payload, Meshes export as Wavefront OBJ (vertices,
-normals, UVs, faces), Materials and Shaders export as readable text;
-additionally, each Shader's compiled sub-program blob is decoded and
+normals, UVs, faces), Materials and Shaders export as readable text.
+
+Additionally, each Shader's compiled sub-program blob is decoded and
 reported as skinning or not (its vertex stage applies per-vertex bone
 matrices), read off the bind-channel block and parameter-blob bindings;
 AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
-MP3), and objects reserialize byte-exactly and can be edited in place
+MP3) with an FSB5 metadata sidecar (sample rate, channels, loop points,
+format - UnityPy never surfaces these), and objects reserialize
+byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
 
 UnityFS bundles parse
@@ -184,6 +197,8 @@ interpolation.
 - `src/value.zig` - generic object value model + JSON output
 - `src/object_reader.zig` - type-tree-driven object reader
 - `src/classes.zig` - typed views for the common classes
+- `src/fsb5.zig` - FSB5 audio bank metadata parser (sample rate, channels,
+  loop points, format)
 - `src/shader.zig` - Shader (class 48) sub-program blob parsing; reports
   whether a shader's vertex stage skins (BLENDINDICES/BLENDWEIGHT inputs +
   a bone-matrix binding)

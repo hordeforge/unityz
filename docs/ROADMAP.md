@@ -9,9 +9,9 @@ Nothing in flight.
 
 ## Planned
 
-- Texture block formats still missing: PVRTC, ATC, EAC, and the
-  ETC-RGB4/RGBA8-3DS variants. UnityPy decodes these; no real asset with
-  them has been located to verify against, so they are documented as
+- Texture block formats still missing: the ETC-RGB4/RGBA8-3DS variants.
+  UnityPy decodes these; no real asset with them has been located to
+  verify against, so they are documented as
   unsupported rather than half-tested.
 - Parsing the managed .NET object graph inside `m_Script` payloads. Shared
   with UnityPy itself (it needs external .NET assemblies); unityz exposes
