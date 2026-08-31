@@ -1672,3 +1672,34 @@ UnsupportedChannels rather than guess. fsb5.Sample carries the coefs;
 the extract WAV path and the .fsb.json sidecar pick them up
 automatically. Two unit tests: a hand-computed identity-filter block
 and a DSPCOEFS chunk parse. 285/285 tests.
+
+2026-08-31 (real .resS sidecar + OBJ golden parity): the remaining
+"no real .resS sidecar" gap closed with UnityPy's own test bundle
+xinzexi_2_n_tex (github.com/K0lb3/UnityPy, tests/samples, fetched via
+the repo's git-lfs): a Unity 2017.4 bundle whose 2 MB CAB-*.resS
+node carries the streamed texture pixels (the Texture2D object is 192
+bytes; its m_StreamData references the whole sidecar).
+
+Extract
+resolves it and the decoded 2048x976 ETC2_RGBA8 texture is
+pixel-identical to UnityPy's. The 2038x976 polygon-mesh sprite
+renders identically too: 0 RGB-visible pixel differences; 7 of
+1,989,088 pixels disagree on alpha at transparent-region boundaries
+(PIL's integer polygon fill vs our float-geometry rasterizer), and
+~3000 more "differences" are invisible RGB under alpha-0 that
+UnityPy's affine fill leaves behind.
+
+The same bundle ships UnityPy's golden OBJ export
+(tests/samples/xinzexi_2_n_tex_mesh), which our mesh exporter now
+matches byte for byte on the v/g/vt sections - group names (`g`, not
+`o`), per-submesh `g <name>_<N>` lines, and floats printed like
+Python's %.9g (9 significant digits, round-half-even, "-0" for
+negated zero).
+
+The only remaining diff is the f lines: UnityPy
+emits v/vt/vn face references with no vn declarations (undefined
+indices), which we deliberately do not replicate; with normals present
+our faces carry real vn references. writeObjFloat implements the
+%.9g semantics (exact integer powers of 10 + half-even ties, verified
+against Python's format on the golden values); unit test pins the
+rounding cases. 286/286 tests.
