@@ -203,9 +203,9 @@ as JSON.
 
 Serialized formats 2-22 are supported by the library's parser
 (version 4 included, whose legacy recursive type-tree and
-trailing-metadata layouts are handled), though container detection
-currently skips version 4, so a bare v4 file is not reachable from the
-CLI. Decompression covers none (uncompressed), LZ4 (in-tree), LZMA (via
+trailing-metadata layouts are handled), and container detection covers
+all of them, so even bare v4 files are reachable from the CLI.
+Decompression covers none (uncompressed), LZ4 (in-tree), LZMA (via
 std), and LZHAM (vendored decompressor).
 
 The generic object reader is in: object payloads are decoded through

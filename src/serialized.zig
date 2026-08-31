@@ -541,6 +541,34 @@ test "parse rejects unsupported version" {
     try std.testing.expectError(error.UnsupportedVersion, parse(a, bytes));
 }
 
+test "parse a minimal version-4 serialized file" {
+    // A bare v4 file (Unity 3.x-4.x era): 16-byte header, trailing metadata
+    // opened by the endianness byte, no type trees, no objects. The legacy
+    // layout is what `container.sniff` now routes to the CLI.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const bytes = [_]u8{
+        0x00, 0x00, 0x00, 0x0d, // metadata size 13
+        0x00, 0x00, 0x00, 0x1d, // file size 29
+        0x00, 0x00, 0x00, 0x04, // format version 4
+        0x00, 0x00, 0x00, 0x10, // data offset 16 (empty data section)
+        0x00, // trailing metadata opens with the endianness byte (little)
+        0x00, 0x00, 0x00, 0x00, // type count 0
+        0x00, 0x00, 0x00, 0x00, // object count 0
+        0x00, 0x00, 0x00, 0x00, // external count 0
+    };
+    const sf = try parse(a, &bytes);
+    try std.testing.expectEqual(@as(u32, 4), sf.version);
+    try std.testing.expectEqual(@as(u64, 29), sf.file_size);
+    try std.testing.expectEqual(streams.Endian.little, sf.endian);
+    try std.testing.expectEqual(@as(usize, 0), sf.types.len);
+    try std.testing.expectEqual(@as(usize, 0), sf.objects.len);
+    try std.testing.expectEqual(@as(usize, 0), sf.externals.len);
+    try std.testing.expectEqualStrings("", sf.user_information);
+}
+
 // ---------------------------------------------------------------------------
 // Fixture builder (tests only): a minimal v22 serialized file with two
 // types (Transform, Texture2D), two objects, one external, user info.

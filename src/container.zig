@@ -68,12 +68,9 @@ const max_metadata_size: u32 = 64 * 1024 * 1024;
 /// only entry point that decompresses; the plaintext inside is
 /// re-validated there.
 ///
-/// Known gap: the heuristic below skips format version 4, so a bare v4
-/// serialized file sniffs as `.unknown` even though
-/// `serialized.supportedVersion(4)` is true and `serialized.parse`
-/// reads it. The filter predates v4 parser support and was never
-/// widened; every CLI command routes through `sniff`, so v4 files are
-/// unreachable from the command line.
+/// Serialized files of every supported version (2-22, including the
+/// legacy version 4 with its trailing-metadata layout) sniff as
+/// `.serialized`, so bare v4 files are reachable from the CLI.
 pub fn sniff(data: []const u8) SniffResult {
     if (std.mem.startsWith(u8, data, webfile_magic)) {
         return .{ .container = .webfile };
@@ -104,7 +101,9 @@ pub fn sniff(data: []const u8) SniffResult {
         const file_size = std.mem.readInt(u32, data[4..8], .big);
         const version = std.mem.readInt(u32, data[8..12], .big);
 
-        if (version == 2 or version == 3 or (version >= 5 and version <= 22)) {
+        // All supported serialized versions, including 4: the parser reads
+        // 2-22, and version 4 uses the same 16-byte legacy header as 2/3.
+        if (version >= 2 and version <= 22) {
             var meta_size = meta0;
             const header_size: usize = if (version <= 8)
                 16
@@ -209,12 +208,21 @@ test "sniff rejects implausible serialized headers" {
     std.mem.writeInt(u32, buf3[4..8], 19, .big);
     try std.testing.expectEqual(ContainerType.unknown, sniff(&buf3).container);
 
-    // unsupported version 4
+    // legacy version 4 sniffs as serialized like every supported version
     var buf4: [40]u8 = undefined;
     std.mem.writeInt(u32, buf4[0..4], 8, .big);
     std.mem.writeInt(u32, buf4[4..8], 28, .big);
     std.mem.writeInt(u32, buf4[8..12], 4, .big);
-    try std.testing.expectEqual(ContainerType.unknown, sniff(&buf4).container);
+    const r4 = sniff(&buf4);
+    try std.testing.expectEqual(ContainerType.serialized, r4.container);
+    try std.testing.expectEqual(@as(?u32, 4), r4.serialized_version);
+
+    // ...but an implausible v4 header is still rejected
+    var buf5: [40]u8 = undefined;
+    std.mem.writeInt(u32, buf5[0..4], 8, .big); // metadata larger than the file
+    std.mem.writeInt(u32, buf5[4..8], 4, .big);
+    std.mem.writeInt(u32, buf5[8..12], 4, .big);
+    try std.testing.expectEqual(ContainerType.unknown, sniff(&buf5).container);
 }
 
 test "sniff empty and garbage" {
