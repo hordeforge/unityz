@@ -182,8 +182,15 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
     );
     errdefer allocator.free(header_info);
 
-    var blocks: []Block = undefined;
-    var nodes: []Node = undefined;
+    // Empty until allocated, with function-scope errdefers: a block-scoped
+    // errdefer is discharged when the block below exits normally, which
+    // would leak both tables on every error raised after it (short block
+    // data, a failed block decompress, ...). Freeing an empty slice is a
+    // no-op, so the errdefers are safe before the allocations happen.
+    var blocks: []Block = &.{};
+    var nodes: []Node = &.{};
+    errdefer allocator.free(blocks);
+    errdefer allocator.free(nodes);
     {
         var hr = streams.Reader.init(header_info);
         hr.endian = .big;
@@ -191,7 +198,6 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
         const block_count = try hr.readInt(u32);
         if (block_count > max_entries) return error.Corrupt;
         blocks = try allocator.alloc(Block, block_count);
-        errdefer allocator.free(blocks);
         for (blocks) |*b| {
             b.uncompressed_size = try hr.readInt(u32);
             b.compressed_size = try hr.readInt(u32);
@@ -201,8 +207,11 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
         const node_count = try hr.readInt(u32);
         if (node_count > max_entries) return error.Corrupt;
         nodes = try allocator.alloc(Node, node_count);
-        errdefer allocator.free(nodes);
         for (nodes) |*n| {
+            // `alloc` does not apply the struct's field defaults, so `data`
+            // has to be set here: a node whose range is rejected below would
+            // otherwise be handed out as an undefined slice.
+            n.data = &.{};
             n.offset = try hr.readInt(i64);
             n.size = try hr.readInt(i64);
             n.flags = try hr.readInt(u32);
@@ -235,14 +244,22 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
 
         const out = try decompressRaw(allocator, raw, b.uncompressed_size, blockCompressionType(b.flags));
         defer allocator.free(out);
+        // A block that decodes short would leave the rest of `stream`
+        // uninitialized, and nodes may point at it: reject instead of
+        // handing out uninitialized heap.
+        if (out.len != b.uncompressed_size) return error.Corrupt;
         @memcpy(stream[out_pos .. out_pos + out.len], out);
         out_pos += out.len;
     }
 
     for (nodes) |*n| {
-        const off: usize = @intCast(@max(n.offset, 0));
-        const len: usize = @intCast(@max(n.size, 0));
-        if (off + len <= stream.len) n.data = stream[off .. off + len];
+        // offset/size come straight from the header info; a negative or
+        // overflowing range must not wrap into an in-bounds slice.
+        if (n.offset < 0 or n.size < 0) continue;
+        const off: usize = @intCast(n.offset);
+        const len: usize = @intCast(n.size);
+        const end = std.math.add(usize, off, len) catch continue;
+        if (end <= stream.len) n.data = stream[off..end];
     }
 
     return .{
@@ -408,10 +425,22 @@ fn lzmaDecompress(allocator: std.mem.Allocator, raw: []const u8, uncompressed_si
             continue;
         };
         defer decomp.deinit();
-        return decomp.reader.readAlloc(allocator, uncompressed_size) catch |e| {
+        const out = decomp.reader.readAlloc(allocator, uncompressed_size) catch |e| {
             last_err = e;
             continue;
         };
+        // `readAlloc` treats the size as a ceiling, so a truncated stream
+        // decodes "successfully" but short. The block table declares the
+        // exact size and `parse` sizes its concatenated buffer from it, so a
+        // short block would leave that buffer's tail uninitialized. Reject
+        // it here, like the `.none` and lz4 branches of `decompressRaw` do,
+        // and let the other framing offset have its turn.
+        if (out.len != uncompressed_size) {
+            allocator.free(out);
+            last_err = error.EndOfStream;
+            continue;
+        }
+        return out;
     }
     return last_err orelse error.DecompressFailed;
 }

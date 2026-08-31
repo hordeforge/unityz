@@ -95,7 +95,7 @@ pub fn parse(
 
     return switch (encoding) {
         .legacy_v2, .legacy_v3, .legacy_standard => parseLegacy(allocator, r, format_version, encoding),
-        .blob, .blob_with_hash => parseBlob(allocator, r, encoding),
+        .blob, .blob_with_hash => parseBlob(allocator, r, format_version, encoding),
     };
 }
 
@@ -155,7 +155,12 @@ fn readLegacyNode(
     return node;
 }
 
-fn parseBlob(allocator: std.mem.Allocator, r: *streams.Reader, encoding: Encoding) ParseError!TypeTree {
+fn parseBlob(
+    allocator: std.mem.Allocator,
+    r: *streams.Reader,
+    format_version: u32,
+    encoding: Encoding,
+) ParseError!TypeTree {
     const node_count = try r.readInt(i32);
     const string_buffer_size = try r.readInt(i32);
     if (node_count < 0 or string_buffer_size < 0) return error.Corrupt;
@@ -194,7 +199,7 @@ fn parseBlob(allocator: std.mem.Allocator, r: *streams.Reader, encoding: Encodin
             node.name = try resolveBlobString(string_buffer, name_off);
         }
     }
-    if (n == 0) return .{ .version = 0, .roots = &.{} };
+    if (n == 0) return .{ .version = format_version, .roots = &.{} };
 
     // Pass 1: validate levels, count children per node, count roots.
     const child_counts = allocator.alloc(usize, n) catch return error.OutOfMemory;
@@ -249,7 +254,7 @@ fn parseBlob(allocator: std.mem.Allocator, r: *streams.Reader, encoding: Encodin
     std.debug.assert(root_pos == root_count);
 
     return .{
-        .version = 0,
+        .version = format_version,
         .roots = roots,
         .string_buffer = string_buffer,
     };

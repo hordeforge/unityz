@@ -435,11 +435,14 @@ fn resolveSidecar(sidecars: []const Sidecar, stream_path: []const u8, offset: u6
 }
 
 /// One hit from a SpriteAtlas lookup: the texture the sprite was packed
-/// into, plus the atlas's textureRect for it (mirrors UnityPy, which crops
-/// the atlas's rect rather than the sprite's own copy).
+/// into, plus the atlas's textureRect, alphaTexture and settingsRaw for it
+/// (mirrors UnityPy, which crops the atlas's rect rather than the sprite's
+/// own copy).
 const AtlasHit = struct {
     texture: unityz.value.PPtr,
     rect: [4]f32,
+    alpha_texture: ?unityz.value.PPtr = null,
+    settings_raw: u32 = 0,
 };
 
 /// Compares two m_RenderDataKey values: `[Hash128, int]` where Hash128 is
@@ -471,12 +474,17 @@ fn atlasEntryHit(entry: unityz.value.Value) ?AtlasHit {
     var hit = AtlasHit{ .texture = undefined, .rect = .{ 0, 0, 0, 0 } };
     for (val.obj) |f| {
         if (f.value == .pptr and std.mem.eql(u8, f.name, "texture")) hit.texture = f.value.pptr;
+        if (f.value == .pptr and std.mem.eql(u8, f.name, "alphaTexture")) hit.alpha_texture = f.value.pptr;
         if (f.value == .obj and std.mem.eql(u8, f.name, "textureRect")) {
             const comps = [_][]const u8{ "x", "y", "width", "height" };
             for (comps, 0..) |c, i| {
                 const cf = unityz.classes.fieldOf(f.value, c) orelse continue;
                 if (cf.asFloat()) |fv| hit.rect[i] = @floatCast(fv);
             }
+        }
+        if (f.value.asInt() != null and std.mem.eql(u8, f.name, "settingsRaw")) {
+            const sr = f.value.asInt().?;
+            hit.settings_raw = @truncate(@as(u64, @bitCast(sr)));
         }
     }
     if (hit.texture.path_id == 0) return null;
@@ -517,6 +525,31 @@ fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.Serial
     }
     return null;
 }
+
+/// FSB5 bank metadata as a JSON document, or null when the data is not a
+/// well-formed FSB5 bank. Beyond UnityPy: its export converts the audio
+/// but never reports loop points or the header fields.
+fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
+    const bank = try unityz.fsb5.parse(arena, audio) orelse return null;
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"version\":", .{});
+    try w.print("{d},\"mode\":{d},\"samples\":[", .{ bank.version, bank.mode });
+    for (bank.samples, 0..) |s, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d}",
+            .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count });
+        if (s.loop_start) |ls| {
+            try w.print(",\"loopStart\":{d},\"loopEnd\":{d}", .{ ls, s.loop_end orelse 0 });
+        }
+        try w.writeByte('}');
+    }
+    try w.writeAll("]}");
+    var list = aw.toArrayList();
+    return try list.toOwnedSlice(arena);
+}
+
 
 fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
@@ -659,6 +692,16 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 else
                     try std.fmt.bufPrint(&name_buf, "audio_{d}.{s}", .{ o.path_id, ext });
                 try extractFile(subdir, name, audio);
+                // FSB5 banks get a metadata sidecar: sample rate, channels,
+                // loop points, and format - UnityPy's export never surfaces
+                // this (it only converts the audio itself).
+                if (std.mem.startsWith(u8, audio, "FSB5")) {
+                    if (try fsb5MetadataJson(arena, audio)) |meta| {
+                        var meta_name_buf: [160]u8 = undefined;
+                        const meta_name = try std.fmt.bufPrint(&meta_name_buf, "{s}.json", .{name});
+                        try extractFile(subdir, meta_name, meta);
+                    }
+                }
                 try stdout.print("extracted {s} ({d} bytes, {s})\n", .{ name, audio.len, ext });
                 extracted += 1;
             },
@@ -693,35 +736,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ name, shd.len });
                 extracted += 1;
             },
-            213 => { // Sprite -> cropped PNG from its texture
+            213 => { // Sprite -> cropped / mesh-rendered PNG
+                const rr = renderSprite(arena, &sf, sidecars, v, o.path_id) orelse continue;
+                const png = unityz.png.encode(arena, rr.w, rr.h, rr.data) catch continue;
                 const sprite = unityz.classes.Sprite.fromValue(v);
-                // A {0,0} PPtr is the null reference: atlas-packed sprites
-                // leave m_RD.texture empty and name the atlas texture instead.
-                const hit = if (sprite.texture) |t| blk: {
-                    if (t.path_id != 0) break :blk AtlasHit{ .texture = t, .rect = sprite.rect };
-                    break :blk (atlasTextureFor(arena, &sf, v, o.path_id) orelse continue);
-                } else (atlasTextureFor(arena, &sf, v, o.path_id) orelse continue);
-                if (hit.texture.file_id != 0) continue; // external file not resolvable here
-                const tex_value = readObjectValue(arena, &sf, hit.texture.path_id) orelse continue;
-                const t = unityz.classes.Texture2D.fromValue(tex_value);
-                if (t.width == 0 or t.height == 0) continue;
-                var pixels: []const u8 = t.image_data;
-                if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
-                    const start: usize = @intCast(sf.data_offset + t.stream.offset);
-                    const end = start + t.stream.size;
-                    if (end <= sf.source.len) pixels = sf.source[start..end];
-                }
-                if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
-                    // streamed from a sibling .resS/.resource node
-                    pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
-                }
-                if (pixels.len == 0) continue;
-                const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch continue;
-                const cropped = unityz.classes.Sprite.spriteRgbaRect(arena, hit.rect, rgba, t.width, t.height) catch continue;
-                // PNG dims must match the crop's floor/ceil rounding, not int(rect)
-                const pw: u32 = @as(u32, @intFromFloat(@ceil(hit.rect[0] + hit.rect[2]))) - @as(u32, @intFromFloat(@floor(hit.rect[0])));
-                const ph: u32 = @as(u32, @intFromFloat(@ceil(hit.rect[1] + hit.rect[3]))) - @as(u32, @intFromFloat(@floor(hit.rect[1])));
-                const png = unityz.png.encode(arena, pw, ph, cropped) catch continue;
                 var name_buf: [160]u8 = undefined;
                 const sprite_name = std.mem.trimEnd(u8, sprite.name, "\x00");
                 const name = if (sprite_name.len != 0)
@@ -729,7 +747,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 else
                     try std.fmt.bufPrint(&name_buf, "sprite_{d}.png", .{o.path_id});
                 try extractFile(subdir, name, png);
-                try stdout.print("extracted {s} ({d}x{d})\n", .{ name, pw, ph });
+                try stdout.print("extracted {s} ({d}x{d})\n", .{ name, rr.w, rr.h });
                 extracted += 1;
             },
             114 => { // MonoBehaviour
@@ -764,7 +782,13 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const qual = if (ms_ns.len != 0)
                     try std.fmt.bufPrint(&qual_buf, "{s}.{s}", .{ ms_ns, ms_cn })
                 else
-                    ms_cn;
+                    try std.fmt.bufPrint(&qual_buf, "{s}", .{ms_cn});
+                // The name comes from the file: keep it one path component
+                // so it cannot steer the output path out of the extract dir.
+                for (qual) |*c| switch (c.*) {
+                    '/', '\\' => c.* = '_',
+                    else => {},
+                };
                 var fname_buf: [192]u8 = undefined;
                 const fname = try std.fmt.bufPrint(&fname_buf, "script_{d}_{s}.bin", .{ o.path_id, if (qual.len != 0) qual else "unnamed" });
                 try extractFile(subdir, fname, payload);
@@ -844,6 +868,239 @@ fn readObjectValue(
         return unityz.object_reader.readObject(arena, &r2, &tree.roots[0]) catch null;
     }
     return null;
+}
+
+/// A decoded RGBA texture plus its dimensions.
+const DecodedTexture = struct { rgba: []const u8, w: u32, h: u32 };
+
+/// Decodes a file-local (file_id 0) Texture2D at `path_id` to RGBA, reading
+/// embedded image data, the in-file stream, or a sibling .resS sidecar.
+fn decodeSpriteTexture(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    sidecars: []const Sidecar,
+    path_id: i64,
+) ?DecodedTexture {
+    const tex_value = readObjectValue(arena, sf, path_id) orelse return null;
+    const t = unityz.classes.Texture2D.fromValue(tex_value);
+    if (t.width == 0 or t.height == 0) return null;
+    var pixels: []const u8 = t.image_data;
+    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
+        const start: usize = @intCast(sf.data_offset + t.stream.offset);
+        const end = start + t.stream.size;
+        if (end <= sf.source.len) pixels = sf.source[start..end];
+    }
+    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
+        pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
+    }
+    if (pixels.len == 0) return null;
+    const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
+    return .{ .rgba = rgba, .w = t.width, .h = t.height };
+}
+
+/// Reads the m_VertexData (channel-packed) style sprite mesh: positions from
+/// channel 0, UV0 from the version-dependent channel, using the same layout
+/// rules as a Mesh object.
+const ChannelMesh = struct { positions: []const [3]f32, uvs: []const [2]f32 };
+
+fn readChannelMesh(
+    arena: std.mem.Allocator,
+    vd: unityz.value.Value,
+    sf: *const unityz.serialized.SerializedFile,
+) ?ChannelMesh {
+    var m = unityz.classes.Mesh{};
+    m.vertex_count = @intCast(unityz.classes.intField(vd, "m_VertexCount") orelse 0);
+    m.vertex_data = unityz.classes.bytesField(vd, "m_DataSize") orelse "";
+    if (unityz.classes.fieldOf(vd, "m_Channels")) |chans| {
+        if (chans == .array) {
+            const n = @min(chans.array.len, m.channels.len);
+            for (chans.array[0..n], 0..) |c, i| {
+                m.channels[i] = .{
+                    .stream = @intCast(unityz.classes.intField(c, "stream") orelse 0),
+                    .offset = @intCast(unityz.classes.intField(c, "offset") orelse 0),
+                    .format = @intCast(unityz.classes.intField(c, "format") orelse 0),
+                    .dimension = @intCast(unityz.classes.intField(c, "dimension") orelse 0),
+                };
+            }
+            m.channel_count = n;
+        }
+    }
+    const pos = m.channel(0) orelse return null;
+    if (pos.format != 0 or pos.dimension < 3) return null;
+    const stride = m.stride() orelse return null;
+    const vcount: usize = m.vertex_count;
+    if (m.vertex_data.len < stride * vcount) return null;
+    const ps = arena.alloc([3]f32, vcount) catch return null;
+    for (0..vcount) |i| {
+        const base = i * stride;
+        ps[i] = .{
+            readF32(m.vertex_data, base + pos.offset, sf.endian),
+            readF32(m.vertex_data, base + pos.offset + 4, sf.endian),
+            readF32(m.vertex_data, base + pos.offset + 8, sf.endian),
+        };
+    }
+    const uv_major = unityMajor(sf.unity_version);
+    const uv = m.channel(if (uv_major >= 2018) 4 else 3);
+    var uvs: []const [2]f32 = &.{};
+    if (uv) |t| {
+        if (t.format == 0 and t.dimension >= 2) {
+            const us = arena.alloc([2]f32, vcount) catch return null;
+            for (0..vcount) |i| {
+                const base = i * stride;
+                us[i] = .{
+                    readF32(m.vertex_data, base + t.offset, sf.endian),
+                    readF32(m.vertex_data, base + t.offset + 4, sf.endian),
+                };
+            }
+            uvs = us;
+        }
+    }
+    return .{ .positions = ps, .uvs = uvs };
+}
+
+/// Reads the sprite triangle index list from the render data's index buffer
+/// (bytes of u16) or one of the integer-array fields Unity writes.
+fn readSpriteTriangles(arena: std.mem.Allocator, rd: unityz.value.Value) ?[]const u32 {
+    if (unityz.classes.bytesField(rd, "m_IndexBuffer")) |buf| {
+        if (buf.len >= 6) {
+            const n = buf.len / 2;
+            const tris = arena.alloc(u32, n) catch return null;
+            for (0..n) |i| tris[i] = std.mem.readInt(u16, buf[i * 2 ..][0..2], .little);
+            return tris;
+        }
+    }
+    for ([_][]const u8{ "m_IndexBuffer", "indices", "triangles" }) |name| {
+        const f = unityz.classes.fieldOf(rd, name) orelse continue;
+        if (f == .array and f.array.len > 0) {
+            const n = f.array.len;
+            const tris = arena.alloc(u32, n) catch return null;
+            for (f.array, 0..) |x, i| tris[i] = @intCast(x.asInt() orelse @as(i64, 0));
+            return tris;
+        }
+    }
+    return null;
+}
+
+/// Reads a Sprite's tight/polygon mesh out of its own m_RD (positions, UVs,
+/// triangle indices), mirroring UnityPy's MeshHandler over SpriteRenderData.
+/// Returns null when the render data has no parseable mesh.
+fn spriteMeshFromValue(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    v: unityz.value.Value,
+) ?unityz.classes.SpriteMesh {
+    const rd = unityz.classes.fieldOf(v, "m_RD") orelse return null;
+    var positions: []const [3]f32 = &.{};
+    var uvs: []const [2]f32 = &.{};
+    if (unityz.classes.fieldOf(rd, "m_VertexData")) |vd| {
+        const cm = readChannelMesh(arena, vd, sf) orelse return null;
+        positions = cm.positions;
+        uvs = cm.uvs;
+    } else if (unityz.classes.fieldOf(rd, "vertices")) |verts| {
+        if (verts == .array and verts.array.len > 0) {
+            const n = verts.array.len;
+            const ps = arena.alloc([3]f32, n) catch return null;
+            const us = arena.alloc([2]f32, n) catch return null;
+            @memset(us, .{ 0, 0 });
+            for (verts.array, 0..) |ev, i| {
+                if (unityz.classes.vec3Field(ev, "pos")) |p| ps[i] = p;
+                if (unityz.classes.fieldOf(ev, "uv")) |uvf| {
+                    if (unityz.classes.floatField(uvf, "x")) |x| us[i][0] = @floatCast(x);
+                    if (unityz.classes.floatField(uvf, "y")) |y| us[i][1] = @floatCast(y);
+                }
+            }
+            positions = ps;
+            uvs = us;
+        }
+    }
+    const triangles = readSpriteTriangles(arena, rd) orelse return null;
+    if (positions.len == 0 or triangles.len == 0) return null;
+    return .{ .positions = positions, .uvs = uvs, .triangles = triangles };
+}
+
+/// The final (vertically flipped) RGBA sprite image and its dimensions.
+const RenderResult = struct { data: []const u8, w: u32, h: u32 };
+
+/// Produces the final flipped RGBA sprite image, following UnityPy's
+/// get_image_from_sprite: resolve the texture (and alpha texture), crop the
+/// rect, apply the packed rotation, then either mask the tight polygon or
+/// render the mesh; rows are always flipped last.
+fn renderSprite(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    sidecars: []const Sidecar,
+    v: unityz.value.Value,
+    sprite_path_id: i64,
+) ?RenderResult {
+    const sprite = unityz.classes.Sprite.fromValue(v);
+    // A {0,0} PPtr is the null reference: atlas-packed sprites leave
+    // m_RD.texture empty and name the atlas texture instead.
+    const hit = if (sprite.texture) |t| blk: {
+        if (t.path_id != 0) break :blk AtlasHit{
+            .texture = t, .rect = sprite.rect,
+            .alpha_texture = sprite.alpha_texture,
+            .settings_raw = sprite.settings_raw,
+        };
+        break :blk (atlasTextureFor(arena, sf, v, sprite_path_id) orelse return null);
+    } else (atlasTextureFor(arena, sf, v, sprite_path_id) orelse return null);
+    if (hit.texture.file_id != 0) return null; // external file not resolvable here
+
+    const tex = decodeSpriteTexture(arena, sf, sidecars, hit.texture.path_id) orelse return null;
+    var rgba: []const u8 = tex.rgba;
+    // Merge a separate alpha texture if present (packed sprites).
+    if (hit.alpha_texture) |at| {
+        if (at.path_id != 0 and at.file_id == 0) {
+            if (decodeSpriteTexture(arena, sf, sidecars, at.path_id)) |alpha_tex| {
+                if (alpha_tex.w == tex.w and alpha_tex.h == tex.h) {
+                    rgba = unityz.classes.mergeAlphaTexture(arena, rgba, alpha_tex.rgba, tex.w, tex.h) catch return null;
+                }
+            }
+        }
+    }
+
+    // Crop the rect (top-origin), then apply the packed rotation, matching
+    // UnityPy's order.
+    var crop = unityz.classes.Sprite.cropRectNoFlip(arena, hit.rect, rgba, tex.w, tex.h) catch return null;
+    if (sprite.isPacked()) {
+        const rot = unityz.classes.rotateSprite(arena, crop.data, @intCast(crop.w), @intCast(crop.h), sprite.packingRotation()) catch return null;
+        crop = .{ .data = rot.data, .w = rot.w, .h = rot.h };
+    }
+
+    var data: []const u8 = crop.data;
+    var w: u32 = @intCast(crop.w);
+    var h: u32 = @intCast(crop.h);
+
+    if (sprite.isTight()) {
+        // Fall back to the plain crop when the mesh is unparseable, so a
+        // tight sprite at least emits something rather than being dropped.
+        if (spriteMeshFromValue(arena, sf, v)) |mesh| {
+            var has_nonzero_uv = false;
+            if (mesh.uvs.len == mesh.positions.len and mesh.uvs.len > 0) {
+                for (mesh.uvs) |u| {
+                    if (u[0] != 0 or u[1] != 0) {
+                        has_nonzero_uv = true;
+                        break;
+                    }
+                }
+            }
+            if (has_nonzero_uv) {
+                // texture-mapped mesh produces its own tightly-cropped image
+                const rendered = unityz.classes.renderSpriteMesh(arena, mesh, sprite.pixels_to_units, rgba, tex.w, tex.h) catch return null;
+                data = rendered.data;
+                w = rendered.w;
+                h = rendered.h;
+            } else {
+                // polygon mask applied to the (rotated) crop
+                const masked = unityz.classes.maskSprite(arena, mesh, sprite.pixels_to_units, crop.data, @intCast(crop.w), @intCast(crop.h)) catch return null;
+                data = masked;
+                w = @intCast(crop.w);
+                h = @intCast(crop.h);
+            }
+        }
+    }
+
+    const flipped = unityz.texture.flipVertical(arena, data, w, h) catch return null;
+    return .{ .data = flipped, .w = w, .h = h };
 }
 
 /// Little-endian f32 at `data[pos..pos+4]` (the vertex data is packed in
@@ -937,7 +1194,14 @@ fn writeMeshObj(
 
                 const index_count = unityz.classes.intField(sub, "indexCount") orelse 0;
                 const start = index_cursor;
-                const end = start + @as(usize, @intCast(@max(index_count, 0)));
+                // `indexCount` is file-supplied and need not match the index
+                // buffer: clamp it to the slots that actually exist, or
+                // `start + count` overflows usize (and the face loop spins
+                // over billions of slots writeFace would skip anyway).
+                const index_slots = mesh.index_buffer.len / idx_bytes;
+                if (start >= index_slots) break;
+                const want: usize = @intCast(@max(index_count, 0));
+                const end = start + @min(want, index_slots - start);
                 index_cursor = end;
                 const per_face: usize = switch (topology) {
                     0 => 3, // triangles
@@ -1588,11 +1852,13 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
             return;
         },
     }
+    // The exit code is part of the contract in both modes: `--json` is the
+    // scripting mode, so it must fail the same way the text mode does.
+    if (report.failed != 0) verify_failed_flag = true;
     if (json) {
         try emitVerifyReport(json, &report, stdout);
     } else if (report.failed != 0) {
         try stdout.print("{d} object(s) failed verification\n", .{report.failed});
-        verify_failed_flag = true;
     } else {
         try stdout.print("all objects verified\n", .{});
     }
@@ -3545,17 +3811,37 @@ fn setFieldPath(v: unityz.value.Value, segs: []const PathSeg, i: usize, new_valu
     return replaceArrayIndex(arr, idx, new_child);
 }
 
+/// Nesting limit for `parseJsonLiteral`. The parser recurses once per
+/// `[`/`{`, so without a bound a deeply nested literal overflows the stack
+/// instead of reporting a bad patch. Mirrors `typetree.max_depth`.
+const max_json_depth: u32 = 512;
+
 /// Minimal JSON literal parser: ints, floats, bools, null, quoted strings,
 /// and nested arrays/objects. Enough for `edit`.
 fn parseJsonLiteral(text: []const u8) !unityz.value.Value {
     var pos: usize = 0;
-    const v = try parseJsonValue(text, &pos);
-    while (pos < text.len and (text[pos] == ' ' or text[pos] == '\t' or text[pos] == '\n')) pos += 1;
+    const v = try parseJsonValue(text, &pos, 0);
+    skipWs(text, &pos);
     if (pos != text.len) return error.TrailingInput;
     return v;
 }
 
-fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
+/// Reads the four hex digits of a `\uXXXX` escape. `pos` points at the `u`
+/// on entry and at the last hex digit on return, so the caller's single
+/// `pos += 1` steps past the whole escape.
+fn readHex4(text: []const u8, pos: *usize) !u16 {
+    if (pos.* + 5 > text.len) return error.BadEscape;
+    var v: u16 = 0;
+    for (text[pos.* + 1 ..][0..4]) |ch| {
+        const d = std.fmt.charToDigit(ch, 16) catch return error.BadEscape;
+        v = (v << 4) | d;
+    }
+    pos.* += 4;
+    return v;
+}
+
+fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value {
+    if (depth > max_json_depth) return error.TooDeep;
     skipWs(text, pos);
     if (pos.* >= text.len) return error.UnexpectedEnd;
     const c = text[pos.*];
@@ -3567,7 +3853,38 @@ fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
             if (text[pos.*] == '\\') {
                 pos.* += 1;
                 if (pos.* >= text.len) return error.BadEscape;
-                try out.append(std.heap.page_allocator, text[pos.*]);
+                // Decode the escape rather than keeping the escaped byte:
+                // `value.jsonString` writes \n/\r/\t and \uXXXX for the C0
+                // controls (Unity strings carry trailing NULs), so an
+                // `extract --json` export fed back through `edit --patch`
+                // has to decode them to round-trip byte-exactly.
+                switch (text[pos.*]) {
+                    '"' => try out.append(std.heap.page_allocator, '"'),
+                    '\\' => try out.append(std.heap.page_allocator, '\\'),
+                    '/' => try out.append(std.heap.page_allocator, '/'),
+                    'b' => try out.append(std.heap.page_allocator, 0x08),
+                    'f' => try out.append(std.heap.page_allocator, 0x0c),
+                    'n' => try out.append(std.heap.page_allocator, '\n'),
+                    'r' => try out.append(std.heap.page_allocator, '\r'),
+                    't' => try out.append(std.heap.page_allocator, '\t'),
+                    'u' => {
+                        var cp: u21 = try readHex4(text, pos);
+                        if (cp >= 0xd800 and cp <= 0xdbff) {
+                            // high surrogate: pair it with the low one
+                            if (pos.* + 2 >= text.len or text[pos.* + 1] != '\\' or text[pos.* + 2] != 'u') return error.BadEscape;
+                            pos.* += 2;
+                            const lo: u21 = try readHex4(text, pos);
+                            if (lo < 0xdc00 or lo > 0xdfff) return error.BadEscape;
+                            cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                        } else if (cp >= 0xdc00 and cp <= 0xdfff) {
+                            return error.BadEscape;
+                        }
+                        var buf: [4]u8 = undefined;
+                        const n = std.unicode.utf8Encode(cp, &buf) catch return error.BadEscape;
+                        try out.appendSlice(std.heap.page_allocator, buf[0..n]);
+                    },
+                    else => return error.BadEscape,
+                }
             } else {
                 try out.append(std.heap.page_allocator, text[pos.*]);
             }
@@ -3587,7 +3904,7 @@ fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
             return .{ .array = try list.toOwnedSlice(std.heap.page_allocator) };
         }
         while (true) {
-            try list.append(std.heap.page_allocator, try parseJsonValue(text, pos));
+            try list.append(std.heap.page_allocator, try parseJsonValue(text, pos, depth + 1));
             skipWs(text, pos);
             if (pos.* >= text.len) return error.UnterminatedArray;
             if (text[pos.*] == ',') {
@@ -3614,11 +3931,11 @@ fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
         while (true) {
             skipWs(text, pos);
             if (pos.* >= text.len or text[pos.*] != '"') return error.BadObject;
-            const key = try parseJsonValue(text, pos);
+            const key = try parseJsonValue(text, pos, depth + 1);
             skipWs(text, pos);
             if (pos.* >= text.len or text[pos.*] != ':') return error.BadObject;
             pos.* += 1;
-            const val = try parseJsonValue(text, pos);
+            const val = try parseJsonValue(text, pos, depth + 1);
             try list.append(std.heap.page_allocator, .{ .name = key.string, .value = val });
             skipWs(text, pos);
             if (pos.* >= text.len) return error.UnterminatedObject;
@@ -3638,7 +3955,7 @@ fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
     const start = pos.*;
     while (pos.* < text.len) : (pos.* += 1) {
         const ch = text[pos.*];
-        if (ch == ',' or ch == ']' or ch == '}' or ch == ' ' or ch == '\t' or ch == '\n') break;
+        if (ch == ',' or ch == ']' or ch == '}' or ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') break;
     }
     const token = text[start..pos.*];
     if (std.mem.eql(u8, token, "true")) return .{ .bool = true };
@@ -3653,7 +3970,7 @@ fn parseJsonValue(text: []const u8, pos: *usize) !unityz.value.Value {
 fn skipWs(text: []const u8, pos: *usize) void {
     while (pos.* < text.len) : (pos.* += 1) {
         const c = text[pos.*];
-        if (c != ' ' and c != '\t' and c != '\n') break;
+        if (c != ' ' and c != '\t' and c != '\n' and c != '\r') break;
     }
 }
 

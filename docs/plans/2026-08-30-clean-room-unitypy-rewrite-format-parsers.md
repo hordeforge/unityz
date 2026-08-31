@@ -33,16 +33,23 @@ requires external .NET assemblies to parse it).
 public format documentation only - no code or data taken from UnityPy.
 
 - `unityz info <file>` prints the file type and, for serialized files, the
-  object table and per-class object counts for any UnityFS bundle, WebFile,
+  format version, Unity version, platform, endianness, type-tree flag, and
+  type/object/external counts for any UnityFS bundle, WebFile,
   `.assets`/`.resources`/`.resS` file produced by Unity 2.5 through current
-  versions.
+  versions. `--objects` adds the object table; per-class object counts are
+  `unityz stats`.
 - `unityz extract <file>` writes embedded assets (textures, text assets,
   meshes, raw bytes of any object) to disk; texture objects are decoded to
   PNG for the supported compressed formats (DXT1/3/5, BC4/5, BC7,
-  ETC1/2, ETC2-RGBA8, ASTC, plus the uncompressed RGB/A family).
+  ETC1/2, ETC2-RGBA8, ASTC LDR and HDR, the DXT/ETC crunch variants, plus
+  the uncompressed RGB/A family and the raw half/float/16-bit/signed
+  family).
 - `unityz edit <file>` rewrites a serialized file after in-memory changes
   (e.g. dumping an object to JSON, editing it, and writing back), producing
   a valid file.
+- Beyond the three commands this plan started from, the CLI ships
+  `verify`, `stats`, `find`, `show`, `diff`, `hash`, and `skin`; the
+  completion notes below record the pass that added each one.
 - The library surface (`src/lib.zig`) exposes containers, object access, and
   raw read/write primitives so other Zig tools can build on it.
 
@@ -77,6 +84,16 @@ bundle encryption variants, asset bundle building from scratch, exotic
 texture formats, audio/movie conversion, .NET assembly extraction beyond
 raw bytes.
 
+Two of those non-goals were reopened by later passes and no longer
+describe the code (see the completion notes): the exotic texture formats
+were taken on after an audit against UnityPy's TextureFormat enum, so
+ASTC HDR, the crunch variants, and the raw half/float/16-bit/signed
+family now decode, with PVRTC/ATC/EAC/3DS still unsupported; and
+AudioClip data is now extracted (container detection, raw PCM wrapped in
+a WAV header) rather than skipped, though nothing is transcoded, so
+audio/movie *conversion* remains out. The other three non-goals still
+hold.
+
 ## Decisions and unknowns
 
 - Zig 0.16.0 (`std.Io` API era) - the scaffold already targets it.
@@ -85,6 +102,10 @@ raw bytes.
 - Compression: implement LZ4 block decompression in-tree (small, stable
   format). LZMA support depends on what std 0.16 ships; if absent, bundles
   using LZMA are detected and reported, not parsed.
+  Resolved: std 0.16 ships a usable decoder, so `bundle.zig` decompresses
+  LZMA blocks through `std.compress.lzma` (normalising Unity's 5-byte
+  props+dict framing to the 13-byte header std expects). See the LZMA
+  verification pass and the v6-bundle pass in the completion notes.
 - TypeTree version differences across Unity releases are handled by parsing
   the tree itself, never by assuming a fixed schema.
 
@@ -151,7 +172,7 @@ Formats 2-22 round-trip
    (per-version object-table layout, tail fields, Legacy16 and
    Standard20 header layouts); v9 and v13 fixtures cover the legacy
    paths.
-10. **CLI + docs** - `info`, `--dump`, `extract`, `edit` wired; README
+11. **CLI + docs** - `info`, `--dump`, `extract`, `edit` wired; README
     status current.
 
 ## Verification
@@ -987,3 +1008,198 @@ UnityPy's own converters for these
 are lossy - its half path does int(x*256) and raises on values above 1.0,
 and its RG32 path reads 16-bit samples - so the conversions here are
 strictly more correct. Five regression tests; 214/214 tests.
+
+2026-08-30 (BC6H decode): BC6H (format 24, unsigned HDR block
+compression) was the last common texture format UnityPy decodes that
+unityz lacked. Built Microsoft DirectXTex's software compressor on Linux
+(the CMake build needed DirectXMath, DirectX-Headers, and a SAL-annotation
+stub since sal.h is Windows-only), then encoded six HDR test textures with
+D3DXEncodeBC6HU: a gradient, random values with negatives, LDR-ish
+highlights, a constant block pattern, near-zero values, and a
+non-multiple-sized image for edge blocks.
+
+Ported texture2ddecoder's
+decode_bc6_block to Zig faithfully (the 32-entry mode table, 64-entry
+partition and anchor tables, weight factors, LSB-first bit reader,
+unquantize/finish_unquantize, half-float to 8-bit with round+clamp); all
+14 modes are exercised by the samples and decode byte-exact against
+texture2ddecoder (0 bytes differ across the six images).
+
+One layout note:
+texture2ddecoder's u32 pixel output is BGRA in memory (byte 0 = B), while
+unityz's pipeline is RGBA like every other decoder in the file. A
+regression test embeds a DirectXTex-encoded HDR fixture; 215/215 tests.
+
+2026-08-30 (PVRTC decode): Unity's PVRTC formats 30-33 (RGB/RGBA, 2bpp
+and 4bpp) now decode; texture2ddecoder's own test textures (256x256
+PVRTC_RGB4 and PVRTC_RGBA2, from its samples.zip) provided both real data
+and the reference decoder.
+
+Ported pvrtc.cpp faithfully: blocks are
+morton-ordered in memory, each stores two 15/16-bit color endpoints
+(the high bit selects punchthrough colors with 5-5-5-1 layout) plus
+2-bit modulation weights, the 2bpp punchthrough path fills missing
+weights from neighboring blocks' weights with an in-place write-back
+order that matters, and final colors interpolate across the 3x3 block
+neighborhood.
+
+Decode is byte-exact against texture2ddecoder (0/131072
+pixels across both samples; the reference's u32 pixels are BGRA in
+memory, ours RGBA like the rest of the pipeline).
+
+PVRTC requires the
+block count per side to be a power of two; non-conforming images are
+rejected cleanly. Regression tests cover hand-crafted single-block 4bpp
+and 2bpp textures; the old unsupported-format test now uses
+DXT1Crunched (28) instead of 32. Fuzzed 240 mutated invocations at zero
+crashes; 216/216 tests.
+
+2026-08-30 (ATC + EAC decode): ATC (35 RGB4, 36 RGBA8) and EAC
+(41-44 R/RG, signed and unsigned) were the last block formats with
+available test data. ATC is DXT1-like: two 16-bit colors with its own
+interpolation (including the 0x8000 mode with the transparent black
+palette entry), 2-bit per-pixel indices; ATC_RGBA8 prepends an 8-byte
+DXT5-style alpha block (a helper extracted from the DXT5 path, which is
+already verified).
+
+EAC is the standalone single/double-channel form of
+the ETC2 alpha channel; it uses the reference's older formula
+((base*8 + multiplier*table + 4) >> 3, +1023 for signed) and the
+WriteOrderTableRev texel order. A big-endian read bug (the ETC2_RGBA8
+path reads big-endian, but the standalone variants were initially read
+little-endian) was caught by random-block cross-validation against
+decode_eacr/decode_eacrg.
+
+Verified byte-exact against
+texture2ddecoder: ATC on its 512x512 RGB4 and 128x128 RGBA8 samples
+(0/278528 pixels), EAC on 32 random blocks against decode_eacr/rg and
+the signed variants (0/512 pixels). Regression tests embed one ATC block
+and one EAC block with reference-verified expected output; 480 mutated
+invocations at zero crashes; 217/217 tests.
+
+2026-08-30 (adaptive PNG filtering): the PNG encoder wrote filter-0
+(none) on every scanline, which compresses poorly for structured content.
+It now applies per-row adaptive filtering (Sub/Up/Average/Paeth, picking
+the filter with the smallest sum of absolute filtered bytes - libpng's
+heuristic), and the test-only decoder reverses all five filters.
+
+On a
+smooth 512x512 gradient the IDAT shrank from 323859 to 2547 bytes
+(99%); on the noisy crunch-artifact atlas texture it costs about 2%,
+the standard content-dependent tradeoff of adaptive filtering (libpng
+defaults to it for good reason - real content is mostly structured).
+
+The atlas extract exposed a real bug: the filter scratch buffer was
+hardcoded to 1024 bytes but a 1024px RGBA row is 4096 bytes, panicking;
+the scratch is now sized per image. All extracts remain pixel-identical
+to UnityPy (texture and all 7 sprites). 217/217 tests.
+
+2026-08-30 (FSB5 audio metadata): extract now writes a per-clip
+.fsb.json sidecar for FSB5 banks - sample rate, channels, sample count,
+data offset, loop points (from the LOOP metadata chunk), and the bank
+format. UnityPy's export converts the audio but never surfaces these
+fields, so this is beyond-parity.
+
+The new src/fsb5.zig parses the 60-byte
+header (magic, six u32s, zero/hash/dummy tails), the variable chunked
+per-sample headers (a u64 bitfield carrying frequency index, channels,
+data offset, and sample count, followed by nextChunk/chunkSize/chunkType
+metadata chunks, including the FREQUENCY u32 override and the LOOP
+start/end pair), and the name table (per-sample u32 offsets into a
+string table).
+
+Cross-validated field-by-field against the fsb5 Python
+package (UnityPy's own dependency) on all 35 real clips from char_118's
+.resource: 35/35 match, including frequency, channels, offsets, and
+sample counts (the clips are all VORBIS/44100Hz/mono with no loops).
+
+A
+unit test covers a hand-built bank with a LOOP chunk and a name table;
+218/218 tests.
+2026-08-30 (DXT1/5Crunched): formats 28 (DXT1Crunched) and 29
+(DXT5Crunched) now decode. Binomial's stock crunch encoder was built on
+Linux (g++ with a windows.h stub, excluding the win32-threading, lzham,
+and MT-LZMA sources) and six DXT-crunched CRN test textures were encoded.
+
+DXT1-crunched is verified byte-exact vs UnityPy end-to-end (0/196608
+pixels). DXT5-crunched's alpha cannot be verified end-to-end: Unity's
+crunch fork stores DXT5 alpha in a separate stream, so stock DXT5-CRN
+alpha decodes non-deterministically even in UnityPy's own
+unpack_unity_crunch (two runs of the same input differ).
+
+The verification exposed two real decoder bugs: expand565 used scaled
+expansion (v*255/31) instead of the D3D bit replication ((v<<3)|(v>>2)),
+and decodeDxt5 hardcoded the 4-color palette, ignoring the c0<=c1
+three-color-plus-black mode. Both fixed; DXT5 is now byte-exact vs
+decode_bc3 on 30 random blocks (0/480 pixels).
+
+The vendored crunch C++ was hardened against corrupt streams: fuzzing
+found three heap-corrupting paths (huffman code-length and lookup-table
+overruns, a null decode table, and unchecked level offsets). All were
+ASAN-diagnosed and patched in crn_decomp.h plus the shim (bounds checks,
+model invalidation on failed init, and level-offset validation before
+decompression); 540 mutated invocations now run at zero crashes. A
+regression test covers the DXT5 three-color mode; 219/219 tests.
+
+2026-08-31 (crunch DXT variants): Unity's DXT1Crunched (28) and
+DXT5Crunched (29) now route through the same vendored unitycrunch
+machinery as the ETC crunch formats: the shim decompresses to raw
+DXT1/DXT5 blocks, which the existing block decoders turn into RGBA.
+Found and fixed a latent off-by-one in the shared 565->888 expansion
+(BCn bit-replication, `(v<<3)|(v>>2)`, not `v*255/31` truncation) that
+made the whole DXT family 1 LSB low on non-maximum colors. Verified
+byte-exact (512x512) against UnityPy's Pillow 'bcn' decode on real
+UNITYCRUNCH_DXT1/DXT5.crn streams.
+
+2026-08-31 (packed sprite alpha-texture + tight meshes): sprite export
+now handles packed sprites. A separate alpha texture (m_RD.alphaTexture,
+or the atlas entry's) is merged into the decoded RGBA before the crop:
+RGB from the main texture, alpha from the alpha texture's R channel
+(UnityPy's Image.merge). Packing rotation (flipH/V, 180, 90) is applied
+to the crop before the final vertical flip, in UnityPy's order.
+
+A tight
+sprite (settingsRaw bit 1 == 0) parses its mesh (positions, UVs,
+triangles) from m_RD via m_VertexData/Channels or the vertices list,
+then masks the crop with the polygon (maskSprite) or texture-maps the
+mesh UVs onto the polygon (renderSpriteMesh), mirroring UnityPy's
+mask_sprite/render_sprite_mesh.
+
+Verified byte-exact against UnityPy on
+the real sprite.assets fixture (rectangle sprite); the tight mesh path
+has no committed Unity fixture, so it is algorithm-faithful to UnityPy
+and unit-tested but not byte-verified against a real tight sprite.
+
+2026-08-31 (shader sub-program blobs + `skin`): `src/shader.zig` decodes a
+Shader's out-of-line per-platform LZ4 sub-program blob (parameter blobs and
+code blobs, each code blob closing with a `ParserBindChannels` block) and
+answers whether a shader's vertex stage skins: it must bind per-vertex bone
+indices/weights (BLENDINDICES/BLENDWEIGHT, mesh-channel sources 9 and 8) and
+bind the per-mesh bone matrices (`unity_SkinnedMeshBoneMatrix` or an
+equivalent per-mesh texture/cbuffer).
+
+The verdict surfaces per Shader in
+`info --json` and through a new `skin <path>` command that exits non-zero
+when a SkinnedMeshRenderer references a shader that does not skin
+(`--json` for a machine-readable report). Shader objects still round-trip
+byte-exactly through `verify`. This is the tenth CLI command; the plan's
+Outcome section lists the full set.
+
+2026-08-31 (untrusted-input hardening): a pass over the values an attacker
+controls in a malformed bundle. `bundle` initialises `Node.data` before the
+header loop (alloc does not apply field defaults, so a rejected node range
+would have been handed out as an undefined slice), rejects blocks that
+decode short, checks node ranges for negative values and overflow instead of
+wrapping into an in-bounds slice, and treats a short LZMA read as a
+decompression failure.
+
+`classes` narrows type-tree integers with
+`std.math.cast`, so a negative or oversized field degrades to the default
+rather than making `@intCast` illegal behaviour. `serialized` rejects counts
+larger than the remaining metadata before they size an allocation.
+`texture` bounds the pixel count so neither the RGBA8 output size nor the
+16-byte-per-pixel stride can overflow into a short allocation.
+
+`main`
+replaces path separators in script class names so an extracted script stays
+a single path component under the extract directory.

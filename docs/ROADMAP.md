@@ -9,11 +9,9 @@ Nothing in flight.
 
 ## Planned
 
-- Texture block formats still missing: BC6H (HDR), PVRTC, ATC, EAC,
-  ETC-RGB4/RGBA8-3DS, and the DXT1/5Crunched crunch variants (28/29).
-  UnityPy decodes all of these; no real asset with them has been located
-  to verify against (the DXT-crunched ones need the same vendored
-  crunch machinery as formats 64/65), so they are documented as
+- Texture block formats still missing: the ETC-RGB4/RGBA8-3DS variants.
+  UnityPy decodes these; no real asset with them has been located to
+  verify against, so they are documented as
   unsupported rather than half-tested.
 - Parsing the managed .NET object graph inside `m_Script` payloads. Shared
   with UnityPy itself (it needs external .NET assemblies); unityz exposes
@@ -25,3 +23,15 @@ Nothing in flight.
   reserialize/edit, and extraction. See
   [the plan](plans/2026-08-30-clean-room-unitypy-rewrite-format-parsers.md),
   which is marked Complete with per-pass completion notes.
+- Crunch DXT variants decode: DXT1Crunched (28) and DXT5Crunched (29)
+  route through the same vendored unitycrunch machinery as the ETC crunch
+  formats, worth fixing a latent 565→888 truncation so the whole DXT
+  family matches UnityPy byte-exact.
+- Shader sub-program blobs parse: the per-platform LZ4 blob decodes to its
+  parameter and code records, and a shader's vertex stage is reported as
+  skinning or not (`info --json`, plus a `skin` command that exits non-zero
+  when a SkinnedMeshRenderer references a shader that does not skin).
+- Sprite export covers packed sprites: separate alpha textures merge in
+  (RGB from the main texture, alpha from the alpha texture's R channel),
+  packing rotation is applied, and tight/polygon sprites render through
+  their mesh (polygon mask or UV texture-map), matching UnityPy.
