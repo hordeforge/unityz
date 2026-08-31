@@ -1823,3 +1823,10 @@ configs - alongside the raw mode number. Verified on char_118: every
 clip's sidecar reports codec Vorbis / mode 15 with a setupCrc
 matching the reconstruction table (3605052372 is the same FMOD
 config as Fmod5Sharp's short/long_vorbis banks). 289/289 tests.
+
+A direct fuzz of the audio decode path (PCM8/16/24/32/FLOAT, GCADPCM,
+IMA) - random data, sample counts, and channel counts per iteration,
+150,000 iterations across 3 seeds - found zero crashes; the per-mode
+bounds checks (data length vs sample count x channels, coefficient
+array size, block framing) all degrade to errors. The ROADMAP's
+FSB5 line now also records the Vorbis-to-Ogg remux. 289/289 tests.
