@@ -1026,28 +1026,31 @@ fn renderSprite(
     var h: u32 = @intCast(crop.h);
 
     if (sprite.isTight()) {
-        const mesh = spriteMeshFromValue(arena, sf, v) orelse return null; // no mesh -> cannot render tight
-        var has_nonzero_uv = false;
-        if (mesh.uvs.len == mesh.positions.len and mesh.uvs.len > 0) {
-            for (mesh.uvs) |u| {
-                if (u[0] != 0 or u[1] != 0) {
-                    has_nonzero_uv = true;
-                    break;
+        // Fall back to the plain crop when the mesh is unparseable, so a
+        // tight sprite at least emits something rather than being dropped.
+        if (spriteMeshFromValue(arena, sf, v)) |mesh| {
+            var has_nonzero_uv = false;
+            if (mesh.uvs.len == mesh.positions.len and mesh.uvs.len > 0) {
+                for (mesh.uvs) |u| {
+                    if (u[0] != 0 or u[1] != 0) {
+                        has_nonzero_uv = true;
+                        break;
+                    }
                 }
             }
-        }
-        if (has_nonzero_uv) {
-            // texture-mapped mesh produces its own tightly-cropped image
-            const rendered = unityz.classes.renderSpriteMesh(arena, mesh, sprite.pixels_to_units, rgba, tex.w, tex.h) catch return null;
-            data = rendered.data;
-            w = rendered.w;
-            h = rendered.h;
-        } else {
-            // polygon mask applied to the (rotated) crop
-            const masked = unityz.classes.maskSprite(arena, mesh, sprite.pixels_to_units, crop.data, @intCast(crop.w), @intCast(crop.h)) catch return null;
-            data = masked;
-            w = @intCast(crop.w);
-            h = @intCast(crop.h);
+            if (has_nonzero_uv) {
+                // texture-mapped mesh produces its own tightly-cropped image
+                const rendered = unityz.classes.renderSpriteMesh(arena, mesh, sprite.pixels_to_units, rgba, tex.w, tex.h) catch return null;
+                data = rendered.data;
+                w = rendered.w;
+                h = rendered.h;
+            } else {
+                // polygon mask applied to the (rotated) crop
+                const masked = unityz.classes.maskSprite(arena, mesh, sprite.pixels_to_units, crop.data, @intCast(crop.w), @intCast(crop.h)) catch return null;
+                data = masked;
+                w = @intCast(crop.w);
+                h = @intCast(crop.h);
+            }
         }
     }
 
