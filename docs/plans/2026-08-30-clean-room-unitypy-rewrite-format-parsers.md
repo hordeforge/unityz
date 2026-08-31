@@ -1605,3 +1605,23 @@ reported 0 diffs even though extract proved the renders differ (the
 mutated atlas's WaterTowerModern3). Fixed with per-file caches; the
 sprite pixel diff now reports the correct 14 pixels again in text, JSON
 and directory modes. 279/279 tests.
+
+2026-08-31 (FSB5 PCMFLOAT precision + IMA stereo validation): the
+post-merge regression battery over the shipped FSB5 decode found one
+real off-by-one: mode-5 PCMFLOAT scaled in f32
+(`@intFromFloat(clamped * 32767.0)`), and the rounded product could
+truncate 1 LSB off the reference, which computes in f64 (Python
+floats). Decode now promotes to f64 before truncation; a unit test
+pins a boundary float (0x3f731e23: f32 math truncates to 31121, exact
+math to 31120).
+
+The same battery also settled the stereo IMA
+layout question: FSB5 banks interleave 4-byte per-channel headers then
+4-bytes-per-channel nibbles (vgmstream decode_xbox_ima), matching the
+decoder; the earlier "stereo FAIL" was a generator bug (contiguous
+blocks) and the ffmpeg ±2 LSB gap is ffmpeg's own
+`((2*delta+1)*step)>>3` multiplication form plus big-endian XBOX WAV
+headers, both reproduced exactly in the harness. All seven checks now
+pass: PCM16/8/FLOAT bit-exact vs fsb5.py, IMA mono+stereo bit-exact vs
+an independent vgmstream-formula reference and vs ffmpeg. 280/280
+tests.

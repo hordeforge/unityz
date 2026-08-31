@@ -98,7 +98,10 @@ pub fn decodeSample(allocator: std.mem.Allocator, raw: []const u8, data_start: u
                 const f = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
                 const v: f32 = @bitCast(f);
                 const clamped = std.math.clamp(v, -1.0, 1.0);
-                out[i] = @intFromFloat(clamped * 32767.0);
+                // Compute in f64: doing the multiply in f32 rounds the
+                // product, and the resulting 1-LSB error is visible after
+                // truncation to i16 (e.g. 0.9929... vs 0.9928...).
+                out[i] = @intFromFloat(@as(f64, clamped) * 32767.0);
             }
         },
         7 => return decodeXboxIma(out, data, channels, sample.sample_count),
@@ -165,6 +168,18 @@ test "PCM16 decode" {
     const pcm = try decodeSample(a, &raw, 0, s, 2);
     defer a.free(pcm);
     try std.testing.expectEqualSlices(i16, &.{ 0, 0x1234, -0x5433, -0x7fff }, pcm);
+}
+
+test "PCMFLOAT decode promotes to f64 before truncation" {
+    const a = std.testing.allocator;
+    // 0x3f731e23 as f32; f32(f32*f32(32767)) truncates to 31121, but the
+    // exact (f64) product truncates to 31120 — the reference fsb5.py
+    // computes in f64, so we must too.
+    const raw = [_]u8{ 0xe6, 0x23, 0x73, 0x3f };
+    const s = fsb5.Sample{ .data_offset = 0, .sample_count = 1, .channels = 1, .frequency = 8000 };
+    const pcm = try decodeSample(a, &raw, 0, s, 5);
+    defer a.free(pcm);
+    try std.testing.expectEqual(@as(i16, 31120), pcm[0]);
 }
 
 test "IMA decode matches a hand-computed block" {
