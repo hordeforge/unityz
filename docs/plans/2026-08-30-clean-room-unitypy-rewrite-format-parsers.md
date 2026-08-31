@@ -1522,3 +1522,12 @@ names). Verified on the real shader: name "Shamway/Unlit", 1 subshader
 at LOD 100 with a single pass (type 0), all matching the raw tree, and
 the empty top-level m_Name agrees with UnityPy's typed read. 277/277
 tests.
+
+2026-08-31 (diff --fields): `diff` gained a `--fields` pass that decodes
+both value trees of each changed object and reports the exact fields
+that differ, with dotted/indexed paths (m_LocalPosition.y,
+m_Children[0]) and both values, capped at 10 per object. Verified
+end-to-end on the real scene bundle: editing a Transform's
+m_LocalPosition.y reports `m_LocalPosition.y (0.6 -> 1.25)`, and
+editing m_Children[0].m_PathID reports the PPtr change - both edits
+round-trip clean under `edit --verify` (73 objects). 277/277 tests.

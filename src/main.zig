@@ -3476,6 +3476,153 @@ fn findAudioStreamInSerialized(arena: std.mem.Allocator, bytes: []const u8, path
     return null;
 }
 
+/// `diff --fields`: reports the exact fields that changed inside a
+/// changed object, by decoding both value trees and walking them. Field
+/// paths look like `m_LocalPosition.x` or `m_Children[2]`.
+fn diffObjectFields(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !void {
+    const va = try findObjectValue(arena, a_bytes, fa);
+    const vb = try findObjectValue(arena, b_bytes, fa);
+    if (va == null or vb == null) return;
+    var path_buf: [256]u8 = undefined;
+    var reported: usize = 0;
+    const cname = className(fa.class_id) orelse "Class";
+    try stdout.print("  fields: object {d} ({s}):\n", .{ fa.path_id, cname });
+    try diffValueTree(va.?, vb.?, &path_buf, 0, &reported, stdout);
+}
+
+/// Recursive value-tree comparison; `buf[0..len]` is the current field
+/// path. Reports at most 10 differing leaves.
+fn diffValueTree(a: unityz.value.Value, b: unityz.value.Value, buf: *[256]u8, len: usize, reported: *usize, stdout: *Io.Writer) !void {
+    if (reported.* >= 10) return;
+    const path = buf[0..len];
+    switch (a) {
+        .obj => |af| {
+            if (b != .obj) return reportLeaf(a, b, path, reported, stdout);
+            for (af) |f| {
+                if (reported.* >= 10) return;
+                const bv = unityz.classes.fieldOf(b, f.name) orelse {
+                    try printFieldLine(path, f.name, "removed", reported, stdout);
+                    continue;
+                };
+                const new_len = try appendPath(buf, len, f.name);
+                try diffValueTree(f.value, bv, buf, new_len, reported, stdout);
+            }
+            // fields present only in b
+            for (b.obj) |f| {
+                if (reported.* >= 10) return;
+                if (unityz.classes.fieldOf(a, f.name) == null) {
+                    try printFieldLine(path, f.name, "added", reported, stdout);
+                }
+            }
+        },
+        .array => |aa| {
+            if (b != .array or aa.len != b.array.len) return reportLeaf(a, b, path, reported, stdout);
+            for (aa, 0..) |x, i| {
+                if (reported.* >= 10) return;
+                const new_len = try appendIndex(buf, len, i);
+                try diffValueTree(x, b.array[i], buf, new_len, reported, stdout);
+            }
+        },
+        else => {
+            if (!valuesEqual(a, b)) try reportLeaf(a, b, path, reported, stdout);
+        },
+    }
+}
+
+fn valuesEqual(a: unityz.value.Value, b: unityz.value.Value) bool {
+    if (a.asFloat()) |af| {
+        if (b.asFloat()) |bf| return af == bf;
+        return false;
+    }
+    if (a == .string and b == .string) return std.mem.eql(u8, a.string, b.string);
+    if (a == .pptr and b == .pptr) return a.pptr.file_id == b.pptr.file_id and a.pptr.path_id == b.pptr.path_id;
+    if (a == .bool and b == .bool) return a.bool == b.bool;
+    return false;
+}
+
+fn appendPath(buf: *[256]u8, len: usize, name: []const u8) !usize {
+    if (len == 0) {
+        const out = try std.fmt.bufPrint(buf[0..], "{s}", .{name});
+        return out.len;
+    }
+    const out = try std.fmt.bufPrint(buf[len..], ".{s}", .{name});
+    return len + out.len;
+}
+
+fn appendIndex(buf: *[256]u8, len: usize, index: usize) !usize {
+    const out = try std.fmt.bufPrint(buf[len..], "[{d}]", .{index});
+    return len + out.len;
+}
+
+fn printFieldLine(path: []const u8, name: []const u8, verb: []const u8, reported: *usize, stdout: *Io.Writer) !void {
+    try stdout.print("    {s}.{s} ({s})\n", .{ path, name, verb });
+    reported.* += 1;
+}
+
+fn reportLeaf(a: unityz.value.Value, b: unityz.value.Value, path: []const u8, reported: *usize, stdout: *Io.Writer) !void {
+    var buf_a: std.ArrayList(u8) = .empty;
+    var aw_a = std.Io.Writer.Allocating.fromArrayList(std.heap.page_allocator, &buf_a);
+    try unityz.value.jsonWrite(a, &aw_a.writer);
+    var buf_b: std.ArrayList(u8) = .empty;
+    var aw_b = std.Io.Writer.Allocating.fromArrayList(std.heap.page_allocator, &buf_b);
+    try unityz.value.jsonWrite(b, &aw_b.writer);
+    const out_a = aw_a.toArrayList();
+    const out_b = aw_b.toArrayList();
+    try stdout.print("    {s} ({s} -> {s})\n", .{ path, out_a.items, out_b.items });
+    reported.* += 1;
+}
+
+/// Reads an object's value tree from a file (container-aware), or null
+/// when absent or unreadable.
+fn findObjectValue(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?unityz.value.Value {
+    var out: ?unityz.value.Value = null;
+    switch (unityz.container.sniff(bytes).container) {
+        .bundle => {
+            const b = try unityz.bundle.parse(arena, bytes);
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) continue;
+                if (fa.node) |sn| {
+                    if (!std.mem.eql(u8, n.path, sn)) continue;
+                }
+                out = try findObjectValueInSerialized(arena, n.data, fa.path_id);
+                if (out != null) return out;
+            }
+        },
+        .webfile => {
+            const wf = try unityz.webfile.parse(arena, bytes);
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) continue;
+                if (fa.node) |sn| {
+                    if (!std.mem.eql(u8, e.path, sn)) continue;
+                }
+                out = try findObjectValueInSerialized(arena, e.data, fa.path_id);
+                if (out != null) return out;
+            }
+        },
+        .serialized => {
+            if (fa.node != null) return null;
+            out = try findObjectValueInSerialized(arena, bytes, fa.path_id);
+        },
+        else => {},
+    }
+    return out;
+}
+
+fn findObjectValueInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64) !?unityz.value.Value {
+    const sf = unityz.serialized.parse(arena, bytes) catch return null;
+    const o = for (sf.objects) |*oo| {
+        if (oo.path_id == path_id) break oo;
+    } else return null;
+    const data = sf.objectData(o) orelse return null;
+    const ti = o.type_index orelse return null;
+    if (ti >= sf.types.len) return null;
+    const tree = sf.types[ti].type_tree;
+    if (tree.roots.len == 0) return null;
+    var r = unityz.streams.Reader.init(data);
+    r.endian = sf.endian;
+    return unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch null;
+}
+
 /// `diff --pixels`: decodes a Texture2D object in both files and reports
 /// pixel-level differences (per-channel differing-byte counts and the
 /// maximum per-channel delta). Node-aware: `fa.node` selects the container
@@ -3678,6 +3825,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var json = false;
     var pixels = false;
     var audio = false;
+    var fields = false;
     var class_filter: ?i32 = null;
     var i: usize = 1;
     while (i < rest.len) : (i += 1) {
@@ -3687,6 +3835,8 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             pixels = true;
         } else if (std.mem.eql(u8, rest[i], "--audio")) {
             audio = true;
+        } else if (std.mem.eql(u8, rest[i], "--fields")) {
+            fields = true;
         } else if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
                 try stdout.print("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
@@ -3773,6 +3923,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                     }
                     reported += 1;
                 }
+                if (fields and !json) try diffObjectFields(arena, bytes, other_bytes, fa, stdout);
             } else {
                 unchanged += 1;
             }

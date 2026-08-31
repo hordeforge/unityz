@@ -77,6 +77,10 @@ which never touch an object's serialized bytes and change no content
 hash - are caught. Directory diffs apply the passes to every matched
 file pair.
 
+`--fields` goes inside changed objects: it decodes both
+value trees and reports the exact fields that differ, with paths like
+`m_LocalPosition.y` or `m_Children[0]` and both values.
+
 All commands accept a directory and process every file in it.
 
 `extract` filters with `--class`/`--path-id`/`--name <substring>`/`--raw`
