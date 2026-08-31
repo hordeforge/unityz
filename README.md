@@ -251,10 +251,16 @@ AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
 MP3) with an FSB5 metadata sidecar (sample rate, channels, loop points,
 duration, format - UnityPy never surfaces these). FSB5 banks in the
 codecs that decode in pure Zig (PCM8/16/24/32/FLOAT, GCADPCM, IMA ADPCM)
-also export as a playable WAV with no external tools; Vorbis banks (the
-common case) stay as `.fsb` because they carry no codec headers -
-UnityPy shells out to ffmpeg for every conversion, so even that is at
-parity. Objects reserialize
+also export as a playable WAV with no external tools.
+
+Vorbis banks
+(the common case) are remuxed to a playable Ogg in pure Zig - the
+vorbis packets come straight from the bank, the identification/comment
+headers are synthesized, and the setup header (codebooks + modes) comes
+from a CRC-keyed table of FMOD encoder configurations - byte-identical
+to Fmod5Sharp's reconstruction and playable by any decoder. UnityPy
+shells out to ffmpeg for every conversion, so even that is at parity.
+Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
 
@@ -298,6 +304,9 @@ interpolation.
   loop points, format)
 - `src/audio.zig` - FSB5 audio sample decoding to 16-bit PCM (PCM8/16/24/
   32/FLOAT, GCADPCM, IMA ADPCM), no external tools
+- `src/vorbis.zig` - FSB5 Vorbis (mode 15) to playable Ogg reconstruction:
+  headers synthesized, setup header from the crc-keyed table
+  (`src/vorbis_headers.bin`), no external tools
 - `src/shader.zig` - Shader (class 48) sub-program blob decoding: the LZ4
   per-platform blobs, record table, parameter blobs (constant buffers with
   member offsets, texture/cbuffer/UAV/sampler entries), code blobs (38-byte

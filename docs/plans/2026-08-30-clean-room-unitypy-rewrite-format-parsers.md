@@ -1770,3 +1770,36 @@ byte).
 The rebuilt bundles write their block uncompressed (flags 0x0
 vs the source's 0x43) - pre-existing rebuilder behavior, verified
 parseable by both tools. 287/287 tests.
+
+2026-08-31 (FSB5 Vorbis to playable Ogg): the last FSB5 gap - Vorbis
+banks (mode 15, the common case) previously stayed as .fsb - is
+closed with a pure-Zig remux. The bank's raw packet stream ([u16
+size][packet] pairs, EOS at size 0/0xFFFF) is framed into a standard
+Ogg/Vorbis stream: the identification and comment headers are
+synthesized, and the setup header (codebooks + modes) comes from a
+CRC-keyed table of FMOD encoder configurations - the VORBISDATA
+metadata chunk carries the CRC.
+
+New src/vorbis.zig (Ogg page
+writer with CRC, page-out rules, granule tracking, per-packet
+block-size computation from the setup header's mode flags) plus the
+embedded table (src/vorbis_headers.bin, 621KB, 161 entries, generated
+from Fmod5Sharp's MIT-licensed table; NOTICE updated).
+
+Verified on five real
+banks (Fmod5Sharp's test resources plus char_118's CN_034): the
+reconstructed oggs are byte-identical to Fmod5Sharp's own rebuilds,
+playable, and their durations match the FSB5 metadata sample counts
+exactly (0.5625s for short_vorbis etc.).
+
+extract now writes a
+playable .ogg beside the .fsb for every vorbis bank; char_118's 35
+clips all export as oggs. The setup-header bit reads follow
+Fmod5Sharp's LSB-first BitStream (the byte-exact reference) - the
+spec's MSB-first reading would give different (less-tested) block
+sizes.
+
+UnityPy converts FSB5 via fmod_toolkit/ffmpeg; its decoded PCM
+differs from ffmpeg's decode of our ogg by +/-1-2 LSB (normal vorbis
+decoder rounding), with identical durations. Unit tests: block-flag
+parse, page framing with CRC verification. 289/289 tests.
