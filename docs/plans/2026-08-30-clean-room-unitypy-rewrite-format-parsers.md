@@ -1830,3 +1830,18 @@ IMA) - random data, sample counts, and channel counts per iteration,
 bounds checks (data length vs sample count x channels, coefficient
 array size, block framing) all degrade to errors. The ROADMAP's
 FSB5 line now also records the Vorbis-to-Ogg remux. 289/289 tests.
+
+2026-08-31 (edit: base64 byte-array patching): the edit command now
+accepts a base64 string literal for byte-array fields, so raw binary
+data is patchable through the CLI - mesh index/vertex buffers, image
+data, audio payloads. `setFieldPath` gained an allocator and converts
+a base64 string to `.bytes` at the leaf when the target is a byte
+array (bad base64 is rejected, other literals pass through
+unchanged).
+
+Verified on the real scene bundle: patching the creature mesh's
+m_IndexBuffer to a 16-byte buffer round-trips clean under --verify
+(73 objects) and UnityPy still reads all 73 objects. The usage text
+documents the form (`edit f.unity3d CAB-..:44 m_IndexBuffer
+'"AwD/AA=="'`). Unit test covers the decode and the rejection of
+malformed base64. 289/289 tests.
