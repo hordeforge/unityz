@@ -122,6 +122,14 @@ an offset without touching the object tree, so an AudioClip's bank
 The range must fit inside the node, keeping every sidecar reference
 valid.
 
+`verify` round-trips every object and additionally checks that each
+streamed reference resolves: a `m_StreamData`/`m_Resource` range must
+fit inside the sibling sidecar node it points into (and a path-less
+range must fit in the file itself), so an edit that breaks a reference
+(a cleared stream whose pixels are still streamed, a sidecar patch
+that cut data short) is caught at verify time instead of failing
+silently at extract time.
+
 Inside bundles and webfiles, every object belongs to a container node,
 and the tool is node-aware throughout: outputs tag objects with their
 node, and `show`/`edit`/`verify`/`extract`/`hash` accept `node:path-id`

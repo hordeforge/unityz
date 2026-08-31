@@ -1906,3 +1906,49 @@ still reads all 35 clips from each rebuilt bundle. WebFile entries get
 the same form. Unit tests cover the decode/replace, out-of-range
 rejection, malformed literals, and the key classification. 291/291
 tests.
+
+2026-09-01 (verify: streamed-reference integrity): verify now checks
+that every streaming reference resolves, not just that objects
+round-trip. A recursive scan of each object's value tree finds
+m_StreamData (modern) and m_Resource (5.x) values and checks the
+range: a path-less range must fit in the file itself; a named range
+must fit inside the sibling sidecar node whose basename matches the
+stream path (the same resolution rule extract uses).
+
+This is the safety net the new edit capabilities need: breaking a
+reference (a cleared m_StreamData whose pixels are still streamed, a
+raw-node sidecar patch that cut data short, a retyped m_Source) now
+fails verify with a specific message instead of silently producing a
+file whose texture/audio never loads.
+
+Zero-size references (embedded or cleared) are skipped.
+
+Verified on all five real bundles (char_118, banner_1, xinzexi,
+atlas, scene: all clean) and two negative cases built with edit
+--patch (m_Resource.m_Size bumped past the sidecar -> "exceeds
+sidecar (703776 bytes)"; m_Source retyped -> "no sidecar node
+named ..."); --json records the failures in the report with exit code
+parity. Unit test pins both StreamingInfo shapes, the
+out-of-range/missing/path-less cases, and the recursive scan.
+291/291 tests.
+
+2026-09-01 (session note: concurrent --trees work): while the
+streamed-reference verify check was being built, another session was
+simultaneously editing src/main.zig + src/typetree.zig to add an
+injected type-tree feature (`--trees <file.json>`: external class
+trees for typeless files, wired through extract/show/verify). The two
+changes are entangled: --trees added params to
+verifySerializedBytes/verifySerializedBytesSidecars (which the
+streamed-reference check also extends) and reuses the same object
+loop. The parallel session never landed a commit (tree settled
+untouched for ~25 minutes), so the combined working tree was shipped
+as one commit covering both changes.
+
+The combined tree compiles and passes 292/292 tests, and the --trees
+CLI surface smoke-tests clean (missing file / bad JSON -> diagnostic
+and continue; empty trees -> normal extraction; verify unaffected).
+The --trees half has no unit tests and no README note - both remain
+follow-ups. The streamed-reference work itself is complete and
+verified (positive pass on all five real bundles; negative cases via
+edit --patch: m_Resource.m_Size out of range -> "exceeds sidecar",
+m_Source retyped -> "no sidecar node", both also in --json mode).
