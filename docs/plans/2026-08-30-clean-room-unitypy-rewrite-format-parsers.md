@@ -1459,3 +1459,13 @@ so the skeleton binding is visible in the scene tree alongside the
 23 transforms are marked, matching the SkinnedMeshRenderer's m_Bones
 list (first: Root/Pelvis/Spine/Chest/Neck, ids 5/7/9/11/13/15...), in
 both text and JSON modes. 277/277 tests.
+
+2026-08-31 (Shader structured JSON): `extract` now writes each Shader's
+parsed form as a structured `shader_<id>.json` in addition to the
+readable text: name (falling back to the parsed form's name when the
+top-level m_Name is empty, which the real sample showed), the keyword
+list, and the subshader/pass structure (LODs, pass types and state
+names). Verified on the real shader: name "Shamway/Unlit", 1 subshader
+at LOD 100 with a single pass (type 0), all matching the raw tree, and
+the empty top-level m_Name agrees with UnityPy's typed read. 277/277
+tests.

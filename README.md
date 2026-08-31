@@ -203,7 +203,9 @@ vertex layouts.
 Materials export as readable text plus a structured JSON
 (shader reference, render queue, and the saved properties: texture
 bindings with scale/offset, floats, colors, ints), Shaders export as
-readable text, and
+readable text plus a structured JSON (keywords and the subshader/pass
+structure with LODs and pass names - useful for real shaders with
+passes like ForwardBase/ShadowCaster), and
 AnimationClips export their curves as JSON (per-curve bone path,
 attribute, and keyframes with time, value, and slopes - UnityPy reads
 clips generically but never surfaces the curves).
