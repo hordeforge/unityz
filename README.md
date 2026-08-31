@@ -101,7 +101,14 @@ paths to object ids (what is in this bundle, under which path).
 `edit` supports
 dotted-indexed field paths, `--out <file>`, and `--verify`, which
 round-trip-checks the edited output and refuses to write if it does not
-pass (UnityPy edits never self-check).
+pass (UnityPy edits never self-check). Byte-array fields take base64
+string values, so raw binary payloads are patchable, and the conversion
+is recursive inside replaced subtrees: an `extract --json` export feeds
+back through `edit --patch` byte-exactly. Streamed Texture2D pixels
+(which live in a `.resS` sidecar, leaving the embedded image field
+empty) can be de-streamed by patching the image field with the sidecar
+bytes and clearing `m_StreamData`; the rebuilt bundle decodes
+pixel-identically.
 
 Inside bundles and webfiles, every object belongs to a container node,
 and the tool is node-aware throughout: outputs tag objects with their

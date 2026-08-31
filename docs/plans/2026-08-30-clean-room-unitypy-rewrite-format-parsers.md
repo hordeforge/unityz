@@ -1868,3 +1868,20 @@ shows 0/73 value-tree changes, and UnityPy still reads all 73
 objects. Unit tests pin the float widening (object_writer), the
 recursive byte coercion, and the literal-bracket field name.
 290/290 tests.
+
+2026-08-31 (edit: streamed Texture2D de-stream): the base64 subtree
+machinery now covers streamed textures. A Texture2D whose pixels live
+in a `.resS` sidecar (m_StreamData offset/size/path, embedded image
+field empty) can be de-streamed through one `edit --patch` entry:
+patch the image byte field with the sidecar bytes (base64) and zero
+m_StreamData. The rebuilt bundle verifies clean and decodes
+pixel-identically (1024x512 ETC2_RGBA8Crunched atlas: raw RGBA byte
+equality vs the original extraction), `diff --pixels` shows the swap
+(one flipped stream byte -> 423,981 texture pixels + every packed
+sprite), and UnityPy reads the de-streamed file and decodes the
+texture.
+
+Unity 5.6 AudioClips have no embedded byte field (pure m_Resource
+streaming), so they are not de-streamable this way; that path is the
+sidecar-node edit slice. README edit section documents the workflow.
+290/290 tests.
