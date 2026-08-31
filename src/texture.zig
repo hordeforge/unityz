@@ -3634,11 +3634,19 @@ test "astc hdr 4x4 block (HDR RGBA)" {
 test "unsupported format and bad size" {
     const a = std.testing.allocator;
     // 60/61 (ETC-RGB4/RGBA8-3DS) and ETC2_RGBA1 are now decoded; pin that a
-    // single 4x4 block (8 bytes) decodes without error.
+    // single 4x4 block (8 bytes) yields a full 4x4 RGBA8 image rather than
+    // merely returning without an error.
     for ([_]i32{ 60, 61, format.etc2_rgba1 }) |fmt| {
         const out = try decode(a, fmt, 4, 4, "abcdefgh");
-        a.free(out);
+        defer a.free(out);
+        try std.testing.expectEqual(@as(usize, 4 * 4 * 4), out.len);
     }
+    // A format number outside the table has no expected size, so decode
+    // must reject it instead of guessing a stride.
+    try std.testing.expectEqualStrings("Unknown", format.name(999));
+    try std.testing.expectEqual(@as(?usize, null), expectedSize(999, 4, 4));
+    try std.testing.expectError(error.UnsupportedFormat, decode(a, 999, 4, 4, "abcdefgh"));
+    try std.testing.expectError(error.UnsupportedFormat, decode(a, 0, 4, 4, "abcdefgh"));
     try std.testing.expectError(error.BadSize, decode(a, format.rgba32, 2, 2, "short"));
     try std.testing.expectError(error.BadSize, decode(a, format.bc7, 4, 4, "short"));
 }
@@ -4816,20 +4824,32 @@ test "flipVertical mirrors rows" {
     try std.testing.expectError(error.BadSize, flipVertical(a, rgba, 2, 4));
 }
 
-test "dxt1/5 crunched route to the crash-stable decompressor" {
-    // Format numbers 28/29 are Unity's DXT1Crunched / DXT5Crunched; the
-    // crunched stream is variable-length so expectedSize reports "unknown"
-    // (0), and a non-crunch payload must fail gracefully rather than panic.
-    try std.testing.expectEqualStrings("DXT1Crunched", format.name(format.dxt1_crunched));
-    try std.testing.expectEqualStrings("DXT5Crunched", format.name(format.dxt5_crunched));
-    try std.testing.expectEqual(@as(?usize, 0), expectedSize(format.dxt1_crunched, 512, 512));
-    try std.testing.expectEqual(@as(?usize, 0), expectedSize(format.dxt5_crunched, 512, 512));
+test "crunched formats route to the crash-stable decompressor" {
+    // Format numbers 28/29/64/65 are Unity's DXT1Crunched / DXT5Crunched /
+    // ETC_RGB4Crunched / ETC2_RGBA8Crunched; all four share one decode arm.
+    // The crunched stream is variable-length so expectedSize reports
+    // "unknown" (0), and a non-crunch payload must fail gracefully rather
+    // than panic.
+    const crunched = [_]i32{
+        format.dxt1_crunched,
+        format.dxt5_crunched,
+        format.etc_rgb4_crunched,
+        format.etc2_rgba8_crunched,
+    };
+    const names = [_][]const u8{ "DXT1Crunched", "DXT5Crunched", "ETC_RGB4Crunched", "ETC2_RGBA8Crunched" };
+    for (crunched, names) |fmt, name| {
+        try std.testing.expectEqualStrings(name, format.name(fmt));
+        try std.testing.expectEqual(@as(?usize, 0), expectedSize(fmt, 512, 512));
+    }
 
-    // A non-crunch byte stream (not a valid CRN header) must be rejected.
+    // A non-crunch byte stream (not a valid CRN header) must be rejected,
+    // as must an empty one — neither may reach a block decoder.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const garbage = try a.dupe(u8, "not a crunch stream, 8 bytes!");
-    try std.testing.expectError(error.UnsupportedFormat, decode(a, format.dxt1_crunched, 4, 4, garbage));
-    try std.testing.expectError(error.UnsupportedFormat, decode(a, format.dxt5_crunched, 4, 4, garbage));
+    for (crunched) |fmt| {
+        try std.testing.expectError(error.UnsupportedFormat, decode(a, fmt, 4, 4, garbage));
+        try std.testing.expectError(error.UnsupportedFormat, decode(a, fmt, 4, 4, ""));
+    }
 }

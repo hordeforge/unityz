@@ -4343,3 +4343,95 @@ test "parseFieldPath splits dotted and indexed paths" {
     try std.testing.expectError(error.BadPath, parseFieldPath("a["));
     try std.testing.expectError(error.BadPath, parseFieldPath("[]"));
 }
+
+test "sanitizeComponent confines a file-supplied name to one path component" {
+    // An asset's `m_Name` reaches the output filename, so the separators
+    // that would let it escape the extract directory must be neutralised.
+    var traversal = "../../etc/passwd".*;
+    try std.testing.expectEqualStrings(".._.._etc_passwd", sanitizeComponent(&traversal));
+
+    var windows = "..\\..\\system32".*;
+    try std.testing.expectEqualStrings(".._.._system32", sanitizeComponent(&windows));
+
+    // A NUL truncates the path at the syscall, hiding whatever follows it
+    // from the extension checks, so it is replaced too.
+    var nul = "evil\x00.png".*;
+    try std.testing.expectEqualStrings("evil_.png", sanitizeComponent(&nul));
+
+    // Ordinary names survive untouched, and the returned slice aliases the
+    // caller's buffer rather than a copy.
+    var plain = "Player_Idle.png".*;
+    const out = sanitizeComponent(&plain);
+    try std.testing.expectEqualStrings("Player_Idle.png", out);
+    try std.testing.expectEqual(@as([*]u8, &plain), out.ptr);
+
+    var empty: [0]u8 = undefined;
+    try std.testing.expectEqualStrings("", sanitizeComponent(&empty));
+}
+
+/// Test-only field lookup on an `.obj` value.
+fn testFieldOf(v: unityz.value.Value, name: []const u8) ?unityz.value.Value {
+    for (v.obj) |f| {
+        if (std.mem.eql(u8, f.name, name)) return f.value;
+    }
+    return null;
+}
+
+test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments" {
+    // The tree `edit` walks: a scalar, an array, a nested object and a PPtr.
+    const original = unityz.value.Value{ .obj = &[_]unityz.value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "Old" } },
+        .{ .name = "m_Values", .value = .{ .array = &[_]unityz.value.Value{
+            .{ .int = 10 },
+            .{ .int = 20 },
+            .{ .int = 30 },
+        } } },
+        .{ .name = "m_Sub", .value = .{ .obj = &[_]unityz.value.Field{
+            .{ .name = "count", .value = .{ .int = 1 } },
+        } } },
+        .{ .name = "m_Script", .value = .{ .pptr = .{ .file_id = 0, .path_id = 42 } } },
+    } };
+
+    const set = struct {
+        fn apply(v: unityz.value.Value, path: []const u8, new_value: unityz.value.Value) !unityz.value.Value {
+            return setFieldPath(v, try parseFieldPath(path), 0, new_value);
+        }
+    }.apply;
+
+    // A nested scalar is replaced and the siblings survive untouched.
+    const nested = try set(original, "m_Sub.count", .{ .int = 7 });
+    try std.testing.expectEqual(@as(i64, 7), testFieldOf(testFieldOf(nested, "m_Sub").?, "count").?.int);
+    try std.testing.expectEqualStrings("Old", testFieldOf(nested, "m_Name").?.string);
+    try std.testing.expectEqual(@as(usize, 4), nested.obj.len);
+    // copy-on-write: the source tree is not mutated
+    try std.testing.expectEqual(@as(i64, 1), testFieldOf(testFieldOf(original, "m_Sub").?, "count").?.int);
+
+    // An indexed segment replaces one element and preserves order.
+    const indexed = try set(original, "m_Values[1]", .{ .int = 99 });
+    const arr = testFieldOf(indexed, "m_Values").?.array;
+    try std.testing.expectEqual(@as(usize, 3), arr.len);
+    try std.testing.expectEqual(@as(i64, 10), arr[0].int);
+    try std.testing.expectEqual(@as(i64, 99), arr[1].int);
+    try std.testing.expectEqual(@as(i64, 30), arr[2].int);
+
+    // PPtrs are stored compactly but expose m_FileID / m_PathID for descent;
+    // the untouched half of the pair carries over.
+    const repointed = try set(original, "m_Script.m_PathID", .{ .int = 1234 });
+    try std.testing.expectEqual(@as(i64, 1234), testFieldOf(repointed, "m_Script").?.pptr.path_id);
+    try std.testing.expectEqual(@as(i32, 0), testFieldOf(repointed, "m_Script").?.pptr.file_id);
+    const refiled = try set(original, "m_Script.m_FileID", .{ .int = 3 });
+    try std.testing.expectEqual(@as(i32, 3), testFieldOf(refiled, "m_Script").?.pptr.file_id);
+    try std.testing.expectEqual(@as(i64, 42), testFieldOf(refiled, "m_Script").?.pptr.path_id);
+
+    // Every way a path can fail to name an existing leaf is BadPath, so a
+    // typo never silently appends a field or drops the edit.
+    try std.testing.expectError(error.BadPath, set(original, "nope", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(original, "m_Sub.nope", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(original, "m_Values[3]", .{ .int = 1 })); // past the end
+    try std.testing.expectError(error.BadPath, set(original, "m_Name.x", .{ .int = 1 })); // scalar has no fields
+    try std.testing.expectError(error.BadPath, set(original, "m_Sub[0]", .{ .int = 1 })); // obj is not an array
+    try std.testing.expectError(error.BadPath, set(original, "m_Script.m_Other", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(original, "m_Script.m_PathID.x", .{ .int = 1 }));
+    // a PPtr half only accepts an integer-like value
+    try std.testing.expectError(error.BadPath, set(original, "m_Script.m_PathID", .{ .string = "x" }));
+}

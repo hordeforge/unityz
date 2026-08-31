@@ -407,6 +407,15 @@ test "rewrite rejects legacy formats and unknown path ids" {
     const bytes = try buildV17Fixture(a);
     const sf = try serialized.parse(a, bytes);
     try std.testing.expectError(error.ObjectNotFound, rewrite(a, &sf, &.{.{ .path_id = 999, .data = "x" }}));
+
+    // Formats outside the supported 2-22 range are refused up front, before
+    // any object table is rebuilt, so an unrecognised layout is never
+    // written back over the user's file.
+    var unsupported = sf;
+    unsupported.version = 1;
+    try std.testing.expectError(error.UnsupportedFormat, rewrite(a, &unsupported, &.{}));
+    unsupported.version = 23;
+    try std.testing.expectError(error.UnsupportedFormat, rewrite(a, &unsupported, &.{}));
 }
 
 test "parse and rewrite a v4 file byte-exactly" {
