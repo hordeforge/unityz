@@ -70,9 +70,10 @@ with counts, scoped to one class with `--class <id>` where useful,
 and `skin --json` emits the per-shader skinning report plus the
 skinned-mesh failures.
 
-`hash`, `stats`, and `verify` accept `--class <id>` / `--path-id <id>`
-filters; `stats --dups` prints only the duplicate report. Everything else
-a script needs is plain text and a non-zero exit code on failure.
+`hash` and `verify` accept `--class <id>` / `--path-id <id>` filters;
+`stats` accepts `--class <id>`, and `stats --dups` prints only the
+duplicate report. Everything else a script needs is plain text and a
+non-zero exit code on failure.
 
 ## What it is
 
