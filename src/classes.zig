@@ -827,9 +827,13 @@ pub const Mesh = struct {
             if (c.dimension == 0) continue;
             if (c.stream != 0) return null;
             const fs = formatSize(c.format) orelse return null;
-            max_end = @max(max_end, c.offset + fs * c.dimension);
+            // offset and dimension are raw u32s from the file; saturate
+            // instead of wrapping so a bogus channel yields an impossibly
+            // large stride (which the callers' size check then rejects)
+            // rather than overflowing into a small one.
+            max_end = @max(max_end, @as(usize, c.offset) +| fs *| @as(usize, c.dimension));
         }
-        return (max_end + 3) / 4 * 4;
+        return (max_end +| 3) / 4 * 4;
     }
 
     pub fn fromValue(v: value.Value) Mesh {

@@ -455,7 +455,10 @@ pub fn skinInfo(arena: std.mem.Allocator, v: value.Value) !?SkinInfo {
         if (bi >= records.len) continue;
         const rec = records[bi];
         const off: usize = rec.offset;
-        const rec_end: usize = off + @as(usize, rec.length);
+        // offset/length are raw u32s from the file: clamp the record end to
+        // the blob so a padded `data_end` or an oversized length cannot slice
+        // past it (the parameter loop below clamps the same way).
+        const rec_end: usize = @min(off +| @as(usize, rec.length), data.len);
         if (off + 32 > data.len) continue;
         const sp = parseSubProgram(data, off) catch continue;
         if (!isVertexType(sp.program_type)) continue;
@@ -484,7 +487,7 @@ pub fn skinInfo(arena: std.mem.Allocator, v: value.Value) !?SkinInfo {
         if (pi >= records.len) continue;
         const rec = records[pi];
         const off: usize = rec.offset;
-        const rec_end: usize = off + @as(usize, rec.length);
+        const rec_end: usize = off +| @as(usize, rec.length);
         const raw = if (off <= data.len) data[off..@min(rec_end, data.len)] else continue;
         if (raw.len < 8) continue;
         const param_blob = parseParameterBlob(arena, data, off) catch continue;

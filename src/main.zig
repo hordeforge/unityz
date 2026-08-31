@@ -691,10 +691,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 }
                 var name_buf: [128]u8 = undefined;
                 const base_name = std.mem.trimEnd(u8, ac.name, "\x00");
-                const name = if (base_name.len != 0)
+                const name = sanitizeComponent(if (base_name.len != 0)
                     try std.fmt.bufPrint(&name_buf, "audio_{d}_{s}.{s}", .{ o.path_id, base_name, ext })
                 else
-                    try std.fmt.bufPrint(&name_buf, "audio_{d}.{s}", .{ o.path_id, ext });
+                    try std.fmt.bufPrint(&name_buf, "audio_{d}.{s}", .{ o.path_id, ext }));
                 try extractFile(subdir, name, audio);
                 // FSB5 banks get a metadata sidecar: sample rate, channels,
                 // loop points, and format - UnityPy's export never surfaces
@@ -715,10 +715,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 if (obj.len == 0) continue; // unsupported layout, nothing written
                 var name_buf: [160]u8 = undefined;
                 const mesh_name = std.mem.trimEnd(u8, mesh.name, "\x00");
-                const name = if (mesh_name.len != 0)
+                const name = sanitizeComponent(if (mesh_name.len != 0)
                     try std.fmt.bufPrint(&name_buf, "mesh_{d}_{s}.obj", .{ o.path_id, mesh_name })
                 else
-                    try std.fmt.bufPrint(&name_buf, "mesh_{d}.obj", .{o.path_id});
+                    try std.fmt.bufPrint(&name_buf, "mesh_{d}.obj", .{o.path_id}));
                 try extractFile(subdir, name, obj);
                 try stdout.print("extracted {s} ({d} vertices, {d} indices)\n", .{ name, mesh.vertex_count, mesh.index_buffer.len / @as(usize, if (mesh.index_format == 1) 4 else 2) });
                 extracted += 1;
@@ -746,10 +746,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const sprite = unityz.classes.Sprite.fromValue(v);
                 var name_buf: [160]u8 = undefined;
                 const sprite_name = std.mem.trimEnd(u8, sprite.name, "\x00");
-                const name = if (sprite_name.len != 0)
+                const name = sanitizeComponent(if (sprite_name.len != 0)
                     try std.fmt.bufPrint(&name_buf, "sprite_{d}_{s}.png", .{ o.path_id, sprite_name })
                 else
-                    try std.fmt.bufPrint(&name_buf, "sprite_{d}.png", .{o.path_id});
+                    try std.fmt.bufPrint(&name_buf, "sprite_{d}.png", .{o.path_id}));
                 try extractFile(subdir, name, png);
                 try stdout.print("extracted {s} ({d}x{d})\n", .{ name, rr.w, rr.h });
                 extracted += 1;
@@ -789,10 +789,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     try std.fmt.bufPrint(&qual_buf, "{s}", .{ms_cn});
                 // The name comes from the file: keep it one path component
                 // so it cannot steer the output path out of the extract dir.
-                for (qual) |*c| switch (c.*) {
-                    '/', '\\' => c.* = '_',
-                    else => {},
-                };
+                _ = sanitizeComponent(qual);
                 var fname_buf: [192]u8 = undefined;
                 const fname = try std.fmt.bufPrint(&fname_buf, "script_{d}_{s}.bin", .{ o.path_id, if (qual.len != 0) qual else "unnamed" });
                 try extractFile(subdir, fname, payload);
@@ -814,6 +811,19 @@ fn basename(path: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| return path[i + 1 ..];
     if (std.mem.lastIndexOfScalar(u8, path, '\\')) |i| return path[i + 1 ..];
     return path;
+}
+
+/// Forces a file-supplied name to stay one path component: an asset's
+/// `m_Name` reaches the output filename, so a name like "../../evil" would
+/// otherwise steer the write outside the extract directory. Separators and
+/// NUL (which truncates the path at the syscall) become '_'. Rewrites in
+/// place and returns the same slice for use as a filename.
+fn sanitizeComponent(name: []u8) []u8 {
+    for (name) |*c| switch (c.*) {
+        '/', '\\', 0 => c.* = '_',
+        else => {},
+    };
+    return name;
 }
 
 /// Creates a directory and any missing parents, tolerating an existing
@@ -939,7 +949,7 @@ fn readChannelMesh(
     if (pos.format != 0 or pos.dimension < 3) return null;
     const stride = m.stride() orelse return null;
     const vcount: usize = m.vertex_count;
-    if (m.vertex_data.len < stride * vcount) return null;
+    if (m.vertex_data.len < stride *| vcount) return null;
     const ps = arena.alloc([3]f32, vcount) catch return null;
     for (0..vcount) |i| {
         const base = i * stride;
@@ -1144,7 +1154,7 @@ fn writeMeshObj(
     if (vch.format != 0 or vch.dimension < 3) return &.{};
     const stride = mesh.stride() orelse return &.{};
     const vcount: usize = mesh.vertex_count;
-    if (mesh.vertex_data.len < stride * vcount) return &.{};
+    if (mesh.vertex_data.len < stride *| vcount) return &.{};
     const idx_bytes: usize = if (mesh.index_format == 1) 4 else 2;
     if (mesh.index_format != 0 and mesh.index_format != 1) return &.{};
     if (mesh.index_buffer.len < idx_bytes * 3) return &.{};
