@@ -1203,3 +1203,26 @@ larger than the remaining metadata before they size an allocation.
 `main`
 replaces path separators in script class names so an extracted script stays
 a single path component under the extract directory.
+2026-08-31 (diff --pixels + v6 bundle rebuild fix): `diff --pixels`
+decodes changed Texture2D objects from both files - resolving `.resS` /
+`.resource` sidecar nodes inside the same bundle/webfile - and reports
+per-channel pixel-difference counts and max deltas. Beyond UnityPy, whose
+comparisons never look at pixels.
+
+Verified end-to-end: two files with an identical image report 0 pixels
+differ (after an m_MipBias edit), and a byte-mutated crunch stream
+reports 14 pixels differing by up to 10 per channel.
+
+Building the test exposed a real bug in the UnityFS v6 bundle rebuild:
+the writer skipped the two version strings for format-6 bundles, but the
+parser reads them unconditionally (the step-84 header fix). Every `edit`
+on a Unity 5.x/2017/2018-era bundle therefore produced an unparseable
+file - `--verify` failed with ShortData.
+
+The rebuild now writes the
+version strings for every format version; v6 edits round-trip with
+`--verify` passing and the edited file re-parsing cleanly. A second,
+smaller fix: the pixel-diff sidecar walk collected sidecars in the same
+pass as the serialized-node search, but the .resS node usually follows
+the serialized node, leaving the sidecar list empty; the walk is now
+two-pass. 251/251 tests.

@@ -38,11 +38,16 @@ sizes and duplicate-object detection), `find` (name/class search, with
 dump of its bytes with `--raw`), `diff` (compare two files' objects by
 content hash, scoped with `--class`, or two directories file-by-file),
 `hash` (per-object content fingerprints), and `skin` (whether every Shader
-skins — whether its vertex stage applies per-vertex bone matrices — exiting
-non-zero when a `SkinnedMeshRenderer` references a shader that does not).
+skins: its vertex stage applies per-vertex bone matrices, exiting non-zero
+when a `SkinnedMeshRenderer` references a shader that does not).
 
-All commands accept a directory and process every file in it. `extract`
-filters with `--class`/`--path-id`/`--raw`, exports value trees with
+`diff` gains `--pixels`: changed Texture2D objects are decoded
+from both files (resolving `.resS` sidecars inside the containers) and
+reported with a per-channel pixel-difference count and max delta.
+
+All commands accept a directory and process every file in it.
+
+`extract` filters with `--class`/`--path-id`/`--raw`, exports value trees with
 `--json` (plus a `manifest.json` index of every exported object; inside
 bundles/webfiles each node's objects land in its own `objects/<node>/`
 subdirectory so identical path ids never collide), and
@@ -83,7 +88,7 @@ a script needs is plain text and a non-zero exit code on failure.
 - a **library** (`src/lib.zig`, imported as `@import("unityz")`) with parsers
   for Unity's asset formats, and
 - a **CLI** (`src/main.zig`, `unityz`) with `info`, `extract`, `edit`,
-  `verify`, `stats`, `find`, `show`, `diff`, `hash`, and `skin`
+  `verify`, `stats`, `find`, `show`, `hash`, `diff`, and `skin`
   subcommands for inspecting, pulling out, modifying, checking, and
   comparing assets. `unityz --help` is the authoritative flag reference.
 
@@ -187,13 +192,13 @@ interpolation.
 - `src/bundle.zig` - UnityFS bundle parser (with LZ4/LZMA blocks)
 - `src/lz4.zig` - LZ4 block decompression
 - `src/serialized.zig` - SerializedFile parser (`.assets` and friends)
+- `src/serialized_writer.zig` - SerializedFile rebuild writer (byte-exact
+  `edit` output across formats 2-22)
 - `src/typetree.zig` - TypeTree parsing + Unity common-string table
 - `src/value.zig` - generic object value model + JSON output
 - `src/object_reader.zig` - type-tree-driven object reader
-- `src/object_writer.zig` - type-tree-driven object serializer (the inverse
-  of the reader)
-- `src/serialized_writer.zig` - SerializedFile rewrite: rebuilds the object
-  table and data section around replaced object payloads
+- `src/object_writer.zig` - type-tree-driven object writer (byte-exact
+  value-model reserialization)
 - `src/classes.zig` - typed views for the common classes
 - `src/fsb5.zig` - FSB5 audio bank metadata parser (sample rate, channels,
   loop points, format)
