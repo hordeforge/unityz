@@ -66,6 +66,9 @@ const usage =
     \\                 (exits non-zero when a SkinnedMeshRenderer references
     \\                  a shader that does not skin; --json for a
     \\                  machine-readable report)
+    \\  hierarchy <path> Print the GameObject/Transform tree of a scene
+    \\                 (root transforms first, names, component classes,
+    \\                  local positions; --json for nested objects)
     \\
     \\Edit usage: unityz edit <file> <path_id> <field> <json-value> [<field> <json-value> ...]
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
@@ -194,7 +197,7 @@ pub fn main(init: std.process.Init) !void {
     if (verify_failed_flag) std.process.exit(1);
 }
 
-const Command = enum { info, extract, edit, verify, stats, find, show, diff, hash, skin, shader };
+const Command = enum { info, extract, edit, verify, stats, find, show, diff, hash, skin, shader, hierarchy };
 
 fn parseCommand(arg: []const u8) ?Command {
     inline for (std.meta.fields(Command)) |field| {
@@ -233,6 +236,7 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
         .diff => return cmdDiff(path, rest, bytes, stdout),
         .hash => return cmdHash(path, rest, bytes, stdout),
         .skin => return cmdSkin(path, rest, bytes, stdout),
+        .hierarchy => return cmdHierarchy(path, rest, bytes, stdout),
     }
 }
 
@@ -4881,6 +4885,209 @@ fn skipWs(text: []const u8, pos: *usize) void {
     while (pos.* < text.len) : (pos.* += 1) {
         const c = text[pos.*];
         if (c != ' ' and c != '\t' and c != '\n' and c != '\r') break;
+    }
+}
+
+/// `hierarchy <path> [--json]` — prints the GameObject/Transform tree of
+/// a scene: root transforms first, recursing through m_Children, each
+/// node named by its GameObject with the transform path id, component
+/// classes, and local position. UnityPy's CLI has no scene-structure
+/// view.
+fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+    var json = false;
+    for (rest) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+        } else {
+            try stdout.print("unityz: unknown hierarchy option '{s}'\n", .{arg});
+            return;
+        }
+    }
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    switch (unityz.container.sniff(bytes).container) {
+        .bundle => {
+            const b = unityz.bundle.parse(arena, bytes) catch |err| {
+                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                return;
+            };
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) continue;
+                try printHierarchy(arena, n.data, n.path, json, stdout);
+            }
+        },
+        .webfile => {
+            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
+                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                return;
+            };
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) continue;
+                try printHierarchy(arena, e.data, e.path, json, stdout);
+            }
+        },
+        .serialized => try printHierarchy(arena, bytes, null, json, stdout),
+        else => try stdout.print("{s}: hierarchy requires a serialized file, bundle, or webfile\n", .{path}),
+    }
+}
+
+/// One transform's scene-graph edges and local position.
+const TNode = struct {
+    go: i64 = 0,
+    father: i64 = 0,
+    pos: [3]f32 = .{ 0, 0, 0 },
+    children: std.ArrayList(i64) = .empty,
+};
+
+const TEntry = struct { path_id: i64, node: TNode };
+
+/// A GameObject's name plus the classes of its components.
+const GoInfo = struct {
+    path_id: i64,
+    name: []const u8 = "",
+    components: std.ArrayList(i32) = .empty,
+};
+
+fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, json: bool, stdout: *Io.Writer) !void {
+    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
+        try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    if (node) |n| {
+        if (json) {
+            try stdout.print("{{\"node\":", .{});
+            try writeJsonString(stdout, n);
+            try stdout.print(",\"hierarchy\":[", .{});
+        } else {
+            try stdout.print("hierarchy of {s}:\n", .{n});
+        }
+    } else if (!json) {
+        try stdout.print("hierarchy:\n", .{});
+    }
+
+    var nodes: std.ArrayList(TEntry) = .empty;
+    var gos: std.ArrayList(GoInfo) = .empty;
+    for (sf.objects) |*o| {
+        const data = sf.objectData(o) orelse continue;
+        const ti = o.type_index orelse continue;
+        if (ti >= sf.types.len) continue;
+        const tree = sf.types[ti].type_tree;
+        if (tree.roots.len == 0) continue;
+        var r = unityz.streams.Reader.init(data);
+        r.endian = sf.endian;
+        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+        switch (o.class_id) {
+            4 => { // Transform
+                var tn = TNode{};
+                if (unityz.classes.fieldOf(v, "m_GameObject")) |go| tn.go = pptrPathId(go) orelse 0;
+                if (unityz.classes.fieldOf(v, "m_Father")) |fa| tn.father = pptrPathId(fa) orelse 0;
+                if (unityz.classes.fieldOf(v, "m_LocalPosition")) |lp| {
+                    if (unityz.classes.fieldOf(lp, "x")) |x| tn.pos[0] = @floatCast(x.asFloat() orelse 0);
+                    if (unityz.classes.fieldOf(lp, "y")) |y| tn.pos[1] = @floatCast(y.asFloat() orelse 0);
+                    if (unityz.classes.fieldOf(lp, "z")) |z| tn.pos[2] = @floatCast(z.asFloat() orelse 0);
+                }
+                if (unityz.classes.fieldOf(v, "m_Children")) |ch| {
+                    if (ch == .array) {
+                        for (ch.array) |c| {
+                            if (pptrPathId(c)) |cid| try tn.children.append(arena, cid);
+                        }
+                    }
+                }
+                try nodes.append(arena, .{ .path_id = o.path_id, .node = tn });
+            },
+            1 => { // GameObject
+                var gi = GoInfo{ .path_id = o.path_id };
+                gi.name = unityz.classes.stringField(v, "m_Name") orelse "";
+                if (unityz.classes.fieldOf(v, "m_Component")) |comp| {
+                    if (comp == .array) {
+                        for (comp.array) |c| {
+                            // each entry wraps the PPtr in a "component" field
+                            const wrapped = unityz.classes.fieldOf(c, "component") orelse continue;
+                            const cid = pptrPathId(wrapped) orelse continue;
+                            // the component object's class, by path id
+                            for (sf.objects) |*other| {
+                                if (other.path_id == cid) {
+                                    try gi.components.append(arena, other.class_id);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                try gos.append(arena, gi);
+            },
+            else => {},
+        }
+    }
+
+    var roots_printed: usize = 0;
+    for (nodes.items) |*e| {
+        if (e.node.father == 0) {
+            if (json and roots_printed != 0) try stdout.writeByte(',');
+            roots_printed += 1;
+            try printHierarchyNode(nodes.items, gos.items, e.path_id, 0, json, stdout);
+        }
+    }
+    if (json) {
+        try stdout.print("]", .{});
+        if (node != null) try stdout.writeByte('}');
+        try stdout.writeByte('\n');
+    } else {
+        try stdout.writeByte('\n');
+    }
+}
+
+fn findNode(nodes: []const TEntry, path_id: i64) ?*const TNode {
+    for (nodes) |*e| {
+        if (e.path_id == path_id) return &e.node;
+    }
+    return null;
+}
+
+fn findGo(gos: []const GoInfo, path_id: i64) ?*const GoInfo {
+    for (gos) |*g| {
+        if (g.path_id == path_id) return g;
+    }
+    return null;
+}
+
+fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, path_id: i64, depth: usize, json: bool, stdout: *Io.Writer) !void {
+    const tn = findNode(nodes, path_id) orelse return;
+    const go = findGo(gos, tn.go);
+    if (json) {
+        try stdout.writeAll("{\"name\":");
+        try writeJsonString(stdout, if (go) |g| g.name else "");
+        try stdout.print(",\"transform\":{d},\"gameObject\":{d},\"position\":[{d},{d},{d}],\"components\":[", .{ path_id, tn.go, tn.pos[0], tn.pos[1], tn.pos[2] });
+        if (go) |g| {
+            for (g.components.items, 0..) |c, i| {
+                if (i != 0) try stdout.writeByte(',');
+                try stdout.print("{d}", .{c});
+            }
+        }
+        try stdout.writeAll("],\"children\":[");
+        for (tn.children.items, 0..) |c, i| {
+            if (i != 0) try stdout.writeByte(',');
+            try printHierarchyNode(nodes, gos, c, depth + 1, json, stdout);
+        }
+        try stdout.writeAll("]}");
+        return;
+    }
+    for (0..depth) |_| try stdout.writeAll("  ");
+    try stdout.print("{s} (t {d}, go {d})", .{ if (go) |g| g.name else "?", path_id, tn.go });
+    if (go) |g| {
+        if (g.components.items.len != 0) {
+            try stdout.writeAll(" [");
+            for (g.components.items, 0..) |c, i| {
+                if (i != 0) try stdout.writeAll(", ");
+                try stdout.writeAll(className(c) orelse "Class");
+            }
+            try stdout.writeByte(']');
+        }
+    }
+    try stdout.print("  pos({d}, {d}, {d})\n", .{ tn.pos[0], tn.pos[1], tn.pos[2] });
+    for (tn.children.items) |c| {
+        try printHierarchyNode(nodes, gos, c, depth + 1, json, stdout);
     }
 }
 

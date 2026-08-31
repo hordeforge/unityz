@@ -1401,3 +1401,18 @@ only. Verified on both real clips: keyframes match the raw tree
 field-by-field, and the times/name/rate match UnityPy's typed read
 exactly (UnityPy has no curve export, so this is beyond-parity).
 277/277 tests.
+
+2026-08-31 (hierarchy command): new `hierarchy <path>` command prints a
+scene's GameObject/Transform tree: root transforms first, recursing
+through m_Children, each node named by its GameObject with the transform
+path id, the GameObject's component classes, and the local position
+(`--json` for the same tree as nested objects). The scene test bundles
+from the other sessions (tmpiyofv9_i.unity3d, 23 GameObjects + 23
+Transforms) unlocked it.
+
+Verified: the full 23-node tree - transform
+ids, parent-child structure, and names - matches UnityPy's typed read
+exactly. Two bugs caught while building: the GameObject m_Component
+entries wrap the PPtr in a "component" field (pptrPathId on the entry
+missed it), and a shared JSON comma flag corrupted nested children
+arrays (now per-list separators). 277/277 tests.
