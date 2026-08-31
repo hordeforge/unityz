@@ -1464,7 +1464,7 @@ class decoder_tables {
 
     clear();
 
-    memcpy(this, &other, sizeof(*this));
+    memcpy((void*)this, (const void*)&other, sizeof(*this));
 
     if (other.m_lookup) {
       m_lookup = crnd_new_array<uint32>(m_cur_lookup_size);
@@ -1527,7 +1527,10 @@ class decoder_tables {
   uint16* m_sorted_symbol_order;
 
   inline uint32 get_unshifted_max_code(uint32 len) const {
-    CRND_ASSERT((len >= 1) && (len <= cMaxExpectedCodeSize));
+    // bounds-checked against corrupt streams (the assert below is compiled
+    // out under NDEBUG, which previously allowed an OOB read)
+    if ((len < 1) || (len > cMaxExpectedCodeSize))
+      return unitycrnd::cUINT32_MAX;
     uint32 k = m_max_codes[len - 1];
     if (!k)
       return unitycrnd::cUINT32_MAX;
@@ -1850,11 +1853,22 @@ bool decoder_tables::init(uint32 num_syms, const uint8* pCodesizes, uint32 table
       const uint32 val_ptr = m_val_ptrs[codesize - 1];
 
       for (uint32 code = min_code; code <= max_code; code++) {
-        const uint32 sym_index = m_sorted_symbol_order[val_ptr + code - min_code];
+        // bounds-checked against corrupt code sizes (the asserts below are
+        // compiled out under NDEBUG, which previously allowed OOB reads
+        // and writes that corrupted the heap)
+        const uint32 sym_pos = val_ptr + code - min_code;
+        if ((sym_pos >= m_cur_sorted_symbol_order_size) || (m_sorted_symbol_order == NULL))
+          return false;
+        const uint32 sym_index = m_sorted_symbol_order[sym_pos];
+        if (sym_index >= m_num_syms)
+          return false;
         CRND_ASSERT(pCodesizes[sym_index] == codesize);
 
         for (uint32 j = 0; j < fillnum; j++) {
           const uint32 t = j + (code << fillsize);
+
+          if ((t >= m_cur_lookup_size) || (m_lookup == NULL))
+            return false;
 
           CRND_ASSERT(t < (1U << table_bits));
 
@@ -1981,7 +1995,7 @@ static void* crnd_default_realloc(void* p, size_t size, size_t* pActual_size, bo
 }
 
 static size_t crnd_default_msize(void* p, void* pUser_data) {
-  pUser_data;
+  (void)pUser_data;
 #ifdef _WIN32
   return p ? _msize(p) : 0;
 #else
@@ -2488,7 +2502,14 @@ bool static_huffman_data_model::prepare_decoder_tables() {
   if (!m_pDecode_tables)
     m_pDecode_tables = crnd_new<prefix_coding::decoder_tables>();
 
-  return m_pDecode_tables->init(m_total_syms, &m_code_sizes[0], compute_decoder_table_bits());
+  if (!m_pDecode_tables->init(m_total_syms, &m_code_sizes[0], compute_decoder_table_bits())) {
+    // corrupt code sizes: drop the partial tables so decode() rejects the
+    // model instead of dereferencing an inconsistent lookup
+    crnd_delete(m_pDecode_tables);
+    m_pDecode_tables = NULL;
+    return false;
+  }
+  return true;
 }
 
 uint static_huffman_data_model::compute_decoder_table_bits() const {
@@ -2679,6 +2700,10 @@ uint32 symbol_codec::get_bits(uint32 num_bits) {
 uint32 symbol_codec::decode(const static_huffman_data_model& model) {
   const prefix_coding::decoder_tables* pTables = model.m_pDecode_tables;
 
+  // a corrupt stream can fail the model init and leave the tables null
+  if (pTables == NULL)
+    return 0;
+
   if (m_bit_count < 24) {
     if (m_bit_count < 16) {
       uint32 c0 = 0, c1 = 0;
@@ -2702,7 +2727,15 @@ uint32 symbol_codec::decode(const static_huffman_data_model& model) {
   uint32 sym, len;
 
   if (k <= pTables->m_table_max_code) {
-    uint32 t = pTables->m_lookup[m_bit_buf >> (32 - pTables->m_table_bits)];
+    // bounds-checked against corrupt streams: a failed table init can
+    // leave m_lookup smaller than 1 << m_table_bits
+    const uint32 table_bits = pTables->m_table_bits;
+    if ((table_bits == 0) || (table_bits > 11) || (pTables->m_lookup == NULL))
+      return 0;
+    const uint32 idx = m_bit_buf >> (32 - table_bits);
+    if (idx >= pTables->m_cur_lookup_size)
+      return 0;
+    uint32 t = pTables->m_lookup[idx];
 
     CRND_ASSERT(t != cUINT32_MAX);
     sym = t & cUINT16_MAX;
@@ -2713,6 +2746,10 @@ uint32 symbol_codec::decode(const static_huffman_data_model& model) {
     len = pTables->m_decode_start_code_size;
 
     for (;;) {
+      if (len > prefix_coding::cMaxExpectedCodeSize) {
+        // corrupted stream: code length out of range
+        return 0;
+      }
       if (k <= pTables->m_max_codes[len - 1])
         break;
       len++;

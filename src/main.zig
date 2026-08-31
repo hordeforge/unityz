@@ -514,6 +514,31 @@ fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.Serial
     return null;
 }
 
+/// FSB5 bank metadata as a JSON document, or null when the data is not a
+/// well-formed FSB5 bank. Beyond UnityPy: its export converts the audio
+/// but never reports loop points or the header fields.
+fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
+    const bank = try unityz.fsb5.parse(arena, audio) orelse return null;
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"version\":", .{});
+    try w.print("{d},\"mode\":{d},\"samples\":[", .{ bank.version, bank.mode });
+    for (bank.samples, 0..) |s, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d}",
+            .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count });
+        if (s.loop_start) |ls| {
+            try w.print(",\"loopStart\":{d},\"loopEnd\":{d}", .{ ls, s.loop_end orelse 0 });
+        }
+        try w.writeByte('}');
+    }
+    try w.writeAll("]}");
+    var list = aw.toArrayList();
+    return try list.toOwnedSlice(arena);
+}
+
+
 fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("unityz: {s}: serialized file parse failed: {s}\n", .{ path, @errorName(err) });
@@ -655,6 +680,16 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 else
                     try std.fmt.bufPrint(&name_buf, "audio_{d}.{s}", .{ o.path_id, ext });
                 try extractFile(subdir, name, audio);
+                // FSB5 banks get a metadata sidecar: sample rate, channels,
+                // loop points, and format - UnityPy's export never surfaces
+                // this (it only converts the audio itself).
+                if (std.mem.startsWith(u8, audio, "FSB5")) {
+                    if (try fsb5MetadataJson(arena, audio)) |meta| {
+                        var meta_name_buf: [160]u8 = undefined;
+                        const meta_name = try std.fmt.bufPrint(&meta_name_buf, "{s}.json", .{name});
+                        try extractFile(subdir, meta_name, meta);
+                    }
+                }
                 try stdout.print("extracted {s} ({d} bytes, {s})\n", .{ name, audio.len, ext });
                 extracted += 1;
             },

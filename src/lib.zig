@@ -48,6 +48,7 @@ pub const texture = @import("texture.zig");
 
 /// Minimal PNG encoder.
 pub const png = @import("png.zig");
+pub const fsb5 = @import("fsb5.zig");
 
 /// TypeTree-driven object serializer (inverse of the reader).
 pub const object_writer = @import("object_writer.zig");

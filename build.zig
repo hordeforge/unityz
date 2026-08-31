@@ -73,6 +73,7 @@ pub fn build(b: *std.Build) void {
         "src/classes.zig",
         "src/texture.zig",
         "src/png.zig",
+        "src/fsb5.zig",
         "src/object_writer.zig",
         "src/serialized_writer.zig",
     }) |module_path| {

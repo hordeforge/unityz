@@ -9,8 +9,8 @@ Nothing in flight.
 
 ## Planned
 
-- Texture block formats still missing: BC6H (HDR), PVRTC, ATC, EAC,
-  ETC-RGB4/RGBA8-3DS, and the DXT1/5Crunched crunch variants (28/29).
+- Texture block formats still missing: ETC-RGB4/RGBA8-3DS (Unity 3DS
+  ETC variants), the last format with no obtainable sample or encoder.
   UnityPy decodes all of these; no real asset with them has been located
   to verify against (the DXT-crunched ones need the same vendored
   crunch machinery as formats 64/65), so they are documented as

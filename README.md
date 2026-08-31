@@ -100,10 +100,12 @@ Texture decoding, reserialization, and the `extract`/`edit` commands have
 landed: textures decode to RGBA8 and write as PNG (RGB/RGBA8, BGR24,
 16-bit R16/RG16, half/float RHalf/RGHalf/RGBAHalf/RFloat/RGFloat/
 RGBAFloat/ARGBFloat/RG32, RGB9e5Float, RGB48/RGBA64, the signed variants,
-DXT1/3/5, BC4/5, BC7, ETC1/ETC2/ETC2-RGBA8, ASTC, ASTC HDR (66-71), plus
-Unity crunch ETC_RGB4Crunched and ETC2_RGBA8Crunched through a vendored
-ZLIB-licensed unitycrunch decompressor). BC6H, PVRTC, ATC, EAC, the
-3DS ETC variants, and the DXT-crunched formats are detected but not yet
+DXT1/3/5, BC4/5, BC6H (HDR), BC7, PVRTC (2bpp/4bpp RGB and RGBA),
+ATC (RGB4/RGBA8), EAC (R/RG, signed and unsigned), ETC1/ETC2/ETC2-RGBA8,
+ASTC, ASTC HDR
+(66-71), plus the crunch-crunched formats (ETC_RGB4, ETC2_RGBA8, DXT1,
+DXT5) through a vendored ZLIB-licensed unitycrunch decompressor (hardened
+against corrupt streams). The 3DS ETC variants are detected but not yet
 decoded.
 
 ETC2 and the BC family decode pixel-identical to UnityPy, and ASTC
@@ -135,7 +137,9 @@ through their type trees, MonoBehaviours resolve their MonoScript and
 export the raw script payload, Meshes export as Wavefront OBJ (vertices,
 normals, UVs, faces), Materials and Shaders export as readable text,
 AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
-MP3), and objects reserialize byte-exactly and can be edited in place
+MP3) with an FSB5 metadata sidecar (sample rate, channels, loop points,
+format - UnityPy never surfaces these), and objects reserialize
+byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
 
 UnityFS bundles parse
@@ -169,6 +173,8 @@ interpolation.
 - `src/value.zig` - generic object value model + JSON output
 - `src/object_reader.zig` - type-tree-driven object reader
 - `src/classes.zig` - typed views for the common classes
+- `src/fsb5.zig` - FSB5 audio bank metadata parser (sample rate, channels,
+  loop points, format)
 - `src/texture.zig` - texture format decoding to RGBA8 (uncompressed
   RGB/RGBA layouts, half/float/16-bit/signed raw formats, DXT1/3/5,
   BC4/5, BC7, ETC1/ETC2/ETC2-RGBA8, ASTC, ASTC HDR (66-71), crunch

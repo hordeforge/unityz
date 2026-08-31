@@ -21,6 +21,22 @@ int unitycrunch_unpack(const uint8_t* data, uint32_t data_size, uint32_t level, 
     unitycrnd::crn_texture_info info;
     if (!unitycrnd::crnd_get_texture_info(data, data_size, &info)) return 0;
 
+    // Structural validation before decompression: the level offset table
+    // must point inside the file, monotonic, and the requested level must
+    // exist. The stock decoder trusts these and corrupt values drive its
+    // internal bit readers past the buffer (it was only ever fed valid
+    // Unity streams), so reject them here.
+    const unitycrnd::crn_header* hdr = unitycrnd::crnd_get_header(data, data_size);
+    if (!hdr) return 0;
+    const uint32_t levels = hdr->m_levels;
+    if ((levels < 1) || (levels > 16) || (level >= levels)) return 0;
+    uint32_t prev = 0;
+    for (uint32_t i = 0; i < levels; i++) {
+        const uint32_t ofs = hdr->m_level_ofs[i];
+        if ((ofs >= data_size) || (i > 0 && ofs <= prev)) return 0;
+        prev = ofs;
+    }
+
     uint32_t width = info.m_width >> level;
     if (width < 1) width = 1;
     uint32_t height = info.m_height >> level;
@@ -58,3 +74,5 @@ void unitycrunch_free(void* p) {
 }
 
 } // extern "C"
+
+// shim rev: crn_decomp.h hardening (huffman bounds + level-offset validation)
