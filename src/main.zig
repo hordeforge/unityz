@@ -1852,11 +1852,13 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
             return;
         },
     }
+    // The exit code is part of the contract in both modes: `--json` is the
+    // scripting mode, so it must fail the same way the text mode does.
+    if (report.failed != 0) verify_failed_flag = true;
     if (json) {
         try emitVerifyReport(json, &report, stdout);
     } else if (report.failed != 0) {
         try stdout.print("{d} object(s) failed verification\n", .{report.failed});
-        verify_failed_flag = true;
     } else {
         try stdout.print("all objects verified\n", .{});
     }
@@ -3950,8 +3952,22 @@ const max_json_depth: u32 = 512;
 fn parseJsonLiteral(text: []const u8) !unityz.value.Value {
     var pos: usize = 0;
     const v = try parseJsonValue(text, &pos, 0);
-    while (pos < text.len and (text[pos] == ' ' or text[pos] == '\t' or text[pos] == '\n')) pos += 1;
+    skipWs(text, &pos);
     if (pos != text.len) return error.TrailingInput;
+    return v;
+}
+
+/// Reads the four hex digits of a `\uXXXX` escape. `pos` points at the `u`
+/// on entry and at the last hex digit on return, so the caller's single
+/// `pos += 1` steps past the whole escape.
+fn readHex4(text: []const u8, pos: *usize) !u16 {
+    if (pos.* + 5 > text.len) return error.BadEscape;
+    var v: u16 = 0;
+    for (text[pos.* + 1 ..][0..4]) |ch| {
+        const d = std.fmt.charToDigit(ch, 16) catch return error.BadEscape;
+        v = (v << 4) | d;
+    }
+    pos.* += 4;
     return v;
 }
 
@@ -3968,7 +3984,38 @@ fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value
             if (text[pos.*] == '\\') {
                 pos.* += 1;
                 if (pos.* >= text.len) return error.BadEscape;
-                try out.append(std.heap.page_allocator, text[pos.*]);
+                // Decode the escape rather than keeping the escaped byte:
+                // `value.jsonString` writes \n/\r/\t and \uXXXX for the C0
+                // controls (Unity strings carry trailing NULs), so an
+                // `extract --json` export fed back through `edit --patch`
+                // has to decode them to round-trip byte-exactly.
+                switch (text[pos.*]) {
+                    '"' => try out.append(std.heap.page_allocator, '"'),
+                    '\\' => try out.append(std.heap.page_allocator, '\\'),
+                    '/' => try out.append(std.heap.page_allocator, '/'),
+                    'b' => try out.append(std.heap.page_allocator, 0x08),
+                    'f' => try out.append(std.heap.page_allocator, 0x0c),
+                    'n' => try out.append(std.heap.page_allocator, '\n'),
+                    'r' => try out.append(std.heap.page_allocator, '\r'),
+                    't' => try out.append(std.heap.page_allocator, '\t'),
+                    'u' => {
+                        var cp: u21 = try readHex4(text, pos);
+                        if (cp >= 0xd800 and cp <= 0xdbff) {
+                            // high surrogate: pair it with the low one
+                            if (pos.* + 2 >= text.len or text[pos.* + 1] != '\\' or text[pos.* + 2] != 'u') return error.BadEscape;
+                            pos.* += 2;
+                            const lo: u21 = try readHex4(text, pos);
+                            if (lo < 0xdc00 or lo > 0xdfff) return error.BadEscape;
+                            cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                        } else if (cp >= 0xdc00 and cp <= 0xdfff) {
+                            return error.BadEscape;
+                        }
+                        var buf: [4]u8 = undefined;
+                        const n = std.unicode.utf8Encode(cp, &buf) catch return error.BadEscape;
+                        try out.appendSlice(std.heap.page_allocator, buf[0..n]);
+                    },
+                    else => return error.BadEscape,
+                }
             } else {
                 try out.append(std.heap.page_allocator, text[pos.*]);
             }
@@ -4039,7 +4086,7 @@ fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value
     const start = pos.*;
     while (pos.* < text.len) : (pos.* += 1) {
         const ch = text[pos.*];
-        if (ch == ',' or ch == ']' or ch == '}' or ch == ' ' or ch == '\t' or ch == '\n') break;
+        if (ch == ',' or ch == ']' or ch == '}' or ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') break;
     }
     const token = text[start..pos.*];
     if (std.mem.eql(u8, token, "true")) return .{ .bool = true };
@@ -4054,7 +4101,7 @@ fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value
 fn skipWs(text: []const u8, pos: *usize) void {
     while (pos.* < text.len) : (pos.* += 1) {
         const c = text[pos.*];
-        if (c != ' ' and c != '\t' and c != '\n') break;
+        if (c != ' ' and c != '\t' and c != '\n' and c != '\r') break;
     }
 }
 

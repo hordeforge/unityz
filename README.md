@@ -34,12 +34,12 @@ it back, compare bytes; non-zero exit on failure), `stats` (per-class
 sizes and duplicate-object detection), `find` (name/class search, with
 `--exact` for whole-name lookups), `show` (one object as JSON, or a hex
 dump of its bytes with `--raw`), `diff` (compare two files' objects by
-content hash, scoped with `--class`, or two directories file-by-file).
+content hash, scoped with `--class`, or two directories file-by-file),
+`hash` (per-object content fingerprints), and `skin` (whether every Shader
+skins: its vertex stage applies per-vertex bone matrices, exiting non-zero
+when a `SkinnedMeshRenderer` references a shader that does not).
 
-`hash` (per-object content fingerprints) and `skin` (whether every
-Shader's vertex stage applies per-vertex bone matrices, exiting non-zero
-when a `SkinnedMeshRenderer` references a shader that does not) round out
-the set. `diff` gains `--pixels`: changed Texture2D objects are decoded
+`diff` gains `--pixels`: changed Texture2D objects are decoded
 from both files (resolving `.resS` sidecars inside the containers) and
 reported with a per-channel pixel-difference count and max delta.
 
@@ -62,15 +62,11 @@ selectors (e.g. `show bundle.unity3d CAB-abc123:7` or
 ids in different nodes can be targeted individually.
 
 `info`, `stats`, `hash`, `find`, `diff`, `verify`, and `skin` also have a
-`--json` mode for scripting.
-
-`info --json` summarizes a file or container (adding `--objects`
-includes the per-object table, tagged with its container node, and
-serialized files list their sidecar `externals_list`; each shader is also
-reported with a `skins` verdict and its bind-channel / bone-matrix
-evidence).
-
-`stats --json` gives per-class sizes and
+`--json` mode for scripting: `info --json` summarizes a file or container
+(adding `--objects` includes the per-object table, tagged with its
+container node, and serialized files list their sidecar `externals_list`;
+each shader is also reported with a `skins` verdict and its bind-channel /
+bone-matrix evidence), `stats --json` gives per-class sizes and
 duplicates, `hash --json` emits per-object content fingerprints,
 `find --json` emits matching objects as a JSON array, `diff --json`
 emits the changed/new/deleted objects (or files, for directory diffs)
@@ -156,9 +152,8 @@ matching UnityPy's mask_sprite/render_sprite_mesh.
 Managed-reference registries decode
 through their type trees, MonoBehaviours resolve their MonoScript and
 export the raw script payload, Meshes export as Wavefront OBJ (vertices,
-normals, UVs, faces), Materials and Shaders export as readable text.
-
-Additionally, each Shader's compiled sub-program blob is decoded and
+normals, UVs, faces), Materials and Shaders export as readable text;
+additionally, each Shader's compiled sub-program blob is decoded and
 reported as skinning or not (its vertex stage applies per-vertex bone
 matrices), read off the bind-channel block and parameter-blob bindings;
 AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
