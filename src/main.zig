@@ -873,6 +873,20 @@ fn readObjectValue(
 /// A decoded RGBA texture plus its dimensions.
 const DecodedTexture = struct { rgba: []const u8, w: u32, h: u32 };
 
+/// Resolves a Texture2D's pixel bytes: inline `m_ImageData`, the streamed
+/// range inside this same serialized file, or a sidecar `.resS`. Empty when
+/// none of the three yields data.
+fn texturePixels(sf: *const unityz.serialized.SerializedFile, sidecars: []const Sidecar, t: unityz.classes.Texture2D) []const u8 {
+    if (t.image_data.len != 0) return t.image_data;
+    if (t.stream.size == 0) return &.{};
+    if (t.stream.path.len == 0) {
+        const start: usize = @intCast(sf.data_offset + t.stream.offset);
+        const end = start + t.stream.size;
+        return if (end <= sf.source.len) sf.source[start..end] else &.{};
+    }
+    return resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
+}
+
 /// Decodes a file-local (file_id 0) Texture2D at `path_id` to RGBA, reading
 /// embedded image data, the in-file stream, or a sibling .resS sidecar.
 fn decodeSpriteTexture(
@@ -884,15 +898,7 @@ fn decodeSpriteTexture(
     const tex_value = readObjectValue(arena, sf, path_id) orelse return null;
     const t = unityz.classes.Texture2D.fromValue(tex_value);
     if (t.width == 0 or t.height == 0) return null;
-    var pixels: []const u8 = t.image_data;
-    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
-        const start: usize = @intCast(sf.data_offset + t.stream.offset);
-        const end = start + t.stream.size;
-        if (end <= sf.source.len) pixels = sf.source[start..end];
-    }
-    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
-        pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
-    }
+    const pixels = texturePixels(sf, sidecars, t);
     if (pixels.len == 0) return null;
     const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
     return .{ .rgba = rgba, .w = t.width, .h = t.height };
@@ -2554,15 +2560,7 @@ fn findTextureInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id:
     const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return null;
     const t = unityz.classes.Texture2D.fromValue(v);
     if (t.width == 0 or t.height == 0) return null;
-    var pixels: []const u8 = t.image_data;
-    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
-        const start: usize = @intCast(sf.data_offset + t.stream.offset);
-        const end = start + t.stream.size;
-        if (end <= sf.source.len) pixels = sf.source[start..end];
-    }
-    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
-        pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
-    }
+    const pixels = texturePixels(&sf, sidecars, t);
     if (pixels.len == 0) return null;
     const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
     return .{ .rgba = rgba, .width = t.width, .height = t.height };
@@ -3226,6 +3224,12 @@ const DupGroup = struct { class_id: i32, hash: u64, size: u32, path_ids: []const
 /// entries (the latter feed duplicate detection).
 fn collectStats(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, classes: *std.ArrayList(ClassStat), total_objects: *usize, total_bytes: *u64, entries: *std.ArrayList(StatEntry)) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch return;
+    try accumulateStats(arena, &sf, class_filter, classes, total_objects, total_bytes, entries);
+}
+
+/// Accumulates a parsed serialized file's per-class totals and per-object
+/// entries into the running tallies.
+fn accumulateStats(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, class_filter: ?i32, classes: *std.ArrayList(ClassStat), total_objects: *usize, total_bytes: *u64, entries: *std.ArrayList(StatEntry)) !void {
     for (sf.objects) |*o| {
         if (class_filter) |cf| {
             if (o.class_id != cf) continue;
@@ -3270,30 +3274,7 @@ fn statsSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, class_filte
     var entries: std.ArrayList(StatEntry) = .empty;
     var total_objects: usize = 0;
     var total_bytes: u64 = 0;
-    for (sf.objects) |*o| {
-        if (class_filter) |cf| {
-            if (o.class_id != cf) continue;
-        }
-        const data = sf.objectData(o) orelse continue;
-        total_objects += 1;
-        total_bytes += data.len;
-        var found = false;
-        for (classes.items) |*c| {
-            if (c.class_id == o.class_id) {
-                c.count += 1;
-                c.bytes += data.len;
-                found = true;
-                break;
-            }
-        }
-        if (!found) try classes.append(arena, .{ .class_id = o.class_id, .count = 1, .bytes = data.len });
-        try entries.append(arena, .{
-            .path_id = o.path_id,
-            .class_id = o.class_id,
-            .hash = std.hash.Wyhash.hash(0, data),
-            .size = @intCast(data.len),
-        });
-    }
+    try accumulateStats(arena, &sf, class_filter, &classes, &total_objects, &total_bytes, &entries);
 
     if (!dups_only) {
         try stdout.print("objects by class (bytes):\n", .{});
@@ -3367,23 +3348,7 @@ fn cmdEditWebFile(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs:
             try stdout.print("unityz: webfile rebuild failed: {s}\n", .{@errorName(err)});
             return;
         };
-        if (verify) {
-            if (!try verifyEditResult(arena, rebuilt, stdout)) {
-                verify_failed_flag = true;
-                return;
-            }
-        }
-        const io = io_global.io;
-        const write_path = out_path orelse path;
-        const file = std.Io.Dir.cwd().createFile(io, write_path, .{}) catch |err| {
-            try stdout.print("unityz: {s}: {s}\n", .{ write_path, @errorName(err) });
-            return;
-        };
-        defer file.close(io);
-        file.writeStreamingAll(io, rebuilt) catch |err| {
-            try stdout.print("unityz: write failed: {s}\n", .{@errorName(err)});
-            return;
-        };
+        if (!try writeEditOutput(arena, path, out_path, rebuilt, verify, stdout)) return;
         try stdout.print("object {d} in entry {s}: {d} field(s) edited\n", .{ sel.path_id, e.path, pairs.len / 2 });
         return;
     }
@@ -3416,23 +3381,7 @@ fn cmdEditBundle(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs: 
             try stdout.print("unityz: bundle rebuild failed: {s}\n", .{@errorName(err)});
             return;
         };
-        if (verify) {
-            if (!try verifyEditResult(arena, rebuilt, stdout)) {
-                verify_failed_flag = true;
-                return;
-            }
-        }
-        const io = io_global.io;
-        const write_path = out_path orelse path;
-        const file = std.Io.Dir.cwd().createFile(io, write_path, .{}) catch |err| {
-            try stdout.print("unityz: {s}: {s}\n", .{ write_path, @errorName(err) });
-            return;
-        };
-        defer file.close(io);
-        file.writeStreamingAll(io, rebuilt) catch |err| {
-            try stdout.print("unityz: write failed: {s}\n", .{@errorName(err)});
-            return;
-        };
+        if (!try writeEditOutput(arena, path, out_path, rebuilt, verify, stdout)) return;
         try stdout.print("object {d} in node {s}: {d} field(s) edited\n", .{ sel.path_id, n.path, pairs.len / 2 });
         return;
     }
@@ -3572,24 +3521,32 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
         },
     }
 
+    if (!try writeEditOutput(arena, path, out_path, rewritten, verify, stdout)) return;
+    try stdout.print("{d} object(s) patched\n", .{edited_count});
+}
+
+/// Verifies (when asked) and writes edit output to `out_path` or, without
+/// one, over the input. Returns whether the bytes reached disk; failures
+/// are reported to `stdout` by this function.
+fn writeEditOutput(arena: std.mem.Allocator, path: []const u8, out_path: ?[]const u8, bytes: []const u8, verify: bool, stdout: *Io.Writer) !bool {
     if (verify) {
-        if (!try verifyEditResult(arena, rewritten, stdout)) {
+        if (!try verifyEditResult(arena, bytes, stdout)) {
             verify_failed_flag = true;
-            return;
+            return false;
         }
     }
     const io = io_global.io;
     const write_path = out_path orelse path;
     const file = std.Io.Dir.cwd().createFile(io, write_path, .{}) catch |err| {
         try stdout.print("unityz: {s}: {s}\n", .{ write_path, @errorName(err) });
-        return;
+        return false;
     };
     defer file.close(io);
-    file.writeStreamingAll(io, rewritten) catch |err| {
+    file.writeStreamingAll(io, bytes) catch |err| {
         try stdout.print("unityz: write failed: {s}\n", .{@errorName(err)});
-        return;
+        return false;
     };
-    try stdout.print("{d} object(s) patched\n", .{edited_count});
+    return true;
 }
 
 /// Runs the byte-exact round-trip check over rewritten edit output
@@ -3802,23 +3759,7 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         try stdout.print("unityz: rewrite failed: {s}\n", .{@errorName(err)});
         return;
     };
-    if (verify) {
-        if (!try verifyEditResult(arena, rewritten, stdout)) {
-            verify_failed_flag = true;
-            return;
-        }
-    }
-    const io = io_global.io;
-    const write_path = out_path orelse path;
-    const file = std.Io.Dir.cwd().createFile(io, write_path, .{}) catch |err| {
-        try stdout.print("unityz: {s}: {s}\n", .{ write_path, @errorName(err) });
-        return;
-    };
-    defer file.close(io);
-    file.writeStreamingAll(io, rewritten) catch |err| {
-        try stdout.print("unityz: write failed: {s}\n", .{@errorName(err)});
-        return;
-    };
+    if (!try writeEditOutput(arena, path, out_path, rewritten, verify, stdout)) return;
     try stdout.print("object {d}: {d} field(s) edited\n", .{ sel.path_id, pairs.items.len / 2 });
 }
 

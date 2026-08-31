@@ -1688,6 +1688,28 @@ fn putColorBlock(out: []u8, block_x: usize, block_y: usize, w: usize, h: usize, 
     }
 }
 
+/// BC1 color endpoints expanded to a 4-entry RGBA palette. `c0 > c1`
+/// selects 4-color mode (entries 2 and 3 are 1/3 and 2/3 mixes); otherwise
+/// entry 2 is the midpoint and entry 3 is the transparent slot, which BC1
+/// renders as transparent black and BC2/BC3 never read.
+fn colorPalette565(c0: u16, c1: u16) [4][4]u8 {
+    const rgb0 = expand565(c0);
+    const rgb1 = expand565(c1);
+    var palette: [4][4]u8 = .{
+        .{ rgb0[0], rgb0[1], rgb0[2], 255 },
+        .{ rgb1[0], rgb1[1], rgb1[2], 255 },
+        undefined,
+        .{ 0, 0, 0, 0 },
+    };
+    if (c0 > c1) {
+        palette[2] = .{ @intCast((@as(u16, 2) * rgb0[0] + rgb1[0]) / 3), @intCast((@as(u16, 2) * rgb0[1] + rgb1[1]) / 3), @intCast((@as(u16, 2) * rgb0[2] + rgb1[2]) / 3), 255 };
+        palette[3] = .{ @intCast((@as(u16, rgb0[0]) + @as(u16, 2) * rgb1[0]) / 3), @intCast((@as(u16, rgb0[1]) + @as(u16, 2) * rgb1[1]) / 3), @intCast((@as(u16, rgb0[2]) + @as(u16, 2) * rgb1[2]) / 3), 255 };
+    } else {
+        palette[2] = .{ @intCast((@as(u16, rgb0[0]) + rgb1[0]) / 2), @intCast((@as(u16, rgb0[1]) + rgb1[1]) / 2), @intCast((@as(u16, rgb0[2]) + rgb1[2]) / 2), 255 };
+    }
+    return palette;
+}
+
 fn decodeDxt1(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
     const bw = (w + 3) / 4;
     const bh = (h + 3) / 4;
@@ -1697,22 +1719,8 @@ fn decodeDxt1(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
             const c0 = std.mem.readInt(u16, block[0..2], .little);
             const c1 = std.mem.readInt(u16, block[2..4], .little);
             const indices = std.mem.readInt(u32, block[4..8], .little);
-            const rgb0 = expand565(c0);
-            const rgb1 = expand565(c1);
-            var palette: [4][4]u8 = undefined;
-            var alpha_from_palette = false;
-            if (c0 > c1) {
-                palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
-                palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
-                palette[2] = .{ @intCast((@as(u16, 2) * rgb0[0] + rgb1[0]) / 3), @intCast((@as(u16, 2) * rgb0[1] + rgb1[1]) / 3), @intCast((@as(u16, 2) * rgb0[2] + rgb1[2]) / 3), 255 };
-                palette[3] = .{ @intCast((@as(u16, rgb0[0]) + @as(u16, 2) * rgb1[0]) / 3), @intCast((@as(u16, rgb0[1]) + @as(u16, 2) * rgb1[1]) / 3), @intCast((@as(u16, rgb0[2]) + @as(u16, 2) * rgb1[2]) / 3), 255 };
-            } else {
-                palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
-                palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
-                palette[2] = .{ @intCast((@as(u16, rgb0[0]) + rgb1[0]) / 2), @intCast((@as(u16, rgb0[1]) + rgb1[1]) / 2), @intCast((@as(u16, rgb0[2]) + rgb1[2]) / 2), 255 };
-                palette[3] = .{ 0, 0, 0, 0 };
-                alpha_from_palette = true;
-            }
+            const palette = colorPalette565(c0, c1);
+            const alpha_from_palette = c0 <= c1;
             putColorBlock(out, bx, by, w, h, indices, palette, alpha_from_palette);
         }
     }
@@ -1728,22 +1736,9 @@ fn decodeDxt3(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
             const c0 = std.mem.readInt(u16, block[8..10], .little);
             const c1 = std.mem.readInt(u16, block[10..12], .little);
             const indices = std.mem.readInt(u32, block[12..16], .little);
-            const rgb0 = expand565(c0);
-            const rgb1 = expand565(c1);
-            var palette: [4][4]u8 = undefined;
-            // same color semantics as DXT1: c0 > c1 is 4-color mode,
-            // c0 <= c1 is 3-color + black (alpha comes from the alpha block)
-            if (c0 > c1) {
-                palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
-                palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
-                palette[2] = .{ @intCast((@as(u16, 2) * rgb0[0] + rgb1[0]) / 3), @intCast((@as(u16, 2) * rgb0[1] + rgb1[1]) / 3), @intCast((@as(u16, 2) * rgb0[2] + rgb1[2]) / 3), 255 };
-                palette[3] = .{ @intCast((@as(u16, rgb0[0]) + @as(u16, 2) * rgb1[0]) / 3), @intCast((@as(u16, rgb0[1]) + @as(u16, 2) * rgb1[1]) / 3), @intCast((@as(u16, rgb0[2]) + @as(u16, 2) * rgb1[2]) / 3), 255 };
-            } else {
-                palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
-                palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
-                palette[2] = .{ @intCast((@as(u16, rgb0[0]) + rgb1[0]) / 2), @intCast((@as(u16, rgb0[1]) + rgb1[1]) / 2), @intCast((@as(u16, rgb0[2]) + rgb1[2]) / 2), 255 };
-                palette[3] = .{ 0, 0, 0, 255 };
-            }
+            // alpha comes from the alpha block, so the palette's alpha
+            // column (including the 3-color mode's transparent slot) is unused
+            const palette = colorPalette565(c0, c1);
             for (0..4) |y| {
                 for (0..4) |x| {
                     const px = bx * 4 + x;
@@ -1776,22 +1771,9 @@ fn decodeDxt5(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
             const c0 = std.mem.readInt(u16, block[8..10], .little);
             const c1 = std.mem.readInt(u16, block[10..12], .little);
             const indices = std.mem.readInt(u32, block[12..16], .little);
-            const rgb0 = expand565(c0);
-            const rgb1 = expand565(c1);
-            var palette: [4][4]u8 = undefined;
-            // same color semantics as DXT1: c0 > c1 is 4-color mode,
-            // c0 <= c1 is 3-color + black (alpha comes from the alpha block)
-            if (c0 > c1) {
-                palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
-                palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
-                palette[2] = .{ @intCast((@as(u16, 2) * rgb0[0] + rgb1[0]) / 3), @intCast((@as(u16, 2) * rgb0[1] + rgb1[1]) / 3), @intCast((@as(u16, 2) * rgb0[2] + rgb1[2]) / 3), 255 };
-                palette[3] = .{ @intCast((@as(u16, rgb0[0]) + @as(u16, 2) * rgb1[0]) / 3), @intCast((@as(u16, rgb0[1]) + @as(u16, 2) * rgb1[1]) / 3), @intCast((@as(u16, rgb0[2]) + @as(u16, 2) * rgb1[2]) / 3), 255 };
-            } else {
-                palette[0] = .{ rgb0[0], rgb0[1], rgb0[2], 255 };
-                palette[1] = .{ rgb1[0], rgb1[1], rgb1[2], 255 };
-                palette[2] = .{ @intCast((@as(u16, rgb0[0]) + rgb1[0]) / 2), @intCast((@as(u16, rgb0[1]) + rgb1[1]) / 2), @intCast((@as(u16, rgb0[2]) + rgb1[2]) / 2), 255 };
-                palette[3] = .{ 0, 0, 0, 255 };
-            }
+            // alpha comes from the alpha block, so the palette's alpha
+            // column (including the 3-color mode's transparent slot) is unused
+            const palette = colorPalette565(c0, c1);
             for (0..4) |y| {
                 for (0..4) |x| {
                     const px = bx * 4 + x;
