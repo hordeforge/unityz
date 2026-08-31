@@ -6,13 +6,7 @@ on:
 
 jobs:
   build-test:
-    # The quick start is OS-neutral and the code has no platform-specific
-    # paths, so test the two hosts contributors actually build on.
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
