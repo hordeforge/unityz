@@ -155,11 +155,21 @@ pub fn main(init: std.process.Init) !void {
             try stderr.flush();
             std.process.exit(1);
         };
+        defer dir.close(io);
+        // Batch mode reads one file per iteration and nothing survives the
+        // `runCommand` call, so the bytes go in an arena that is reset each
+        // time. The process arena never frees, so reading into it would hold
+        // every file of the directory at once — peak memory would track the
+        // whole tree instead of its largest single file.
+        var batch_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer batch_arena_state.deinit();
+        const batch_arena = batch_arena_state.allocator();
         var it = dir.iterate();
         while (try it.next(io)) |entry| {
+            defer _ = batch_arena_state.reset(.retain_capacity);
             if (entry.kind != .file) continue;
-            const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ path, entry.name });
-            const bytes = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch |err| {
+            const full = try std.fmt.allocPrint(batch_arena, "{s}/{s}", .{ path, entry.name });
+            const bytes = std.Io.Dir.cwd().readFileAlloc(io, full, batch_arena, .unlimited) catch |err| {
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 try stderr.flush();
                 continue;
@@ -667,19 +677,28 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
                 }
                 if (pixels.len == 0) continue;
-                const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch |err| {
+                // The decoded, flipped and encoded buffers are dead once the
+                // PNG is written, and each is on the order of the texture's
+                // pixel count. The extraction arena lives until the whole
+                // file is done, so taking them from it would make peak
+                // memory the sum of every texture in the file rather than
+                // the largest one.
+                var tex_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+                defer tex_arena_state.deinit();
+                const tex_arena = tex_arena_state.allocator();
+                const rgba = unityz.texture.decode(tex_arena, t.format, t.width, t.height, pixels) catch |err| {
                     try stdout.print("  texture {d}: {s} ({s}) unsupported\n", .{ o.path_id, unityz.texture.format.name(t.format), @errorName(err) });
                     skipped += 1;
                     continue;
                 };
                 // Unity stores texture rows bottom-up; PNGs are top-down, so
                 // flip to match on-screen appearance (and UnityPy's export).
-                const flipped = unityz.texture.flipVertical(arena, rgba, t.width, t.height) catch |err| {
+                const flipped = unityz.texture.flipVertical(tex_arena, rgba, t.width, t.height) catch |err| {
                     try stdout.print("  texture {d}: flip failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
                 };
-                const png = unityz.png.encode(arena, t.width, t.height, flipped) catch |err| {
+                const png = unityz.png.encode(tex_arena, t.width, t.height, flipped) catch |err| {
                     try stdout.print("  texture {d}: PNG encode failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
@@ -893,10 +912,14 @@ fn ensureDirPath(io: std.Io, dir_path: []const u8) !void {
 fn writeFileToCwd(name: []const u8, contents: []const u8) !void {
     const io = io_global.io;
     const dir = std.Io.Dir.cwd();
+    const full_owned = extract_outdir != null;
     const full = if (extract_outdir) |d|
         try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ d, name })
     else
         name;
+    // One extracted object per call, so keeping the joined path would leak a
+    // page-rounded allocation per file written.
+    defer if (full_owned) std.heap.page_allocator.free(full);
     const file = try dir.createFile(io, full, .{});
     defer file.close(io);
     try file.writeStreamingAll(io, contents);
@@ -1803,7 +1826,10 @@ const VerifyReport = struct {
 /// failure came from, when inside a bundle/webfile.
 fn recordFailure(report: *VerifyReport, arena: std.mem.Allocator, node: ?[]const u8, path_id: i64, comptime fmt: []const u8, args: anytype) !void {
     const msg = try std.fmt.allocPrint(arena, fmt, args);
-    try report.failures.append(std.heap.page_allocator, .{ .path_id = path_id, .message = msg, .node = node });
+    // The list is arena-backed like the messages it holds: nothing frees a
+    // page_allocator buffer here, and a directory argument runs `verify`
+    // once per file, so it would leak one buffer per file with failures.
+    try report.failures.append(arena, .{ .path_id = path_id, .message = msg, .node = node });
     report.failed += 1;
 }
 
@@ -2468,6 +2494,7 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
         try stdout.print("unityz: {s}: {s}\n", .{ dir_a, @errorName(err) });
         return;
     };
+    defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
@@ -2491,6 +2518,7 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
         try stdout.print("unityz: {s}: {s}\n", .{ dir_b, @errorName(err) });
         return;
     };
+    defer dir2.close(io);
     var it2 = dir2.iterate();
     while (try it2.next(io)) |entry| {
         if (entry.kind != .file) continue;
@@ -3371,7 +3399,10 @@ fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
             }
         }
         if (json) {
-            try found.append(std.heap.page_allocator, .{ .path_id = o.path_id, .class_id = o.class_id, .name = name, .node = node });
+            // Arena-backed, like `name`: the caller's arena is released on
+            // return, whereas a page_allocator buffer would leak once per
+            // file when `find` is run over a directory.
+            try found.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = name, .node = node });
         } else {
             const cname = className(o.class_id) orelse "Class";
             if (node) |nd| {
