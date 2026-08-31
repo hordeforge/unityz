@@ -47,6 +47,13 @@ const streams = @import("streams.zig");
 const container = @import("container.zig");
 const lz4 = @import("lz4.zig");
 
+// The container magics in `container.zig` carry their NUL terminator;
+// `readStringToNull`/`writeStringToNull` handle it, so compare and write
+// the signature without it rather than repeating the literals here.
+const unityfs_signature = container.unityfs_magic[0 .. container.unityfs_magic.len - 1];
+const unityweb_signature = container.unityweb_magic[0 .. container.unityweb_magic.len - 1];
+const unityraw_signature = container.unityraw_magic[0 .. container.unityraw_magic.len - 1];
+
 pub const CompressionType = enum(u32) {
     none = 0,
     lzma = 1,
@@ -131,8 +138,8 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
     var r = streams.Reader.init(data);
 
     const signature = try r.readStringToNull();
-    if (!std.mem.eql(u8, signature, "UnityFS")) {
-        if (std.mem.eql(u8, signature, "UnityWeb") or std.mem.eql(u8, signature, "UnityRaw"))
+    if (!std.mem.eql(u8, signature, unityfs_signature)) {
+        if (std.mem.eql(u8, signature, unityweb_signature) or std.mem.eql(u8, signature, unityraw_signature))
             return error.UnsupportedVersion; // legacy bundles are a later milestone
         return error.BadSignature;
     }
@@ -328,7 +335,7 @@ pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []c
     var out: streams.Writer = .init(allocator);
     defer out.deinit();
     out.endian = .big;
-    try out.writeStringToNull("UnityFS");
+    try out.writeStringToNull(unityfs_signature);
     try out.writeInt(u32, b.version);
     // The parser reads both version strings for every UnityFS version
     // (including format-6 bundles from Unity 5.x/2017/2018); the rebuild
