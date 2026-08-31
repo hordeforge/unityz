@@ -25,6 +25,7 @@ Run the CLI:
 ./zig-out/bin/unityz stats path/to/asset
 ./zig-out/bin/unityz find path/to/asset Player
 ./zig-out/bin/unityz diff asset_a asset_b
+./zig-out/bin/unityz skin path/to/asset
 ```
 
 Beyond the core `info`/`extract`/`edit`, the CLI adds capabilities UnityPy
@@ -34,7 +35,9 @@ sizes and duplicate-object detection), `find` (name/class search, with
 `--exact` for whole-name lookups), `show` (one object as JSON, or a hex
 dump of its bytes with `--raw`), `diff` (compare two files' objects by
 content hash, scoped with `--class`, or two directories file-by-file),
-and `hash` (per-object content fingerprints).
+`hash` (per-object content fingerprints), and `skin` (whether every Shader
+skins — whether its vertex stage applies per-vertex bone matrices — exiting
+non-zero when a `SkinnedMeshRenderer` references a shader that does not).
 
 All commands accept a directory and process every file in it. `extract`
 filters with `--class`/`--path-id`/`--raw`, exports value trees with
@@ -53,15 +56,19 @@ selectors (e.g. `show bundle.unity3d CAB-abc123:7` or
 `edit bundle.unity3d CAB-abc123:7 m_Name "renamed"`) so colliding path
 ids in different nodes can be targeted individually.
 
-`info`, `stats`, `hash`, `find`, `diff`, and `verify` also have a `--json`
-mode for scripting: `info --json` summarizes a file or container (adding
-`--objects` includes the per-object table, tagged with its container
-node, and serialized files list their sidecar `externals_list`), `stats --json` gives per-class sizes and duplicates, `hash --json`
-emits per-object content fingerprints, `find --json` emits matching
-objects as a JSON array, `diff --json` emits the changed/new/deleted
-objects (or files, for directory diffs) with counts, scoped to one class
-with `--class <id>` where useful, and `verify --json`
-emits a pass/fail report with per-object failure records.
+`info`, `stats`, `hash`, `find`, `diff`, `verify`, and `skin` also have a
+`--json` mode for scripting: `info --json` summarizes a file or container
+(adding `--objects` includes the per-object table, tagged with its
+container node, and serialized files list their sidecar `externals_list`;
+each shader is also reported with a `skins` verdict and its bind-channel /
+bone-matrix evidence), `stats --json` gives per-class sizes and
+duplicates, `hash --json` emits per-object content fingerprints,
+`find --json` emits matching objects as a JSON array, `diff --json`
+emits the changed/new/deleted objects (or files, for directory diffs)
+with counts, scoped to one class with `--class <id>` where useful,
+`verify --json` emits a pass/fail report with per-object failure records,
+and `skin --json` emits the per-shader skinning report plus the
+skinned-mesh failures.
 
 `hash`, `stats`, and `verify` accept `--class <id>` / `--path-id <id>`
 filters; `stats --dups` prints only the duplicate report. Everything else
@@ -133,7 +140,10 @@ match UnityPy byte-for-byte.
 Managed-reference registries decode
 through their type trees, MonoBehaviours resolve their MonoScript and
 export the raw script payload, Meshes export as Wavefront OBJ (vertices,
-normals, UVs, faces), Materials and Shaders export as readable text,
+normals, UVs, faces), Materials and Shaders export as readable text;
+additionally, each Shader's compiled sub-program blob is decoded and
+reported as skinning or not (its vertex stage applies per-vertex bone
+matrices), read off the bind-channel block and parameter-blob bindings;
 AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
 MP3), and objects reserialize byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
@@ -169,6 +179,9 @@ interpolation.
 - `src/value.zig` - generic object value model + JSON output
 - `src/object_reader.zig` - type-tree-driven object reader
 - `src/classes.zig` - typed views for the common classes
+- `src/shader.zig` - Shader (class 48) sub-program blob parsing; reports
+  whether a shader's vertex stage skins (BLENDINDICES/BLENDWEIGHT inputs +
+  a bone-matrix binding)
 - `src/texture.zig` - texture format decoding to RGBA8 (uncompressed
   RGB/RGBA layouts, half/float/16-bit/signed raw formats, DXT1/3/5,
   BC4/5, BC7, ETC1/ETC2/ETC2-RGBA8, ASTC, ASTC HDR (66-71), crunch
