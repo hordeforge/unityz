@@ -1625,3 +1625,29 @@ headers, both reproduced exactly in the harness. All seven checks now
 pass: PCM16/8/FLOAT bit-exact vs fsb5.py, IMA mono+stereo bit-exact vs
 an independent vgmstream-formula reference and vs ffmpeg. 280/280
 tests.
+
+2026-08-31 (real FSB5 banks + frequency-table fix): the "no real
+audio samples" gap closed with authentic FMOD-generated banks from
+Fmod5Sharp's test resources (github.com/SamboyCoding/Fmod5Sharp,
+Fmod5Sharp.Tests/TestResources) - real game banks, not synthetic:
+pcm16.fsb (PCM16, 96 kHz), imaadpcm_long/short.fsb (IMA stereo),
+xbox_imaad.fsb (IMA mono), plus gcadpcm and vorbis banks for
+metadata.
+
+The FSB5 metadata parser matches fsb5.py
+field-for-field on every bank, and the decoder is byte-exact against
+two independent implementations on all four decodable banks: the
+vgmstream-formula reference and Fmod5Sharp's own C# decoder (built
+and run via dotnet, pcm data extracted from its unpatched-placeholder
+WAV headers).
+
+The real banks exposed one real parser bug: Fmod5Sharp's
+pcm16.fsb uses frequency code 10 (96 kHz), which the sample-rate
+table lacked (it fell back to 0), and code 0 is 4000 Hz, not
+"unknown".
+
+Both entries now match vgmstream's fsb5.c and Fmod5Sharp's
+FsbLoader.Frequencies. fsb5.py itself rejects both codes (raises
+"Frequency value 0/10 is not valid"), so unityz is strictly more
+robust there. Codes 11-15 still report unknown (0), and two
+minimal-bank unit tests pin codes 0 and 10. 282/282 tests.
