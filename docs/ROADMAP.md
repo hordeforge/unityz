@@ -19,9 +19,9 @@ tools not available here (see the plan's completion notes).
   (text and `--json`); `extract` gains TGA/BMP/raw RGBA output formats,
   `--name` filtering, SpriteAtlas/AssetBundle/AnimationClip/Material/
   Shader structured JSON exports; FSB5 audio decodes to WAV in pure Zig
-  (PCM8/16/24/32/FLOAT, IMA ADPCM); `find --any` searches every string
-  field; `info --objects` shows names; a `hierarchy` command prints the
-  GameObject/Transform tree with bones marked.
+  (PCM8/16/24/32/FLOAT, GCADPCM, IMA ADPCM); `find --any` searches every
+  string field; `info --objects` shows names; a `hierarchy` command
+  prints the GameObject/Transform tree with bones marked.
 - Multi-stream mesh export: a Mesh whose vertex channels spread over
   `m_Streams_0_..3_` exports an OBJ instead of silently nothing; the
   per-stream stride/offset is derived as UnityPy's MeshHandler does, and

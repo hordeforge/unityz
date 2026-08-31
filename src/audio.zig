@@ -1,10 +1,13 @@
 //! FSB5 audio sample decoding to 16-bit PCM, in pure Zig.
 //!
 //! Covers the codecs that do not need a full transform decoder: PCM8 (1),
-//! PCM16 (2), PCM24 (3), PCM32 (4), PCMFLOAT (5), and IMA ADPCM (7, the
-//! XBOX IMA framing FSB5 uses for 1-2 channels - 36-byte per-channel
-//! blocks, header sample + 63 nibble samples, state reset per block).
-//! The framing follows vgmstream's fsb5.c / ima_decoder.c.
+//! PCM16 (2), PCM24 (3), PCM32 (4), PCMFLOAT (5), GCADPCM (6, the GC
+//! DSP framing FSB5 uses - 8-byte blocks, 14 signed nibbles each, with
+//! the 8 coefficient pairs from the DSPCOEFS chunk), and IMA ADPCM (7,
+//! the XBOX IMA framing FSB5 uses for 1-2 channels - 36-byte
+//! per-channel blocks, header sample + 63 nibble samples, state reset
+//! per block). The framing follows vgmstream's fsb5.c, ima_decoder.c
+//! and ngc_dsp_decoder.c.
 //!
 //! Vorbis banks (mode 15) are NOT decoded here: they carry no codec
 //! headers and need a full transform codec. UnityPy shells out to ffmpeg
@@ -24,7 +27,7 @@ pub const Error = error{
 
 /// True when `decodeSample` can convert the mode to PCM16.
 pub fn decodable(mode: u32) bool {
-    return mode >= 1 and mode <= 5 or mode == 7;
+    return mode >= 1 and mode <= 5 or mode == 6 or mode == 7;
 }
 
 /// Short codec name for reporting.
@@ -35,6 +38,7 @@ pub fn modeName(mode: u32) []const u8 {
         3 => "PCM24",
         4 => "PCM32",
         5 => "PCMFLOAT",
+        6 => "GCADPCM",
         7 => "IMA ADPCM",
         else => "unknown",
     };
@@ -104,8 +108,55 @@ pub fn decodeSample(allocator: std.mem.Allocator, raw: []const u8, data_start: u
                 out[i] = @intFromFloat(@as(f64, clamped) * 32767.0);
             }
         },
+        6 => return decodeGcadpcm(out, data, channels, sample.sample_count, sample.dsp_coefs),
         7 => return decodeXboxIma(out, data, channels, sample.sample_count),
         else => unreachable,
+    }
+    return out;
+}
+
+/// GC ADPCM, the FSB5 framing for mode 6 (FMOD_SOUND_FORMAT_GCADPCM):
+/// fixed 8-byte blocks, 14 samples each. Block byte 0 packs the
+/// predictor index in the high nibble and the scale exponent in the
+/// low nibble; the next 7 bytes hold 14 signed nibbles, high nibble
+/// first, one nibble unused. The 8 coefficient pairs come from the
+/// bank's DSPCOEFS metadata chunk (big-endian s16). Mirrors vgmstream's
+/// ngc_dsp_decoder.c and Fmod5Sharp's FmodGcadPcmRebuilder.
+///
+/// Mono only: vgmstream decodes multi-channel GCADPCM with its
+/// subframe-interleave framing (2-byte interleave), a different layout
+/// with no sample available to verify against - report the channel
+/// count unsupported rather than guess.
+fn decodeGcadpcm(out: []i16, data: []const u8, channels: usize, sample_count: u32, coefs: []const i16) Error![]i16 {
+    if (channels != 1) return error.UnsupportedChannels;
+    if (coefs.len < 16) return error.Corrupt;
+    const block_samples: usize = 14;
+    const block_size: usize = 8;
+    var produced: usize = 0;
+    var hist1: i32 = 0;
+    var hist2: i32 = 0;
+    var block: usize = 0;
+    while (produced < sample_count) : (block += 1) {
+        const boff = block * block_size;
+        if (boff + block_size > data.len) return error.Corrupt;
+        const scale: i32 = @as(i32, 1) << @intCast(data[boff] & 0xf);
+        var coef_index: usize = (data[boff] >> 4) & 0xf;
+        if (coef_index > 7) coef_index = 7; // vgmstream clamps; FMOD may not
+        const c1: i32 = coefs[coef_index * 2 + 0];
+        const c2: i32 = coefs[coef_index * 2 + 1];
+        var i: usize = 0;
+        while (i < block_samples and produced + i < sample_count) : (i += 1) {
+            const nibbles = data[boff + 1 + i / 2];
+            var nib: i8 = if (i & 1 == 0) @as(i8, @bitCast(nibbles >> 4)) else @as(i8, @bitCast(nibbles & 0xf));
+            nib = (nib << 4) >> 4; // sign-extend the 4-bit nibble
+            var v: i32 = @as(i32, nib) * scale << 11;
+            v = (v + 1024 + c1 * hist1 + c2 * hist2) >> 11;
+            const clamped = std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16));
+            hist2 = hist1;
+            hist1 = clamped;
+            out[produced + i] = @intCast(clamped);
+        }
+        produced += block_samples;
     }
     return out;
 }
@@ -198,4 +249,18 @@ test "IMA decode matches a hand-computed block" {
     try std.testing.expectEqual(@as(i16, 1000), pcm[0]);
     try std.testing.expectEqual(@as(i16, 1013), pcm[1]);
     try std.testing.expectEqual(@as(i16, 1012), pcm[2]);
+}
+
+test "GCADPCM decode matches a hand-computed block" {
+    const a = std.testing.allocator;
+    // 8-byte block: predictor 0, scale exponent 0; nibbles +1,-1,+2,-2,
+    // +1, then zeros. With coefficient pair (0,0) the filter is the
+    // identity: out == nibble (nibbles are signed 4-bit, high nibble
+    // first).
+    const data = [_]u8{ 0x00, 0x1f, 0x2e, 0x10, 0x00, 0x00, 0x00, 0x00 };
+    const coefs = [_]i16{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const s = fsb5.Sample{ .data_offset = 0, .sample_count = 14, .channels = 1, .frequency = 8000, .dsp_coefs = &coefs };
+    const pcm = try decodeSample(a, &data, 0, s, 6);
+    defer a.free(pcm);
+    try std.testing.expectEqualSlices(i16, &.{ 1, -1, 2, -2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, pcm);
 }
