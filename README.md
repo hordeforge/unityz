@@ -61,12 +61,15 @@ All commands accept a directory and process every file in it.
 exports value trees with
 `--json` (plus a `manifest.json` index of every exported object; inside
 bundles/webfiles each node's objects land in its own `objects/<node>/`
-subdirectory so identical path ids never collide), writes textures and
-sprites as PNG by default or TGA / BMP / raw RGBA8 with
-`--format tga|bmp|raw` (UnityPy only writes PNG), exports SpriteAtlas
-objects as a JSON mapping packed sprite path ids to names (so extracted
-sprite PNGs can be matched back to their atlas slots), and
+subdirectory so identical path ids never collide), and
 auto-creates `--outdir <dir>`.
+
+Textures and sprites export as PNG by default or TGA / BMP / raw RGBA8
+with `--format tga|bmp|raw` (UnityPy only writes PNG). SpriteAtlas
+objects export as a JSON mapping packed sprite path ids to names (so
+extracted sprite PNGs can be matched back to their atlas slots), and
+each AssetBundle's `m_Container` exports as a JSON manifest of asset
+paths to object ids (what is in this bundle, under which path).
 
 `edit` supports
 dotted-indexed field paths, `--out <file>`, and `--verify`, which

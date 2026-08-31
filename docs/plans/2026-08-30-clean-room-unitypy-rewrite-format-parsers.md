@@ -1328,3 +1328,14 @@ subset, no-match extracts nothing, and combinations with --class work.
 The FSB5 metadata sidecar now reports per-sample `durationMs` (sample
 count / rate), verified against an independent computation on the real
 banks. 274/274 tests.
+
+2026-08-31 (AssetBundle asset manifest): `extract` now writes each
+AssetBundle object's `m_Container` as an `assetbundle_<id>_<name>.json`
+manifest: the bundle's asset paths mapped to their object ids (plus the
+main asset), so "what is in this bundle, under which path" is one JSON -
+UnityPy's CLI never surfaces the container. Verified on both real
+bundles: the atlas bundle's 8 asset paths resolve through
+`info --json` to the expected classes (SpriteAtlas 687078895 for the
+.spriteatlas path, Sprite 213 for the .png paths), and char_118's 35
+assets are all .ogg paths matching the extracted audio; `--class 142`
+extracts only the manifest. 274/274 tests.
