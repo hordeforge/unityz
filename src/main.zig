@@ -25,8 +25,9 @@ const usage =
     \\                 (--raw raw bytes; --json value trees as JSON, plus
     \\                  a manifest.json index; --class N / --path-id N
     \\                  filters, N may be node:path-id; --recursive for
-    \\                  bundles/webfiles; --outdir <dir> to write into,
-    \\                  created if missing)
+    \\                  bundles/webfiles; --format png|tga|bmp|raw image
+    \\                  output (default png); --outdir <dir> to write
+    \\                  into, created if missing)
     \\  edit <path>     Apply edits to a Unity asset file
     \\                 (bundles: finds and edits the embedded node, then
     \\                  rebuilds the bundle)
@@ -250,12 +251,45 @@ var extract_outdir: ?[]const u8 = null;
 /// object's serialized bytes are written as-is; with `--json`, every
 /// object with a type tree is exported as its value tree JSON instead.
 /// `--outdir` is created if missing.
+/// Image output format for `extract` textures and sprites. UnityPy only
+/// writes PNG; TGA and BMP cover legacy pipelines, and `raw` dumps the
+/// RGBA8 bytes for external tools.
+const ExtractFormat = enum { png, tga, bmp, raw };
+
+fn parseFormat(s: []const u8) !ExtractFormat {
+    if (std.mem.eql(u8, s, "png")) return .png;
+    if (std.mem.eql(u8, s, "tga")) return .tga;
+    if (std.mem.eql(u8, s, "bmp")) return .bmp;
+    if (std.mem.eql(u8, s, "raw")) return .raw;
+    return error.UnknownFormat;
+}
+
+fn formatExtension(format: ExtractFormat) []const u8 {
+    return switch (format) {
+        .png => "png",
+        .tga => "tga",
+        .bmp => "bmp",
+        .raw => "rgba",
+    };
+}
+
+/// Encodes `rgba` in the requested format; raw passes the bytes through.
+fn encodeImage(arena: std.mem.Allocator, format: ExtractFormat, w: u32, h: u32, rgba: []const u8) ![]const u8 {
+    return switch (format) {
+        .png => try unityz.png.encode(arena, w, h, rgba),
+        .tga => try unityz.tga.encode(arena, w, h, rgba),
+        .bmp => try unityz.bmp.encode(arena, w, h, rgba),
+        .raw => rgba,
+    };
+}
+
 fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     var raw = false;
     var recursive = false;
     var json_mode = false;
     var class_filter: ?i32 = null;
     var path_filter: ?Selector = null;
+    var format: ExtractFormat = .png;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         const arg = rest[i];
@@ -277,6 +311,12 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
         } else if (std.mem.eql(u8, arg, "--path-id") and i + 1 < rest.len) {
             path_filter = parseSelector(rest[i + 1]) catch {
                 try stdout.print("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
+                return;
+            };
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--format") and i + 1 < rest.len) {
+            format = parseFormat(rest[i + 1]) catch {
+                try stdout.print("unityz: unknown extract format '{s}' (png|tga|bmp|raw)\n", .{rest[i + 1]});
                 return;
             };
             i += 1;
@@ -321,7 +361,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 try writeFileToCwd(basename(e.path), e.data);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ basename(e.path), e.data.len });
                 if (recursive and unityz.container.sniff(e.data).container == .serialized) {
-                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(e.path)}), sidecars.items, &manifest, stdout);
+                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(e.path)}), sidecars.items, &manifest, format, stdout);
                 }
             }
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
@@ -349,7 +389,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 try writeFileToCwd(basename(n.path), n.data);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ basename(n.path), n.data.len });
                 if (recursive and unityz.container.sniff(n.data).container == .serialized) {
-                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(n.path)}), sidecars.items, &manifest, stdout);
+                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{basename(n.path)}), sidecars.items, &manifest, format, stdout);
                 }
             }
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
@@ -365,7 +405,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             defer arena_state.deinit();
             const arena = arena_state.allocator();
             var manifest: std.ArrayList(ManifestEntry) = .empty;
-            try extractSerialized(arena, path, bytes, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, null, &.{}, &manifest, stdout);
+            try extractSerialized(arena, path, bytes, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, null, &.{}, &manifest, format, stdout);
             if (json_mode) try writeManifest(arena, manifest.items, stdout);
         },
         else => {
@@ -566,7 +606,7 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
 }
 
 
-fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), stdout: *Io.Writer) !void {
+fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("unityz: {s}: serialized file parse failed: {s}\n", .{ path, @errorName(err) });
         return;
@@ -652,14 +692,14 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     skipped += 1;
                     continue;
                 };
-                const png = unityz.png.encode(arena, t.width, t.height, flipped) catch |err| {
-                    try stdout.print("  texture {d}: PNG encode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                const image = encodeImage(arena, format, t.width, t.height, flipped) catch |err| {
+                    try stdout.print("  texture {d}: image encode failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
                 };
-                var name_buf: [64]u8 = undefined;
-                const name = try std.fmt.bufPrint(&name_buf, "texture_{d}_{d}x{d}.png", .{ o.path_id, t.width, t.height });
-                try extractFile(subdir, name, png);
+                var name_buf: [96]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buf, "texture_{d}_{d}x{d}.{s}", .{ o.path_id, t.width, t.height, formatExtension(format) });
+                try extractFile(subdir, name, image);
                 try stdout.print("extracted {s} ({s})\n", .{ name, unityz.texture.format.name(t.format) });
                 extracted += 1;
             },
@@ -767,21 +807,27 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ name, shd.len });
                 extracted += 1;
             },
-            213 => { // Sprite -> cropped / mesh-rendered PNG
+            213 => { // Sprite -> cropped / mesh-rendered image
                 const rr = renderSprite(arena, &sf, sidecars, v, o.path_id) orelse continue;
-                const png = unityz.png.encode(arena, rr.w, rr.h, rr.data) catch |err| {
-                    try stdout.print("  sprite {d}: PNG encode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                const image = encodeImage(arena, format, rr.w, rr.h, rr.data) catch |err| {
+                    try stdout.print("  sprite {d}: image encode failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
                 };
                 const sprite = unityz.classes.Sprite.fromValue(v);
-                var name_buf: [160]u8 = undefined;
+                var name_buf: [192]u8 = undefined;
                 const sprite_name = std.mem.trimEnd(u8, sprite.name, "\x00");
-                const name = sanitizeComponent(if (sprite_name.len != 0)
-                    try std.fmt.bufPrint(&name_buf, "sprite_{d}_{s}.png", .{ o.path_id, sprite_name })
+                // raw RGBA has no header, so the name carries the dimensions
+                const name = sanitizeComponent(if (format == .raw)
+                    if (sprite_name.len != 0)
+                        try std.fmt.bufPrint(&name_buf, "sprite_{d}_{d}x{d}_{s}.{s}", .{ o.path_id, rr.w, rr.h, sprite_name, formatExtension(format) })
+                    else
+                        try std.fmt.bufPrint(&name_buf, "sprite_{d}_{d}x{d}.{s}", .{ o.path_id, rr.w, rr.h, formatExtension(format) })
+                else if (sprite_name.len != 0)
+                    try std.fmt.bufPrint(&name_buf, "sprite_{d}_{s}.{s}", .{ o.path_id, sprite_name, formatExtension(format) })
                 else
-                    try std.fmt.bufPrint(&name_buf, "sprite_{d}.png", .{o.path_id}));
-                try extractFile(subdir, name, png);
+                    try std.fmt.bufPrint(&name_buf, "sprite_{d}.{s}", .{ o.path_id, formatExtension(format) }));
+                try extractFile(subdir, name, image);
                 try stdout.print("extracted {s} ({d}x{d})\n", .{ name, rr.w, rr.h });
                 extracted += 1;
             },
