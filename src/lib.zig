@@ -2,7 +2,7 @@
 //!
 //! Status: read and write paths are both functional for the modern
 //! formats. WebFiles, UnityFS bundles (LZ4/LZMA blocks), and
-//! SerializedFiles (formats 2-22 except 4) parse; objects decode through
+//! SerializedFiles (formats 2-22) parse; objects decode through
 //! their type trees into a JSON-serializable value model and serialize back;
 //! Texture2D/TextAsset objects extract to PNG/files (RGB/RGBA, DXT1/3/5,
 //! BC4/5, BC7, ETC1/ETC2/ETC2-RGBA8, and the crunch variants
@@ -16,7 +16,7 @@
 //! program-data header, DXBC chunk analysis incl. ISGN/RDEF, ParserBindChannels),
 //! surfaced via `show`/`shader` and round-trip checked by `verify`. Objects
 //! can be edited in place across all supported serialized formats
-//! (2-22 except 4).
+//! (2-22).
 
 const std = @import("std");
 

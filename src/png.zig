@@ -49,16 +49,20 @@ pub fn encode(allocator: std.mem.Allocator, width: u32, height: u32, rgba: []con
     var scanlines: std.ArrayList(u8) = .empty;
     defer scanlines.deinit(allocator);
     try scanlines.ensureTotalCapacityPrecise(allocator, h * (stride + 1));
-    const scratch = try allocator.alloc(u8, stride);
+    // Two buffers: one the trial filters write into, one holding the best
+    // result so far. Keeping the winner saves re-filtering the row a sixth
+    // time once the choice is made.
+    const scratch = try allocator.alloc(u8, stride * 2);
     defer allocator.free(scratch);
+    const trial = scratch[0..stride];
+    const chosen = scratch[stride..];
     var prev_row: []const u8 = &.{};
     var row: usize = 0;
     while (row < h) : (row += 1) {
         const cur = rgba[row * stride .. (row + 1) * stride];
-        const filter = bestFilter(cur, prev_row, scratch);
+        const filter = bestFilter(cur, prev_row, trial, chosen);
         try scanlines.append(allocator, filter);
-        filterRow(filter, cur, prev_row, scratch);
-        try scanlines.appendSlice(allocator, scratch[0..stride]);
+        try scanlines.appendSlice(allocator, chosen);
         prev_row = cur;
     }
 
@@ -88,20 +92,40 @@ fn writeChunk(allocator: std.mem.Allocator, out: *std.ArrayList(u8), comptime ki
 /// Applies PNG filter `f` to one scanline of `stride` bytes (4 bytes per
 /// pixel), using `prev` (empty for the first row). Writes to `out[0..stride]`.
 fn filterRow(f: u8, cur: []const u8, prev: []const u8, out: []u8) void {
+    // The filter is constant for the whole scanline, so it is dispatched
+    // once here rather than re-tested for every byte: each arm below
+    // compiles to a straight-line loop. `bestFilter` runs this five times
+    // per row over width*4 bytes, so the per-byte branch was the dominant
+    // cost of PNG encoding.
+    switch (f) {
+        1 => filterRowWith(1, cur, prev, out),
+        2 => filterRowWith(2, cur, prev, out),
+        3 => filterRowWith(3, cur, prev, out),
+        4 => filterRowWith(4, cur, prev, out),
+        else => filterRowWith(0, cur, prev, out),
+    }
+}
+
+fn filterRowWith(comptime f: u8, cur: []const u8, prev: []const u8, out: []u8) void {
     const stride = cur.len;
     std.debug.assert(out.len >= stride);
+    if (f == 0) {
+        @memcpy(out[0..stride], cur);
+        return;
+    }
+    // Row 0 has no row above it; PNG defines the missing bytes as zero.
+    const has_prev = prev.len != 0;
     var i: usize = 0;
     while (i < stride) : (i += 1) {
         const x = cur[i];
         const a: i32 = if (i >= 4) cur[i - 4] else 0; // left
-        const b: i32 = if (prev.len != 0) prev[i] else 0; // above
-        const c: i32 = if (prev.len != 0 and i >= 4) prev[i - 4] else 0; // upper-left
+        const b: i32 = if (has_prev) prev[i] else 0; // above
+        const c: i32 = if (has_prev and i >= 4) prev[i - 4] else 0; // upper-left
         const pred: i32 = switch (f) {
             1 => a, // Sub
             2 => b, // Up
             3 => @divTrunc(a + b, 2), // Average
-            4 => paeth(a, b, c), // Paeth
-            else => 0,
+            else => paeth(a, b, c), // Paeth
         };
         out[i] = x -% @as(u8, @truncate(@as(u32, @bitCast(pred))));
     }
@@ -137,20 +161,22 @@ fn paeth(a: i32, b: i32, c: i32) i32 {
     return c;
 }
 
-/// Picks the filter (0-4) with the smallest sum of absolute differences.
-fn bestFilter(cur: []const u8, prev: []const u8, scratch: []u8) u8 {
+/// Picks the filter (0-4) with the smallest sum of absolute differences,
+/// leaving that filter's output in `chosen`.
+fn bestFilter(cur: []const u8, prev: []const u8, trial: []u8, chosen: []u8) u8 {
     var best: u8 = 0;
     var best_sum: u64 = std.math.maxInt(u64);
     var f: u8 = 0;
     while (f < 5) : (f += 1) {
-        filterRow(f, cur, prev, scratch);
+        filterRow(f, cur, prev, trial);
         // libpng's heuristic: prefer the filter whose bytes are smallest
         // in absolute value (they deflate best)
         var sum: u64 = 0;
-        for (scratch[0..cur.len]) |b| sum += @abs(@as(i32, b));
+        for (trial[0..cur.len]) |b| sum += @abs(@as(i32, b));
         if (sum < best_sum) {
             best_sum = sum;
             best = f;
+            @memcpy(chosen[0..cur.len], trial[0..cur.len]);
         }
     }
     return best;
@@ -170,9 +196,9 @@ test "encode produces a decodable png" {
     const a = std.testing.allocator;
     // 2x2 image with distinct pixels.
     const rgba = [_]u8{
-        255, 0,   0,   255, // red
-        0,   255, 0,   255, // green
-        0,   0,   255, 255, // blue
+        255, 0, 0, 255, // red
+        0, 255, 0, 255, // green
+        0, 0, 255, 255, // blue
         255, 255, 255, 255, // white
     };
     const png = try encode(a, 2, 2, &rgba);

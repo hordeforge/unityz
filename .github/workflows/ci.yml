@@ -4,9 +4,37 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege for GITHUB_TOKEN. Both jobs only check out and build;
+# nothing writes back to the repo. Without this the token inherits the
+# repository default, which can be read/write, and every third-party
+# action in the run gets that scope.
+permissions:
+  contents: read
+
 jobs:
-  build-test:
+  # Static analysis, blocking and separate from the build matrix: formatting
+  # and shell lint are platform-independent, so one Linux runner covers them.
+  lint:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Check Zig formatting
+        run: zig fmt --check build.zig src
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh
+
+  build-test:
+    # The library and CLI are developed on macOS and released as a Zig
+    # package consumers build for their own target, so both host platforms
+    # the project is actually used on are tested rather than Linux alone.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2

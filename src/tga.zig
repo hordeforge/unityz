@@ -85,8 +85,8 @@ test "TGA encode round-trips a known image" {
     defer arena.deinit();
     const a = arena.allocator();
     const rgba = [_]u8{
-        255, 0,   0,   255, 0,   255, 0,   255,
-        0,   0,   255, 255, 128, 64,  32,  16,
+        255, 0, 0,   255, 0,   255, 0,  255,
+        0,   0, 255, 255, 128, 64,  32, 16,
     };
     const tga = try encode(a, 2, 2, &rgba);
     try std.testing.expectEqual(@as(usize, 18 + 16), tga.len);

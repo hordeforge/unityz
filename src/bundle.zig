@@ -267,14 +267,15 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
         const raw = data[block_data_offset + in_pos .. end];
         in_pos += b.compressed_size;
 
-        const out = try decompressRaw(allocator, raw, b.uncompressed_size, blockCompressionType(b.flags));
-        defer allocator.free(out);
-        // A block that decodes short would leave the rest of `stream`
-        // uninitialized, and nodes may point at it: reject instead of
-        // handing out uninitialized heap.
-        if (out.len != b.uncompressed_size) return error.Corrupt;
-        @memcpy(stream[out_pos .. out_pos + out.len], out);
-        out_pos += out.len;
+        // Decode straight into the stream: a scratch buffer per block would
+        // cost one allocation and one full copy of the bundle's payload for
+        // nothing. A block that decodes short would leave the rest of
+        // `stream` uninitialized, and nodes may point at it, so the
+        // decoders below reject that instead of handing out uninitialized
+        // heap.
+        if (b.uncompressed_size > total - out_pos) return error.Corrupt;
+        try decompressRawInto(allocator, raw, stream[out_pos..][0..b.uncompressed_size], blockCompressionType(b.flags));
+        out_pos += b.uncompressed_size;
     }
 
     for (nodes) |*n| {
@@ -396,6 +397,31 @@ fn blockCompressionType(block_flags: u16) CompressionType {
 }
 
 /// Decompresses `raw` to `uncompressed_size` bytes using `ctype`.
+/// Decompresses one block into a caller-owned `dst`, which must be exactly
+/// the block's decompressed size.
+fn decompressRawInto(
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+    dst: []u8,
+    ctype: CompressionType,
+) ParseError!void {
+    switch (ctype) {
+        .none => {
+            if (raw.len != dst.len) return error.Corrupt;
+            @memcpy(dst, raw);
+        },
+        .lz4, .lz4hc => lz4.decompressInto(dst, raw) catch return error.DecompressFailed,
+        .lzma => {
+            const out = lzmaDecompress(allocator, raw, @intCast(dst.len)) catch return error.DecompressFailed;
+            defer allocator.free(out);
+            if (out.len != dst.len) return error.Corrupt;
+            @memcpy(dst, out);
+        },
+        .lzham => return error.UnsupportedCompression,
+        else => return error.UnsupportedCompression,
+    }
+}
+
 fn decompressRaw(
     allocator: std.mem.Allocator,
     raw: []const u8,

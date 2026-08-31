@@ -67,6 +67,13 @@ const max_metadata_size: u32 = 64 * 1024 * 1024;
 /// Gzip magic is reported as `.webfile`, since `webfile.parse` is the
 /// only entry point that decompresses; the plaintext inside is
 /// re-validated there.
+///
+/// Known gap: the heuristic below skips format version 4, so a bare v4
+/// serialized file sniffs as `.unknown` even though
+/// `serialized.supportedVersion(4)` is true and `serialized.parse`
+/// reads it. The filter predates v4 parser support and was never
+/// widened; every CLI command routes through `sniff`, so v4 files are
+/// unreachable from the command line.
 pub fn sniff(data: []const u8) SniffResult {
     if (std.mem.startsWith(u8, data, webfile_magic)) {
         return .{ .container = .webfile };

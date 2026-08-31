@@ -112,8 +112,8 @@ test "BMP encode round-trips a known image" {
     defer arena.deinit();
     const a = arena.allocator();
     const rgba = [_]u8{
-        255, 0,   0,   255, 0,   255, 0,   255,
-        0,   0,   255, 255, 128, 64,  32,  16,
+        255, 0, 0,   255, 0,   255, 0,  255,
+        0,   0, 255, 255, 128, 64,  32, 16,
     };
     const bmp = try encode(a, 2, 2, &rgba);
     try std.testing.expectEqual(@as(usize, 70 + 16), bmp.len);

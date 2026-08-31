@@ -13,6 +13,20 @@ zig build test
 zig build
 ```
 
+Linux (x86_64) and macOS (aarch64) are built and tested in CI. There is no
+host-endianness or word-size assumption in the parsers — every field is read
+and written with an explicit byte order — so other targets `zig build
+-Dtarget=...` accepts are expected to work, but are not covered by CI.
+Windows is untested.
+
+CI also blocks on formatting and shell lint. Run the same checks before
+pushing:
+
+```bash
+zig fmt --check build.zig src
+shellcheck scripts/*.sh
+```
+
 Run the CLI:
 
 ```bash
@@ -28,6 +42,7 @@ Run the CLI:
 ./zig-out/bin/unityz hash path/to/asset
 ./zig-out/bin/unityz diff asset_a asset_b
 ./zig-out/bin/unityz skin path/to/asset
+./zig-out/bin/unityz shader path/to/asset 100
 ./zig-out/bin/unityz hierarchy path/to/asset
 ```
 
@@ -37,8 +52,9 @@ does not offer:
 - `verify` - read every object through its type tree, write it back, compare
   bytes; non-zero exit on failure
 - `stats` - per-class sizes and duplicate-object detection
-- `find` - name/class search, with `--exact` for whole-name lookups and
-  `--any` to search every string field (e.g. AssetBundle container paths)
+- `find` - name/class search, with `--exact` for case-sensitive whole-name
+  lookups (the default substring match is case-insensitive) and `--any` to
+  search every string field (e.g. AssetBundle container paths)
 - `show` - one object as JSON, or a hex dump of its bytes with `--raw`
 - `diff` - compare two files' objects by content hash, scoped with
   `--class`, or two directories file-by-file
@@ -114,8 +130,9 @@ ids in different nodes can be targeted individually.
 - `skin --json` - the per-shader skinning report plus the skinned-mesh
   failures
 
-`hash`, `stats`, and `verify` accept `--class <id>` / `--path-id <id>`
-filters; `stats --dups` prints only the duplicate report. Everything else
+`hash` and `verify` accept `--class <id>` / `--path-id <id>` filters,
+`stats` accepts `--class <id>`; `stats --dups` prints only the duplicate
+report. Everything else
 a script needs is plain text and a non-zero exit code on failure.
 
 ## What it is
@@ -125,7 +142,7 @@ a script needs is plain text and a non-zero exit code on failure.
 - a **library** (`src/lib.zig`, imported as `@import("unityz")`) with parsers
   for Unity's asset formats, and
 - a **CLI** (`src/main.zig`, `unityz`) with `info`, `extract`, `edit`,
-  `verify`, `stats`, `find`, `show`, `hash`, `diff`, and `skin`
+  `verify`, `stats`, `find`, `show`, `hash`, `diff`, `skin`, and `shader`
   subcommands for inspecting, pulling out, modifying, checking, and
   comparing assets. `unityz --help` is the authoritative flag reference.
 
@@ -139,10 +156,12 @@ UnityFS bundles, WebFiles, and SerializedFiles (`.assets` and friends)
 and prints what it found (header, type tree presence, object table with
 per-class counts for serialized files, nodes for bundles). With `--dump`,
 objects of a serialized file are read through their type trees and printed
-as JSON. Serialized formats 2-22 are supported (version 4 included, whose
-legacy recursive type-tree and trailing-metadata layouts are handled);
-decompression covers none (uncompressed), LZ4 (in-tree), LZMA (via std),
-and LZHAM (vendored decompressor).
+as JSON. Serialized formats 2-22 are supported by the library's parser
+(version 4 included, whose legacy recursive type-tree and
+trailing-metadata layouts are handled), though container detection
+currently skips version 4, so a bare v4 file is not reachable from the
+CLI. Decompression covers none (uncompressed), LZ4 (in-tree), LZMA (via
+std), and LZHAM (vendored decompressor).
 
 The generic object reader is in: object payloads are decoded through
 their type trees into a JSON-serializable value model (primitives, strings,

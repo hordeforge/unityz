@@ -40,7 +40,8 @@ const usage =
     \\                 (--json for a machine-readable summary;
     \\                  --class <id> to filter; --dups for only the
     \\                  duplicate report)
-    \\  find <path> <s>  Find objects whose name contains <s>
+    \\  find <path> <s>  Find objects whose name contains <s>,
+    \\                 case-insensitively
     \\                 (--class <id> to filter by class;
     \\                  --exact for a case-sensitive whole-name match;
     \\                  --any to match any string field, not just m_Name;
@@ -162,11 +163,21 @@ pub fn main(init: std.process.Init) !void {
             try stderr.flush();
             std.process.exit(1);
         };
+        defer dir.close(io);
+        // Batch mode reads one file per iteration and nothing survives the
+        // `runCommand` call, so the bytes go in an arena that is reset each
+        // time. The process arena never frees, so reading into it would hold
+        // every file of the directory at once — peak memory would track the
+        // whole tree instead of its largest single file.
+        var batch_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer batch_arena_state.deinit();
+        const batch_arena = batch_arena_state.allocator();
         var it = dir.iterate();
         while (try it.next(io)) |entry| {
+            defer _ = batch_arena_state.reset(.retain_capacity);
             if (entry.kind != .file) continue;
-            const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ path, entry.name });
-            const bytes = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch |err| {
+            const full = try std.fmt.allocPrint(batch_arena, "{s}/{s}", .{ path, entry.name });
+            const bytes = std.Io.Dir.cwd().readFileAlloc(io, full, batch_arena, .unlimited) catch |err| {
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 try stderr.flush();
                 continue;
@@ -522,9 +533,10 @@ fn renderDataKeyEq(a: unityz.value.Value, b: unityz.value.Value) bool {
     const ha = a.array[0];
     const hb = b.array[0];
     if (ha != .obj or hb != .obj) return false;
-    var buf: [16]u8 = undefined;
-    for (0..4) |i| {
-        const fname = std.fmt.bufPrint(&buf, "data[{d}]", .{i}) catch return false;
+    // This runs once per m_RenderDataMap entry per sprite, so the field
+    // names are spelled out rather than formatted on each comparison.
+    const data_fields = [_][]const u8{ "data[0]", "data[1]", "data[2]", "data[3]" };
+    for (data_fields) |fname| {
         const fa = unityz.classes.fieldOf(ha, fname) orelse return false;
         const fb = unityz.classes.fieldOf(hb, fname) orelse return false;
         if (fa.asInt() != fb.asInt()) return false;
@@ -560,12 +572,20 @@ fn atlasEntryHit(entry: unityz.value.Value) ?AtlasHit {
     return hit;
 }
 
-/// Finds the texture PPtr for a Sprite that has none of its own by
-/// scanning the file's SpriteAtlas objects. Matches m_RenderDataKey the
-/// way UnityPy does; when the key is absent, falls back to aligning
-/// m_PackedSprites with m_RenderDataMap by position.
-fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, sprite_value: unityz.value.Value, sprite_path_id: i64) ?AtlasHit {
-    const sprite_key = unityz.classes.fieldOf(sprite_value, "m_RenderDataKey");
+/// Per-file memoization for sprite rendering. Every sprite in an atlas
+/// names the same sheet texture and is resolved against the same
+/// SpriteAtlas objects, so without this an N-sprite atlas re-parsed each
+/// atlas object N times and re-decoded (and re-allocated) the shared
+/// texture N times.
+const SpriteCache = struct {
+    textures: std.AutoHashMapUnmanaged(i64, ?DecodedTexture) = .empty,
+    atlases: ?[]const unityz.value.Value = null,
+};
+
+/// Parses the file's SpriteAtlas objects once, memoized in `cache`.
+fn atlasValues(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, cache: *SpriteCache) []const unityz.value.Value {
+    if (cache.atlases) |a| return a;
+    var list: std.ArrayList(unityz.value.Value) = .empty;
     for (sf.objects) |*o| {
         if (o.class_id != 687078895) continue; // SpriteAtlas
         const ti = o.type_index orelse continue;
@@ -576,6 +596,19 @@ fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.Serial
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
         const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+        list.append(arena, v) catch break;
+    }
+    cache.atlases = list.items;
+    return list.items;
+}
+
+/// Finds the texture PPtr for a Sprite that has none of its own by
+/// scanning the file's SpriteAtlas objects. Matches m_RenderDataKey the
+/// way UnityPy does; when the key is absent, falls back to aligning
+/// m_PackedSprites with m_RenderDataMap by position.
+fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, cache: *SpriteCache, sprite_value: unityz.value.Value, sprite_path_id: i64) ?AtlasHit {
+    const sprite_key = unityz.classes.fieldOf(sprite_value, "m_RenderDataKey");
+    for (atlasValues(arena, sf, cache)) |v| {
         const rdm = unityz.classes.fieldOf(v, "m_RenderDataMap") orelse continue;
         if (rdm != .array) continue;
         if (sprite_key) |sk| {
@@ -632,8 +665,7 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
     for (bank.samples, 0..) |s, i| {
         if (i != 0) try w.writeByte(',');
         const dur_ms: u64 = if (s.frequency != 0) @as(u64, s.sample_count) * 1000 / s.frequency else 0;
-        try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d},\"durationMs\":{d}",
-            .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count, dur_ms });
+        try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d},\"durationMs\":{d}", .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count, dur_ms });
         if (s.loop_start) |ls| {
             try w.print(",\"loopStart\":{d},\"loopEnd\":{d}", .{ ls, s.loop_end orelse 0 });
         }
@@ -644,7 +676,6 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
     return try list.toOwnedSlice(arena);
 }
 
-
 fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, name_filter: ?[]const u8, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("unityz: {s}: serialized file parse failed: {s}\n", .{ path, @errorName(err) });
@@ -653,6 +684,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
 
     var extracted: usize = 0;
     var skipped: usize = 0;
+    var sprite_cache: SpriteCache = .{};
+    // Every MonoBehaviour of the same component type points at one shared
+    // MonoScript; without memoizing, that object was located and fully
+    // deserialized once per behaviour.
+    var script_cache: MonoScriptCache = .empty;
     for (sf.objects) |*o| {
         if (class_filter) |cf| {
             if (o.class_id != cf) continue;
@@ -724,19 +760,28 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
                 }
                 if (pixels.len == 0) continue;
-                const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch |err| {
+                // The decoded, flipped and encoded buffers are dead once the
+                // PNG is written, and each is on the order of the texture's
+                // pixel count. The extraction arena lives until the whole
+                // file is done, so taking them from it would make peak
+                // memory the sum of every texture in the file rather than
+                // the largest one.
+                var tex_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+                defer tex_arena_state.deinit();
+                const tex_arena = tex_arena_state.allocator();
+                const rgba = unityz.texture.decode(tex_arena, t.format, t.width, t.height, pixels) catch |err| {
                     try stdout.print("  texture {d}: {s} ({s}) unsupported\n", .{ o.path_id, unityz.texture.format.name(t.format), @errorName(err) });
                     skipped += 1;
                     continue;
                 };
                 // Unity stores texture rows bottom-up; PNGs are top-down, so
                 // flip to match on-screen appearance (and UnityPy's export).
-                const flipped = unityz.texture.flipVertical(arena, rgba, t.width, t.height) catch |err| {
+                const flipped = unityz.texture.flipVertical(tex_arena, rgba, t.width, t.height) catch |err| {
                     try stdout.print("  texture {d}: flip failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
                 };
-                const image = encodeImage(arena, format, t.width, t.height, flipped) catch |err| {
+                const image = encodeImage(tex_arena, format, t.width, t.height, flipped) catch |err| {
                     try stdout.print("  texture {d}: image encode failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
@@ -958,7 +1003,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 }
             },
             213 => { // Sprite -> cropped / mesh-rendered image
-                const rr = renderSprite(arena, &sf, sidecars, v, o.path_id) orelse continue;
+                const rr = renderSprite(arena, &sf, sidecars, &sprite_cache, v, o.path_id) orelse continue;
                 const image = encodeImage(arena, format, rr.w, rr.h, rr.data) catch |err| {
                     try stdout.print("  sprite {d}: image encode failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
@@ -1070,22 +1115,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const payload = data[r.position()..];
                 var ms = unityz.classes.MonoScript{};
                 if (mb.script) |p| {
-                    if (p.file_id == 0) {
-                        for (sf.objects) |*other| {
-                            if (other.path_id == p.path_id) {
-                                if (other.type_index) |ti| {
-                                    if (ti < sf.types.len and sf.types[ti].type_tree.roots.len != 0) {
-                                        const od = sf.objectData(other) orelse break;
-                                        var r2 = unityz.streams.Reader.init(od);
-                                        r2.endian = sf.endian;
-                                        const v2 = unityz.object_reader.readObject(arena, &r2, &sf.types[ti].type_tree.roots[0]) catch break;
-                                        ms = unityz.classes.MonoScript.fromValue(v2);
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
+                    if (p.file_id == 0) ms = monoScriptFor(arena, &sf, &script_cache, p.path_id);
                 }
                 // filename uses the qualified name (namespace.class) so
                 // scripts sharing a namespace do not collide; the label
@@ -1146,36 +1176,35 @@ fn sanitizeComponent(name: []u8) []u8 {
 /// Creates a directory and any missing parents, tolerating an existing
 /// directory. Walks the path one component at a time with single-level
 /// `createDir` instead of std's `createDirPath`, which hangs on special
-/// filesystems such as /proc.
+/// filesystems such as /proc. Components come from the platform's path
+/// iterator rather than a hardcoded '/' split, so a `--outdir` written
+/// with the native separator (`a\b\c` on Windows) still creates parents,
+/// and the root prefix (`/`, `C:\`) is never handed to `createDir`.
 fn ensureDirPath(io: std.Io, dir_path: []const u8) !void {
     if (dir_path.len == 0) return;
     if (std.Io.Dir.cwd().statFile(io, dir_path, .{})) |st| {
         if (st.kind == .directory) return;
     } else |_| {}
-    var start: usize = 0;
-    while (start < dir_path.len) {
-        const end = std.mem.indexOfScalarPos(u8, dir_path, start, '/') orelse dir_path.len;
-        if (end > start) {
-            const prefix = dir_path[0..end];
-            // skip only the leading "/" of an absolute path
-            if (!(prefix.len == 1 and prefix[0] == '/')) {
-                std.Io.Dir.cwd().createDir(io, prefix, .default_dir) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => return err,
-                };
-            }
-        }
-        start = end + 1;
+    var it = std.fs.path.componentIterator(dir_path);
+    while (it.next()) |component| {
+        std.Io.Dir.cwd().createDir(io, component.path, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
     }
 }
 
 fn writeFileToCwd(name: []const u8, contents: []const u8) !void {
     const io = io_global.io;
     const dir = std.Io.Dir.cwd();
+    const full_owned = extract_outdir != null;
     const full = if (extract_outdir) |d|
         try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ d, name })
     else
         name;
+    // One extracted object per call, so keeping the joined path would leak a
+    // page-rounded allocation per file written.
+    defer if (full_owned) std.heap.page_allocator.free(full);
     const file = try dir.createFile(io, full, .{});
     defer file.close(io);
     try file.writeStreamingAll(io, contents);
@@ -1201,6 +1230,24 @@ fn readObjectValue(
     return null;
 }
 
+const MonoScriptCache = std.AutoHashMapUnmanaged(i64, unityz.classes.MonoScript);
+
+/// Reads the file-local MonoScript at `path_id`, memoized in `cache`. An
+/// unreadable script yields the empty MonoScript, cached alike so it is not
+/// retried per behaviour.
+fn monoScriptFor(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    cache: *MonoScriptCache,
+    path_id: i64,
+) unityz.classes.MonoScript {
+    if (cache.get(path_id)) |hit| return hit;
+    var ms = unityz.classes.MonoScript{};
+    if (readObjectValue(arena, sf, path_id)) |v| ms = unityz.classes.MonoScript.fromValue(v);
+    cache.put(arena, path_id, ms) catch {};
+    return ms;
+}
+
 /// A decoded RGBA texture plus its dimensions.
 const DecodedTexture = struct { rgba: []const u8, w: u32, h: u32 };
 
@@ -1221,6 +1268,21 @@ fn texturePixels(sf: *const unityz.serialized.SerializedFile, sidecars: []const 
 /// Decodes a file-local (file_id 0) Texture2D at `path_id` to RGBA, reading
 /// embedded image data, the in-file stream, or a sibling .resS sidecar.
 fn decodeSpriteTexture(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    cache: *SpriteCache,
+    sidecars: []const Sidecar,
+    path_id: i64,
+) ?DecodedTexture {
+    if (cache.textures.get(path_id)) |hit| return hit;
+    const decoded = decodeSpriteTextureUncached(arena, sf, sidecars, path_id);
+    // A failed decode is cached too: retrying it per sprite costs the same
+    // parse and fails the same way.
+    cache.textures.put(arena, path_id, decoded) catch {};
+    return decoded;
+}
+
+fn decodeSpriteTextureUncached(
     arena: std.mem.Allocator,
     sf: *const unityz.serialized.SerializedFile,
     sidecars: []const Sidecar,
@@ -1343,6 +1405,7 @@ fn renderSprite(
     arena: std.mem.Allocator,
     sf: *const unityz.serialized.SerializedFile,
     sidecars: []const Sidecar,
+    cache: *SpriteCache,
     v: unityz.value.Value,
     sprite_path_id: i64,
 ) ?RenderResult {
@@ -1351,20 +1414,21 @@ fn renderSprite(
     // m_RD.texture empty and name the atlas texture instead.
     const hit = if (sprite.texture) |t| blk: {
         if (t.path_id != 0) break :blk AtlasHit{
-            .texture = t, .rect = sprite.rect,
+            .texture = t,
+            .rect = sprite.rect,
             .alpha_texture = sprite.alpha_texture,
             .settings_raw = sprite.settings_raw,
         };
-        break :blk (atlasTextureFor(arena, sf, v, sprite_path_id) orelse return null);
-    } else (atlasTextureFor(arena, sf, v, sprite_path_id) orelse return null);
+        break :blk (atlasTextureFor(arena, sf, cache, v, sprite_path_id) orelse return null);
+    } else (atlasTextureFor(arena, sf, cache, v, sprite_path_id) orelse return null);
     if (hit.texture.file_id != 0) return null; // external file not resolvable here
 
-    const tex = decodeSpriteTexture(arena, sf, sidecars, hit.texture.path_id) orelse return null;
+    const tex = decodeSpriteTexture(arena, sf, cache, sidecars, hit.texture.path_id) orelse return null;
     var rgba: []const u8 = tex.rgba;
     // Merge a separate alpha texture if present (packed sprites).
     if (hit.alpha_texture) |at| {
         if (at.path_id != 0 and at.file_id == 0) {
-            if (decodeSpriteTexture(arena, sf, sidecars, at.path_id)) |alpha_tex| {
+            if (decodeSpriteTexture(arena, sf, cache, sidecars, at.path_id)) |alpha_tex| {
                 if (alpha_tex.w == tex.w and alpha_tex.h == tex.h) {
                     rgba = unityz.classes.mergeAlphaTexture(arena, rgba, alpha_tex.rgba, tex.w, tex.h) catch return null;
                 }
@@ -2283,7 +2347,10 @@ const VerifyReport = struct {
 /// failure came from, when inside a bundle/webfile.
 fn recordFailure(report: *VerifyReport, arena: std.mem.Allocator, node: ?[]const u8, path_id: i64, comptime fmt: []const u8, args: anytype) !void {
     const msg = try std.fmt.allocPrint(arena, fmt, args);
-    try report.failures.append(std.heap.page_allocator, .{ .path_id = path_id, .message = msg, .node = node });
+    // The list is arena-backed like the messages it holds: nothing frees a
+    // page_allocator buffer here, and a directory argument runs `verify`
+    // once per file, so it would leak one buffer per file with failures.
+    try report.failures.append(arena, .{ .path_id = path_id, .message = msg, .node = node });
     report.failed += 1;
 }
 
@@ -2446,7 +2513,17 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
     };
     var checked: usize = 0;
     var failed: usize = 0;
+    // An object's value tree and its re-serialized bytes are dead once the
+    // byte comparison is done, but `arena` spans every object of every node
+    // of the file, so taking them from it makes peak memory the sum of the
+    // whole bundle rather than its largest object. Reset a scratch arena per
+    // object instead. Failure messages keep coming from `arena`: they are
+    // held by `report` and outlive the iteration that recorded them.
+    var obj_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer obj_arena_state.deinit();
+    const obj_arena = obj_arena_state.allocator();
     for (sf.objects) |*o| {
+        defer _ = obj_arena_state.reset(.retain_capacity);
         if (class_filter) |cf| {
             if (o.class_id != cf) continue;
         }
@@ -2463,7 +2540,7 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
 
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
-        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch |err| {
+        const v = unityz.object_reader.readObject(obj_arena, &r, &tree.roots[0]) catch |err| {
             if (json) {
                 try recordFailure(report, arena, node, o.path_id, "read failed: {s}", .{@errorName(err)});
             } else {
@@ -2473,7 +2550,7 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
             failed += 1;
             continue;
         };
-        var w: unityz.streams.Writer = .init(arena);
+        var w: unityz.streams.Writer = .init(obj_arena);
         // preserve the bytes after the tree fields (MonoBehaviour payloads)
         unityz.object_writer.writeObject(&w, &tree.roots[0], v, data[r.position()..]) catch |err| {
             if (json) {
@@ -2496,7 +2573,7 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
         } else if (o.class_id == 48) {
             // Extra Shader check: the sub-program blob must decode and
             // re-encode byte for byte (parameter records round-trip exactly).
-            if (!(try unityz.shader.verifyBlob(arena, v))) {
+            if (!(try unityz.shader.verifyBlob(obj_arena, v))) {
                 if (json) {
                     try recordFailure(report, arena, node, o.path_id, "shader sub-program blob does not round-trip", .{});
                 } else {
@@ -2817,7 +2894,8 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         .serialized => try skinSerializedBytes(arena, bytes, null, &shaders, &failures),
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
                 return;
             };
             for (b.nodes) |n| {
@@ -2827,7 +2905,8 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
                 return;
             };
             for (wf.entries) |e| {
@@ -2836,11 +2915,13 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
         },
         .archive => {
-            try stdout.print("{s}: UnityArchive files are not supported yet\n", .{path});
+            try diag(json, stdout, "{s}: UnityArchive files are not supported yet\n", .{path});
+            if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
             return;
         },
         .unknown => {
-            try stdout.print("{s}: not a recognized Unity asset file\n", .{path});
+            try diag(json, stdout, "{s}: not a recognized Unity asset file\n", .{path});
+            if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
             return;
         },
     }
@@ -2912,6 +2993,17 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     if (failures.items.len != 0) verify_failed_flag = true;
 }
 
+/// Routes a diagnostic to stderr while `--json` is in effect, so the
+/// document a script parses off stdout stays well-formed; without `--json`
+/// it stays on stdout with the rest of the human-readable report.
+fn diag(json: bool, stdout: *Io.Writer, comptime fmt: []const u8, args: anytype) !void {
+    if (!json) return stdout.print(fmt, args);
+    var buf: [512]u8 = undefined;
+    var w: Io.File.Writer = .init(.stderr(), io_global.io, &buf);
+    w.interface.print(fmt, args) catch return;
+    w.interface.flush() catch {};
+}
+
 /// Reports a per-file failure on stderr, keeping it out of the stdout
 /// stream that carries the command's (possibly JSON) result.
 fn warnToStderr(path: []const u8, err: anyerror) void {
@@ -2933,6 +3025,7 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
         try stdout.print("unityz: {s}: {s}\n", .{ dir_a, @errorName(err) });
         return;
     };
+    defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
@@ -2943,13 +3036,20 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
             warnToStderr(full, err);
             continue;
         };
-        try files_a.append(std.heap.page_allocator, .{ .name = entry.name, .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
+        // `entry.name` borrows the iterator's buffer and is overwritten by the
+        // next `next()`, so keep the copy inside `full` instead.
+        try files_a.append(std.heap.page_allocator, .{ .name = full[dir_a.len + 1 ..], .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
+        // Only the hash and length survive the comparison, so the file bytes
+        // must not be held: a large tree would otherwise pin every byte of
+        // both directories in memory at once.
+        std.heap.page_allocator.free(data);
     }
 
     var dir2 = std.Io.Dir.cwd().openDir(io, dir_b, .{ .iterate = true }) catch |err| {
         try stdout.print("unityz: {s}: {s}\n", .{ dir_b, @errorName(err) });
         return;
     };
+    defer dir2.close(io);
     var it2 = dir2.iterate();
     while (try it2.next(io)) |entry| {
         if (entry.kind != .file) continue;
@@ -2958,7 +3058,8 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
             warnToStderr(full, err);
             continue;
         };
-        try files_b.append(std.heap.page_allocator, .{ .name = entry.name, .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
+        try files_b.append(std.heap.page_allocator, .{ .name = full[dir_b.len + 1 ..], .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
+        std.heap.page_allocator.free(data);
     }
 
     var unchanged: usize = 0;
@@ -2969,10 +3070,18 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
     var changed_names: std.ArrayList([]const u8) = .empty;
     var only_a_names: std.ArrayList([]const u8) = .empty;
     var only_b_names: std.ArrayList([]const u8) = .empty;
+    // Index by name so matching is linear; the nested scan it replaces was
+    // quadratic in the file count, with a string compare per pair.
+    var b_by_name: std.StringHashMapUnmanaged(DirFile) = .empty;
+    defer b_by_name.deinit(std.heap.page_allocator);
+    var a_names: std.StringHashMapUnmanaged(void) = .empty;
+    defer a_names.deinit(std.heap.page_allocator);
+    for (files_b.items) |fb| try b_by_name.put(std.heap.page_allocator, fb.name, fb);
+    for (files_a.items) |fa| try a_names.put(std.heap.page_allocator, fa.name, {});
+
     for (files_a.items) |fa| {
         var matched = false;
-        for (files_b.items) |fb| {
-            if (!std.mem.eql(u8, fa.name, fb.name)) continue;
+        if (b_by_name.get(fa.name)) |fb| {
             matched = true;
             if (fa.hash != fb.hash or fa.size != fb.size) {
                 changed += 1;
@@ -3004,22 +3113,22 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
                     // directory diffs keep pixel/audio as text diagnostics
                     // (on stderr in --json mode); the --json stats arrays
                     // cover single-file diffs
-                    var diag: *Io.Writer = stdout;
+                    var diag_out: *Io.Writer = stdout;
                     var err_buf: [1024]u8 = undefined;
                     var err_writer: Io.File.Writer = undefined;
                     if (json) {
                         err_writer = .init(.stderr(), io, &err_buf);
-                        diag = &err_writer.interface;
+                        diag_out = &err_writer.interface;
                     }
                     var pixel_stats: std.ArrayList(PixelStat) = .empty;
                     var audio_stats: std.ArrayList(AudioStat) = .empty;
                     if (pixels) {
-                        try diag.print("  pixels in {s}:\n", .{fa.name});
-                        try pixelPass(arena_state.allocator(), data_a, data_b, class_filter, diag, &pixel_stats);
+                        try diag_out.print("  pixels in {s}:\n", .{fa.name});
+                        try pixelPass(arena_state.allocator(), data_a, data_b, class_filter, diag_out, &pixel_stats);
                     }
                     if (audio) {
-                        try diag.print("  audio in {s}:\n", .{fa.name});
-                        try audioPass(arena_state.allocator(), data_a, data_b, class_filter, diag, &audio_stats);
+                        try diag_out.print("  audio in {s}:\n", .{fa.name});
+                        try audioPass(arena_state.allocator(), data_a, data_b, class_filter, diag_out, &audio_stats);
                     }
                     if (json) try err_writer.flush();
                 }
@@ -3036,14 +3145,7 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
         }
     }
     for (files_b.items) |fb| {
-        var matched = false;
-        for (files_a.items) |fa| {
-            if (std.mem.eql(u8, fa.name, fb.name)) {
-                matched = true;
-                break;
-            }
-        }
-        if (!matched) {
+        if (!a_names.contains(fb.name)) {
             only_b += 1;
             try only_b_names.append(std.heap.page_allocator, fb.name);
             if (!json and reported < 10) {
@@ -3139,7 +3241,8 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("[]\n", .{});
                 return;
             };
             for (b.nodes) |n| {
@@ -3154,7 +3257,8 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("[]\n", .{});
                 return;
             };
             for (wf.entries) |e| {
@@ -3170,14 +3274,15 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         .serialized => {
             if (path_filter) |pf| {
                 if (pf.node != null) {
-                    try stdout.print("unityz: node selector not valid for a serialized file\n", .{});
+                    try diag(json, stdout, "unityz: node selector not valid for a serialized file\n", .{});
+                    if (json) try stdout.print("[]\n", .{});
                     return;
                 }
             }
             try hashSerializedBytes(arena, bytes, null, if (path_filter) |pf| pf.path_id else null, class_filter, json, &entries, stdout);
         },
         else => {
-            try stdout.print("{s}: hash requires a serialized file, bundle, or webfile\n", .{path});
+            try diag(json, stdout, "{s}: hash requires a serialized file, bundle, or webfile\n", .{path});
         },
     }
     if (json) {
@@ -3200,7 +3305,7 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
 
 fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, path_filter: ?i64, class_filter: ?i32, json: bool, entries: *std.ArrayList(Fp), stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
+        try diag(json, stdout, "  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
     };
     for (sf.objects) |*o| {
@@ -3238,14 +3343,15 @@ fn pixelPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
     var b_list: std.ArrayList(Fp) = .empty;
     try collectFingerprints(arena, a_bytes, class_filter, null, &a_list);
     try collectFingerprints(arena, b_bytes, class_filter, null, &b_list);
+    var sprite_cache: SpriteCache = .{};
     for (a_list.items) |fa| {
         for (b_list.items) |fb| {
             if (fb.path_id != fa.path_id or !sameNode(fb.node, fa.node)) continue;
             switch (fa.class_id) {
-                28 => if (try diffTexturePixels(arena, a_bytes, b_bytes, fa, stdout)) |st| {
+                28 => if (try diffTexturePixels(arena, a_bytes, b_bytes, fa, &sprite_cache, stdout)) |st| {
                     if (st.diff_pixels != 0) try stats.append(arena, st);
                 },
-                213 => if (try diffSpritePixels(arena, a_bytes, b_bytes, fa, stdout)) |st| {
+                213 => if (try diffSpritePixels(arena, a_bytes, b_bytes, fa, &sprite_cache, stdout)) |st| {
                     if (st.diff_pixels != 0) try stats.append(arena, st);
                 },
                 else => {},
@@ -3531,9 +3637,9 @@ fn findObjectValueInSerialized(arena: std.mem.Allocator, bytes: []const u8, path
 /// entry. Pixels may be embedded in the object, streamed inside the same
 /// serialized file, or streamed from a sibling `.resS` / `.resource`
 /// sidecar node inside the same container, all resolved here.
-fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !?PixelStat {
-    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .texture);
-    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .texture);
+fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, cache: *SpriteCache, stdout: *Io.Writer) !?PixelStat {
+    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .texture, cache);
+    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .texture, cache);
     if (rgba_a == null or rgba_b == null) {
         try stdout.print("    (pixels: object {d} texture could not be decoded in one or both files)\n", .{fa.path_id});
         return null;
@@ -3551,9 +3657,9 @@ fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []c
 /// rotation, alpha-texture merge, tight/polygon mesh) and compares the
 /// RGBA. Object bytes are unchanged when only the streamed atlas pixels
 /// change, so this is the only diff signal that sees those edits.
-fn diffSpritePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !?PixelStat {
-    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .sprite);
-    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .sprite);
+fn diffSpritePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, cache: *SpriteCache, stdout: *Io.Writer) !?PixelStat {
+    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .sprite, cache);
+    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .sprite, cache);
     if (rgba_a == null or rgba_b == null) {
         try stdout.print("    (pixels: object {d} sprite could not be rendered in one or both files)\n", .{fa.path_id});
         return null;
@@ -3633,7 +3739,7 @@ const RgbaKind = enum { texture, sprite };
 /// a file, container-aware: `.resS` / `.resource` sidecar nodes inside the
 /// same bundle/webfile are resolved, and `fa.node` selects the container
 /// entry. Returns null when the object is absent or cannot be decoded.
-fn findObjectRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, kind: RgbaKind) !?Rgba {
+fn findObjectRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, kind: RgbaKind, cache: *SpriteCache) !?Rgba {
     var out: ?Rgba = null;
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
@@ -3651,7 +3757,7 @@ fn findObjectRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, kind: Rgb
                 if (fa.node) |sn| {
                     if (!std.mem.eql(u8, n.path, sn)) continue;
                 }
-                out = try findObjectRgbaInSerialized(arena, n.data, fa.path_id, sidecars.items, kind);
+                out = try findObjectRgbaInSerialized(arena, n.data, fa.path_id, sidecars.items, kind, cache);
                 if (out != null) return out;
             }
         },
@@ -3668,20 +3774,20 @@ fn findObjectRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, kind: Rgb
                 if (fa.node) |sn| {
                     if (!std.mem.eql(u8, e.path, sn)) continue;
                 }
-                out = try findObjectRgbaInSerialized(arena, e.data, fa.path_id, sidecars.items, kind);
+                out = try findObjectRgbaInSerialized(arena, e.data, fa.path_id, sidecars.items, kind, cache);
                 if (out != null) return out;
             }
         },
         .serialized => {
             if (fa.node != null) return null;
-            out = try findObjectRgbaInSerialized(arena, bytes, fa.path_id, &.{}, kind);
+            out = try findObjectRgbaInSerialized(arena, bytes, fa.path_id, &.{}, kind, cache);
         },
         else => {},
     }
     return out;
 }
 
-fn findObjectRgbaInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar, kind: RgbaKind) !?Rgba {
+fn findObjectRgbaInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar, kind: RgbaKind, cache: *SpriteCache) !?Rgba {
     const sf = unityz.serialized.parse(arena, bytes) catch return null;
     const want: i32 = switch (kind) {
         .texture => 28,
@@ -3708,12 +3814,11 @@ fn findObjectRgbaInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_
             return .{ .data = rgba, .w = t.width, .h = t.height };
         },
         .sprite => {
-            const rr = renderSprite(arena, &sf, sidecars, v, path_id) orelse return null;
+            const rr = renderSprite(arena, &sf, sidecars, cache, v, path_id) orelse return null;
             return .{ .data = rr.data, .w = rr.w, .h = rr.h };
         },
     }
 }
-
 
 /// `diff <file1> <file2>` — compare two files' objects by content hash:
 /// reports objects only in one file, objects whose bytes changed between
@@ -3793,10 +3898,26 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var changed_objs: std.ArrayList(Fp) = .empty;
     var only_a_objs: std.ArrayList(Fp) = .empty;
     var only_b_objs: std.ArrayList(Fp) = .empty;
+    // Index both sides by (path_id, node). The nested scans this replaces
+    // were quadratic in the object count, which bites on bundles holding
+    // thousands of objects.
+    var b_by_key: FpMap = .empty;
+    defer b_by_key.deinit(std.heap.page_allocator);
+    var a_keys: FpMap = .empty;
+    defer a_keys.deinit(std.heap.page_allocator);
+    // First entry wins, matching the first-match semantics of the scans.
+    for (b_list.items) |fb| {
+        const gop = try b_by_key.getOrPut(std.heap.page_allocator, .{ .path_id = fb.path_id, .node = fb.node });
+        if (!gop.found_existing) gop.value_ptr.* = fb;
+    }
+    for (a_list.items) |fa| {
+        const gop = try a_keys.getOrPut(std.heap.page_allocator, .{ .path_id = fa.path_id, .node = fa.node });
+        if (!gop.found_existing) gop.value_ptr.* = fa;
+    }
+
     for (a_list.items) |fa| {
         var matched = false;
-        for (b_list.items) |fb| {
-            if (fb.path_id != fa.path_id or !sameNode(fb.node, fa.node)) continue;
+        if (b_by_key.get(.{ .path_id = fa.path_id, .node = fa.node })) |fb| {
             matched = true;
             if (fb.hash != fa.hash or fb.size != fa.size) {
                 changed += 1;
@@ -3814,7 +3935,6 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             } else {
                 unchanged += 1;
             }
-            break;
         }
         if (!matched) {
             only_a += 1;
@@ -3831,14 +3951,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         }
     }
     for (b_list.items) |fb| {
-        var matched = false;
-        for (a_list.items) |fa| {
-            if (fa.path_id == fb.path_id and sameNode(fa.node, fb.node)) {
-                matched = true;
-                break;
-            }
-        }
-        if (!matched) {
+        if (!a_keys.contains(.{ .path_id = fb.path_id, .node = fb.node })) {
             only_b += 1;
             try only_b_objs.append(std.heap.page_allocator, fb);
             if (!json and reported < 10) {
@@ -3856,15 +3969,15 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var audio_stats: std.ArrayList(AudioStat) = .empty;
     // in --json mode the pixel/audio text diagnostics go to stderr so
     // stdout carries only the JSON document
-    var diag: *Io.Writer = stdout;
+    var diag_out: *Io.Writer = stdout;
     var err_buf: [1024]u8 = undefined;
     var err_writer: Io.File.Writer = undefined;
     if (json) {
         err_writer = .init(.stderr(), io_global.io, &err_buf);
-        diag = &err_writer.interface;
+        diag_out = &err_writer.interface;
     }
-    if (pixels) try pixelPass(arena, bytes, other_bytes, class_filter, diag, &pixel_stats);
-    if (audio) try audioPass(arena, bytes, other_bytes, class_filter, diag, &audio_stats);
+    if (pixels) try pixelPass(arena, bytes, other_bytes, class_filter, diag_out, &pixel_stats);
+    if (audio) try audioPass(arena, bytes, other_bytes, class_filter, diag_out, &audio_stats);
     if (json) try err_writer.flush();
     if (json) {
         try stdout.print("{{\"a\":", .{});
@@ -3916,6 +4029,24 @@ fn writeAudioStats(stdout: *Io.Writer, items: []const AudioStat) !void {
 }
 
 /// Prints a JSON array of `{"path_id":N,"class":N}` objects.
+/// Identity of an object across two files: its path id, qualified by the
+/// container node it came from.
+const FpKey = struct { path_id: i64, node: ?[]const u8 };
+
+const FpKeyContext = struct {
+    pub fn hash(_: FpKeyContext, k: FpKey) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.asBytes(&k.path_id));
+        if (k.node) |n| h.update(n);
+        return h.final();
+    }
+    pub fn eql(_: FpKeyContext, a: FpKey, b: FpKey) bool {
+        return a.path_id == b.path_id and sameNode(a.node, b.node);
+    }
+};
+
+const FpMap = std.HashMapUnmanaged(FpKey, Fp, FpKeyContext, std.hash_map.default_max_load_percentage);
+
 /// Two objects match only when they come from the same container node
 /// (both unqualified, or the same node path).
 fn sameNode(a: ?[]const u8, b: ?[]const u8) bool {
@@ -4189,7 +4320,8 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("[]\n", .{});
                 return;
             };
             for (b.nodes) |n| {
@@ -4199,7 +4331,8 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                try diag(json, stdout, "{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                if (json) try stdout.print("[]\n", .{});
                 return;
             };
             for (wf.entries) |e| {
@@ -4209,7 +4342,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .serialized => try findSerializedBytes(arena, bytes, null, needle, class_filter, exact, any, json, &found, stdout),
         else => {
-            try stdout.print("{s}: find requires a serialized file, bundle, or webfile\n", .{path});
+            try diag(json, stdout, "{s}: find requires a serialized file, bundle, or webfile\n", .{path});
         },
     }
     if (json) {
@@ -4277,11 +4410,20 @@ fn anyStringEquals(v: unityz.value.Value, needle: []const u8) bool {
 
 fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, needle: []const u8, class_filter: ?i32, exact: bool, any: bool, json: bool, found: *std.ArrayList(FindMatch), stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
+        try diag(json, stdout, "  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
     };
     var matches: usize = 0;
+    // `find` decodes a whole value tree per object but keeps only `m_Name`
+    // from it, so holding the trees in `arena` — which spans every object of
+    // every node — makes peak memory the sum of the file's decoded objects.
+    // Reset a scratch arena per object; the name is duped into `arena` at
+    // the one point it outlives the iteration (the `found` list).
+    var obj_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer obj_arena_state.deinit();
+    const obj_arena = obj_arena_state.allocator();
     for (sf.objects) |*o| {
+        defer _ = obj_arena_state.reset(.retain_capacity);
         if (class_filter) |cf| {
             if (o.class_id != cf) continue;
         }
@@ -4292,7 +4434,7 @@ fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
         const data = sf.objectData(o) orelse continue;
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
-        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+        const v = unityz.object_reader.readObject(obj_arena, &r, &tree.roots[0]) catch continue;
         const name = unityz.classes.stringField(v, "m_Name") orelse "";
         if (needle.len != 0) {
             if (exact) {
@@ -4307,7 +4449,11 @@ fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
             }
         }
         if (json) {
-            try found.append(std.heap.page_allocator, .{ .path_id = o.path_id, .class_id = o.class_id, .name = name, .node = node });
+            // Arena-backed: the caller's arena is released on return, whereas
+            // a page_allocator buffer would leak once per file when `find` is
+            // run over a directory. `name` borrows the per-object arena, which
+            // is reset at the end of this iteration, so it has to be copied.
+            try found.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = try arena.dupe(u8, name), .node = node });
         } else {
             const cname = className(o.class_id) orelse "Class";
             if (node) |nd| {
@@ -5601,4 +5747,96 @@ test "parseFieldPath splits dotted and indexed paths" {
     try std.testing.expectError(error.BadPath, parseFieldPath("a..b"));
     try std.testing.expectError(error.BadPath, parseFieldPath("a["));
     try std.testing.expectError(error.BadPath, parseFieldPath("[]"));
+}
+
+test "sanitizeComponent confines a file-supplied name to one path component" {
+    // An asset's `m_Name` reaches the output filename, so the separators
+    // that would let it escape the extract directory must be neutralised.
+    var traversal = "../../etc/passwd".*;
+    try std.testing.expectEqualStrings(".._.._etc_passwd", sanitizeComponent(&traversal));
+
+    var windows = "..\\..\\system32".*;
+    try std.testing.expectEqualStrings(".._.._system32", sanitizeComponent(&windows));
+
+    // A NUL truncates the path at the syscall, hiding whatever follows it
+    // from the extension checks, so it is replaced too.
+    var nul = "evil\x00.png".*;
+    try std.testing.expectEqualStrings("evil_.png", sanitizeComponent(&nul));
+
+    // Ordinary names survive untouched, and the returned slice aliases the
+    // caller's buffer rather than a copy.
+    var plain = "Player_Idle.png".*;
+    const out = sanitizeComponent(&plain);
+    try std.testing.expectEqualStrings("Player_Idle.png", out);
+    try std.testing.expectEqual(@as([*]u8, &plain), out.ptr);
+
+    var empty: [0]u8 = undefined;
+    try std.testing.expectEqualStrings("", sanitizeComponent(&empty));
+}
+
+/// Test-only field lookup on an `.obj` value.
+fn testFieldOf(v: unityz.value.Value, name: []const u8) ?unityz.value.Value {
+    for (v.obj) |f| {
+        if (std.mem.eql(u8, f.name, name)) return f.value;
+    }
+    return null;
+}
+
+test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments" {
+    // The tree `edit` walks: a scalar, an array, a nested object and a PPtr.
+    const original = unityz.value.Value{ .obj = &[_]unityz.value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "Old" } },
+        .{ .name = "m_Values", .value = .{ .array = &[_]unityz.value.Value{
+            .{ .int = 10 },
+            .{ .int = 20 },
+            .{ .int = 30 },
+        } } },
+        .{ .name = "m_Sub", .value = .{ .obj = &[_]unityz.value.Field{
+            .{ .name = "count", .value = .{ .int = 1 } },
+        } } },
+        .{ .name = "m_Script", .value = .{ .pptr = .{ .file_id = 0, .path_id = 42 } } },
+    } };
+
+    const set = struct {
+        fn apply(v: unityz.value.Value, path: []const u8, new_value: unityz.value.Value) !unityz.value.Value {
+            return setFieldPath(v, try parseFieldPath(path), 0, new_value);
+        }
+    }.apply;
+
+    // A nested scalar is replaced and the siblings survive untouched.
+    const nested = try set(original, "m_Sub.count", .{ .int = 7 });
+    try std.testing.expectEqual(@as(i64, 7), testFieldOf(testFieldOf(nested, "m_Sub").?, "count").?.int);
+    try std.testing.expectEqualStrings("Old", testFieldOf(nested, "m_Name").?.string);
+    try std.testing.expectEqual(@as(usize, 4), nested.obj.len);
+    // copy-on-write: the source tree is not mutated
+    try std.testing.expectEqual(@as(i64, 1), testFieldOf(testFieldOf(original, "m_Sub").?, "count").?.int);
+
+    // An indexed segment replaces one element and preserves order.
+    const indexed = try set(original, "m_Values[1]", .{ .int = 99 });
+    const arr = testFieldOf(indexed, "m_Values").?.array;
+    try std.testing.expectEqual(@as(usize, 3), arr.len);
+    try std.testing.expectEqual(@as(i64, 10), arr[0].int);
+    try std.testing.expectEqual(@as(i64, 99), arr[1].int);
+    try std.testing.expectEqual(@as(i64, 30), arr[2].int);
+
+    // PPtrs are stored compactly but expose m_FileID / m_PathID for descent;
+    // the untouched half of the pair carries over.
+    const repointed = try set(original, "m_Script.m_PathID", .{ .int = 1234 });
+    try std.testing.expectEqual(@as(i64, 1234), testFieldOf(repointed, "m_Script").?.pptr.path_id);
+    try std.testing.expectEqual(@as(i32, 0), testFieldOf(repointed, "m_Script").?.pptr.file_id);
+    const refiled = try set(original, "m_Script.m_FileID", .{ .int = 3 });
+    try std.testing.expectEqual(@as(i32, 3), testFieldOf(refiled, "m_Script").?.pptr.file_id);
+    try std.testing.expectEqual(@as(i64, 42), testFieldOf(refiled, "m_Script").?.pptr.path_id);
+
+    // Every way a path can fail to name an existing leaf is BadPath, so a
+    // typo never silently appends a field or drops the edit.
+    try std.testing.expectError(error.BadPath, set(original, "nope", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(original, "m_Sub.nope", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(original, "m_Values[3]", .{ .int = 1 })); // past the end
+    try std.testing.expectError(error.BadPath, set(original, "m_Name.x", .{ .int = 1 })); // scalar has no fields
+    try std.testing.expectError(error.BadPath, set(original, "m_Sub[0]", .{ .int = 1 })); // obj is not an array
+    try std.testing.expectError(error.BadPath, set(original, "m_Script.m_Other", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(original, "m_Script.m_PathID.x", .{ .int = 1 }));
+    // a PPtr half only accepts an integer-like value
+    try std.testing.expectError(error.BadPath, set(original, "m_Script.m_PathID", .{ .string = "x" }));
 }
