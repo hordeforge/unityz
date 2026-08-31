@@ -40,7 +40,10 @@ pub fn rewrite(allocator: std.mem.Allocator, sf: *const serialized.SerializedFil
     if (!serialized.supportedVersion(version)) return error.UnsupportedFormat;
 
     const source = sf.source;
-    const metadata = source[sf.metadata_body_offset .. sf.metadata_body_offset + sf.metadata_size];
+    // Format versions < 9 store the endianness byte in the metadata block
+    // (`metadata_size` includes it); the body runs one byte shorter.
+    const metadata_body_len = if (version < 9) sf.metadata_size - 1 else sf.metadata_size;
+    const metadata = source[sf.metadata_body_offset .. sf.metadata_body_offset + metadata_body_len];
     const prefix = metadata[0..sf.object_table_offset];
     const suffix = metadata[sf.after_objects_offset..];
 
@@ -214,7 +217,7 @@ pub fn rewrite(allocator: std.mem.Allocator, sf: *const serialized.SerializedFil
 
 fn headerSize(version: u32) u64 {
     return switch (version) {
-        2, 3, 5...8 => 16,
+        2, 3, 4, 5...8 => 16,
         9...21 => 20,
         else => 48,
     };
@@ -404,6 +407,42 @@ test "rewrite rejects legacy formats and unknown path ids" {
     const bytes = try buildV17Fixture(a);
     const sf = try serialized.parse(a, bytes);
     try std.testing.expectError(error.ObjectNotFound, rewrite(a, &sf, &.{.{ .path_id = 999, .data = "x" }}));
+}
+
+test "parse and rewrite a v4 file byte-exactly" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A minimal SerializedFile v4 (Unity 4.x): one MonoBehaviour (114) with an
+    // int field `m_Value`. The header is big-endian; the object data uses the
+    // trailing-endianness byte; the type tree is the legacy recursive format
+    // with 4-byte-aligned length-prefixed strings (the documented Unity
+    // encoding; UnityPy's own legacy parser uses NUL-terminated strings and
+    // cannot decode the real format here).
+    const bytes = [_]u8{
+        0x00, 0x00, 0x00, 0x95, 0x00, 0x00, 0x00, 0xa9, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x10,
+        0x07, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x72, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00,
+        0x00, 0x4d, 0x6f, 0x6e, 0x6f, 0x42, 0x65, 0x68, 0x61, 0x76, 0x69, 0x6f, 0x75, 0x72, 0x00, 0x00,
+        0x00, 0x14, 0x00, 0x00, 0x00, 0x42, 0x61, 0x73, 0x65, 0x3c, 0x4d, 0x6f, 0x6e, 0x6f, 0x42, 0x65,
+        0x68, 0x61, 0x76, 0x69, 0x6f, 0x75, 0x72, 0x3e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x04, 0x00, 0x00, 0x00, 0x69, 0x6e, 0x74, 0x00, 0x08, 0x00, 0x00, 0x00, 0x6d, 0x5f, 0x56,
+        0x61, 0x6c, 0x75, 0x65, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x72, 0x00, 0x00,
+        0x00, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    var sf = try serialized.parse(a, &bytes);
+    try std.testing.expectEqual(@as(u32, 4), sf.version);
+    try std.testing.expectEqual(@as(usize, 1), sf.objects.len);
+    const o1 = sf.findObject(1).?;
+    try std.testing.expectEqual(@as(i32, 114), o1.class_id);
+    try std.testing.expectEqualSlices(u8, "\x07\x00\x00\x00", sf.objectData(o1).?);
+
+    // A no-op rewrite reproduces the file byte-for-byte.
+    const out = try rewrite(a, &sf, &.{});
+    defer a.free(out);
+    try std.testing.expectEqualSlices(u8, &bytes, out);
 }
 
 // ---------------------------------------------------------------------------

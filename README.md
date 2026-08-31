@@ -108,8 +108,9 @@ UnityFS bundles, WebFiles, and SerializedFiles (`.assets` and friends)
 and prints what it found (header, type tree presence, object table with
 per-class counts for serialized files, nodes for bundles). With `--dump`,
 objects of a serialized file are read through their type trees and printed
-as JSON. Serialized formats 2-22 are supported except version 4, which is
-rejected; decompression covers none (uncompressed), LZ4 (in-tree), and
+as JSON. Serialized formats 2-22 are supported (version 4 included, whose
+legacy recursive type-tree and trailing-metadata layouts are handled);
+decompression covers none (uncompressed), LZ4 (in-tree), and
 LZMA (via std), with LZHAM detected but unsupported.
 
 The generic object reader is in: object payloads are decoded through
@@ -161,7 +162,8 @@ matching UnityPy's mask_sprite/render_sprite_mesh.
 Managed-reference registries decode
 through their type trees, MonoBehaviours resolve their MonoScript and
 export the raw script payload, Meshes export as Wavefront OBJ (vertices,
-normals, UVs, faces), Materials and Shaders export as readable text;
+normals, UVs, faces), including multi-stream vertex layouts, Materials
+and Shaders export as readable text;
 additionally, each Shader's compiled sub-program blob is decoded and
 reported as skinning or not (its vertex stage applies per-vertex bone
 matrices), read off the bind-channel block and parameter-blob bindings;
@@ -175,7 +177,7 @@ AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
 MP3) with an FSB5 metadata sidecar (sample rate, channels, loop points,
 format - UnityPy never surfaces these), and objects reserialize
 byte-exactly and can be edited in place
-across formats 2-22 except 4 (legacy rewrites included).
+across formats 2-22 (legacy rewrites included).
 
 UnityFS bundles parse
 real big-endian files across format versions 6-22 (Unity 5.x through
