@@ -19,7 +19,7 @@
 //!
 //! The final sequence consists of literals only (no offset/match). Overlap
 //! between a match and its source is legal (that is how runs like
-//! `aaaaaa` are encoded), so matches are copied byte by byte.
+//! `aaaaaa` are encoded), so matches are copied in `offset`-sized chunks.
 
 const std = @import("std");
 
@@ -34,6 +34,16 @@ pub const Error = error{
 pub fn decompress(allocator: std.mem.Allocator, src: []const u8, expected_size: usize) Error![]u8 {
     const out = allocator.alloc(u8, expected_size) catch return error.OutputOverflow;
     errdefer allocator.free(out);
+    try decompressInto(out, src);
+    return out;
+}
+
+/// Decompresses an LZ4 block into `out`, which must be exactly the block's
+/// decompressed size. Lets a caller that already owns the destination -
+/// a bundle decoding blocks straight into the concatenated stream - skip
+/// both the per-block allocation and the copy out of it.
+pub fn decompressInto(out: []u8, src: []const u8) Error!void {
+    const expected_size = out.len;
 
     var in_pos: usize = 0;
     var out_pos: usize = 0;
@@ -74,15 +84,20 @@ pub fn decompress(allocator: std.mem.Allocator, src: []const u8, expected_size: 
         match_len += 4;
         if (match_len > expected_size -| out_pos) return error.OutputOverflow;
 
-        // Copy byte by byte so an overlapping match works (LZ4's run idiom).
-        for (0..match_len) |_| {
-            out[out_pos] = out[out_pos - offset];
-            out_pos += 1;
+        // Copy in `offset`-sized chunks: each chunk reads only bytes an
+        // earlier chunk already wrote, so an overlapping match (LZ4's run
+        // idiom) still works, while the common non-overlapping case becomes
+        // a single memcpy instead of a byte-at-a-time loop.
+        var remaining = match_len;
+        while (remaining != 0) {
+            const chunk = @min(remaining, offset);
+            @memcpy(out[out_pos..][0..chunk], out[out_pos - offset ..][0..chunk]);
+            out_pos += chunk;
+            remaining -= chunk;
         }
     }
 
     if (out_pos != expected_size) return error.OutputOverflow;
-    return out;
 }
 
 /// Reads the 255-extension of a length field. Returns the accumulated extra
