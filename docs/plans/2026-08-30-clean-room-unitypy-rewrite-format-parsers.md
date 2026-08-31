@@ -1885,3 +1885,24 @@ Unity 5.6 AudioClips have no embedded byte field (pure m_Resource
 streaming), so they are not de-streamable this way; that path is the
 sidecar-node edit slice. README edit section documents the workflow.
 290/290 tests.
+
+2026-09-01 (edit: raw-node sidecar byte patches): edit --patch gains a
+node-path key form that patches a raw container node's bytes at an
+offset - {"CAB-..resource": {"offset": N, "bytes": "<base64>"}} -
+reaching streamed payloads the object tree never held (Unity 5.6
+AudioClips stream their banks via m_Resource with no embedded byte
+field). The decoded bytes overwrite [N, N+len) in the node's data; the
+range must fit, so every sidecar reference (m_Resource offset/size,
+m_StreamData) stays valid. Multiple entries for one node apply in
+order; keys must name an existing non-serialized node (a serialized
+node needs node:path-id).
+
+Verified on the real char_118 bundle (v6, 2 nodes): an identical
+4096-byte bank patched back at offset 0 round-trips clean (36/36,
+diff --audio 0 differ); a flipped byte at offset 2000 shows in
+diff --audio as exactly that clip, first difference at 2000; a
+non-zero offset (4096, CN_001's 17088-byte bank) likewise; UnityPy
+still reads all 35 clips from each rebuilt bundle. WebFile entries get
+the same form. Unit tests cover the decode/replace, out-of-range
+rejection, malformed literals, and the key classification. 291/291
+tests.

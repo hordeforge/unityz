@@ -84,7 +84,10 @@ const usage =
     \\
     \\Patch example: {"2": {"m_Name": "renamed"}, "7": {"m_LocalPosition.y": 1.25}}
     \\  (edit --patch <file> applies every entry in one atomic rewrite;
-    \\   fields may be dotted and indexed like the single-edit form)
+    \\   fields may be dotted and indexed like the single-edit form;
+    \\   a raw-node key patches a sidecar's bytes at an offset:
+    \\   {"CAB-..resS": {"offset": 4096, "bytes": "<base64>"}} replaces
+    \\   the decoded bytes at that offset of the node's data)
 ;
 
 /// Flushes stdout, exiting like SIGPIPE would (141) when the consumer
@@ -5028,8 +5031,25 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
             // A selector that will not parse must stop the edit before
             // anything is written: the serialized branch already rejects
             // it up front, and silently skipping one here would rewrite
-            // the file having applied only part of the patch.
+            // the file having applied only part of the patch. A raw-node
+            // key must name an existing non-serialized node.
             for (entries) |entry| {
+                if (isRawNodeKey(entry.name)) {
+                    var node_found = false;
+                    for (b.nodes) |n| {
+                        if (!std.mem.eql(u8, entry.name, n.path)) continue;
+                        node_found = true;
+                        if (unityz.container.sniff(n.data).container == .serialized) {
+                            try stdout.print("unityz: entry '{s}' names a serialized node; use 'node:path-id'\n", .{entry.name});
+                            return;
+                        }
+                    }
+                    if (!node_found) {
+                        try stdout.print("unityz: bad patch entry '{s}': no such node\n", .{entry.name});
+                        return;
+                    }
+                    continue;
+                }
                 _ = parseSelector(entry.name) catch {
                     try stdout.print("unityz: bad patch entry '{s}'\n", .{entry.name});
                     return;
@@ -5037,21 +5057,36 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
             }
             var replacements: std.ArrayList(unityz.bundle.NodeReplacement) = .empty;
             for (b.nodes) |n| {
-                if (unityz.container.sniff(n.data).container != .serialized) continue;
-                // collect the patch entries this node contains
-                const node_sf = unityz.serialized.parse(arena, n.data) catch continue;
-                var node_entries: std.ArrayList(unityz.value.Field) = .empty;
-                for (entries) |entry| {
-                    const sel = parseSelector(entry.name) catch continue;
-                    if (sel.node) |sn| {
-                        if (!std.mem.eql(u8, n.path, sn)) continue;
+                if (unityz.container.sniff(n.data).container == .serialized) {
+                    // collect the patch entries this node contains
+                    const node_sf = unityz.serialized.parse(arena, n.data) catch continue;
+                    var node_entries: std.ArrayList(unityz.value.Field) = .empty;
+                    for (entries) |entry| {
+                        if (isRawNodeKey(entry.name)) continue;
+                        const sel = parseSelector(entry.name) catch continue;
+                        if (sel.node) |sn| {
+                            if (!std.mem.eql(u8, n.path, sn)) continue;
+                        }
+                        if (node_sf.findObject(sel.path_id) != null) try node_entries.append(arena, entry);
                     }
-                    if (node_sf.findObject(sel.path_id) != null) try node_entries.append(arena, entry);
+                    if (node_entries.items.len == 0) continue;
+                    const edited_node = try editSerializedPatches(arena, n.data, node_entries.items);
+                    try replacements.append(arena, .{ .path = n.path, .data = edited_node });
+                    edited_count += node_entries.items.len;
+                    continue;
                 }
-                if (node_entries.items.len == 0) continue;
-                const edited_node = try editSerializedPatches(arena, n.data, node_entries.items);
-                try replacements.append(arena, .{ .path = n.path, .data = edited_node });
-                edited_count += node_entries.items.len;
+                // raw node: apply every raw-node entry keyed by this path,
+                // in patch order, each overwriting the previous result
+                var patched: ?[]u8 = null;
+                for (entries) |entry| {
+                    if (!isRawNodeKey(entry.name)) continue;
+                    if (!std.mem.eql(u8, entry.name, n.path)) continue;
+                    patched = try applyNodeBytes(arena, patched orelse n.data, entry);
+                }
+                if (patched) |p| {
+                    try replacements.append(arena, .{ .path = n.path, .data = p });
+                    edited_count += 1;
+                }
             }
             if (replacements.items.len == 0) {
                 try stdout.print("unityz: no patch entries found in the bundle\n", .{});
@@ -5067,8 +5102,25 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
             // A selector that will not parse must stop the edit before
             // anything is written: the serialized branch already rejects
             // it up front, and silently skipping one here would rewrite
-            // the file having applied only part of the patch.
+            // the file having applied only part of the patch. A raw-node
+            // key must name an existing non-serialized entry.
             for (entries) |entry| {
+                if (isRawNodeKey(entry.name)) {
+                    var entry_found = false;
+                    for (wf.entries) |e| {
+                        if (!std.mem.eql(u8, entry.name, e.path)) continue;
+                        entry_found = true;
+                        if (unityz.container.sniff(e.data).container == .serialized) {
+                            try stdout.print("unityz: entry '{s}' names a serialized entry; use 'node:path-id'\n", .{entry.name});
+                            return;
+                        }
+                    }
+                    if (!entry_found) {
+                        try stdout.print("unityz: bad patch entry '{s}': no such entry\n", .{entry.name});
+                        return;
+                    }
+                    continue;
+                }
                 _ = parseSelector(entry.name) catch {
                     try stdout.print("unityz: bad patch entry '{s}'\n", .{entry.name});
                     return;
@@ -5076,20 +5128,33 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
             }
             var replacements: std.ArrayList(unityz.webfile.EntryReplacement) = .empty;
             for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                const entry_sf = unityz.serialized.parse(arena, e.data) catch continue;
-                var entry_entries: std.ArrayList(unityz.value.Field) = .empty;
-                for (entries) |entry| {
-                    const sel = parseSelector(entry.name) catch continue;
-                    if (sel.node) |sn| {
-                        if (!std.mem.eql(u8, e.path, sn)) continue;
+                if (unityz.container.sniff(e.data).container == .serialized) {
+                    const entry_sf = unityz.serialized.parse(arena, e.data) catch continue;
+                    var entry_entries: std.ArrayList(unityz.value.Field) = .empty;
+                    for (entries) |entry| {
+                        if (isRawNodeKey(entry.name)) continue;
+                        const sel = parseSelector(entry.name) catch continue;
+                        if (sel.node) |sn| {
+                            if (!std.mem.eql(u8, e.path, sn)) continue;
+                        }
+                        if (entry_sf.findObject(sel.path_id) != null) try entry_entries.append(arena, entry);
                     }
-                    if (entry_sf.findObject(sel.path_id) != null) try entry_entries.append(arena, entry);
+                    if (entry_entries.items.len == 0) continue;
+                    const edited_entry = try editSerializedPatches(arena, e.data, entry_entries.items);
+                    try replacements.append(arena, .{ .path = e.path, .data = edited_entry });
+                    edited_count += entry_entries.items.len;
+                    continue;
                 }
-                if (entry_entries.items.len == 0) continue;
-                const edited_entry = try editSerializedPatches(arena, e.data, entry_entries.items);
-                try replacements.append(arena, .{ .path = e.path, .data = edited_entry });
-                edited_count += entry_entries.items.len;
+                var patched: ?[]u8 = null;
+                for (entries) |entry| {
+                    if (!isRawNodeKey(entry.name)) continue;
+                    if (!std.mem.eql(u8, entry.name, e.path)) continue;
+                    patched = try applyNodeBytes(arena, patched orelse e.data, entry);
+                }
+                if (patched) |p| {
+                    try replacements.append(arena, .{ .path = e.path, .data = p });
+                    edited_count += 1;
+                }
             }
             if (replacements.items.len == 0) {
                 try stdout.print("unityz: no patch entries found in the webfile\n", .{});
@@ -5188,6 +5253,50 @@ fn verifyEditResult(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Wri
     }
     try stdout.print("verify: {d} object(s) round-trip clean\n", .{report.checked});
     return true;
+}
+
+/// A raw-node patch key: a node path with no `:` and no numeric path id
+/// (`CAB-abc123.resS`), meaning "patch this node's raw bytes" rather than
+/// one object inside a serialized node.
+fn isRawNodeKey(name: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, name, ':') != null) return false;
+    const v = std.fmt.parseInt(i64, name, 10) catch return true;
+    _ = v;
+    return false;
+}
+
+/// Applies one raw-node patch entry: `{"offset": N, "bytes": "<base64>"}`
+/// replaces the decoded bytes at byte offset N within the node's data.
+/// The range must fit inside the node, so every sidecar reference (an
+/// AudioClip's m_Resource offset/size, a streamed texture's m_StreamData)
+/// stays valid; a patch that would write past the end is rejected.
+fn applyNodeBytes(arena: std.mem.Allocator, node_data: []const u8, entry: unityz.value.Field) ![]u8 {
+    const spec = switch (entry.value) {
+        .obj => |f| f,
+        else => return error.BadPatchValue,
+    };
+    var offset: ?usize = null;
+    var b64: ?[]const u8 = null;
+    for (spec) |f| {
+        if (std.mem.eql(u8, f.name, "offset")) {
+            offset = std.math.cast(usize, f.value.asInt() orelse return error.BadPatchValue) orelse return error.BadPatchValue;
+        } else if (std.mem.eql(u8, f.name, "bytes")) {
+            b64 = switch (f.value) {
+                .string => |s| s,
+                else => return error.BadPatchValue,
+            };
+        } else return error.BadPatchValue;
+    }
+    const off = offset orelse return error.BadPatchValue;
+    const s = b64 orelse return error.BadPatchValue;
+    const size = try std.base64.standard.Decoder.calcSizeForSlice(s);
+    if (off > node_data.len or size > node_data.len - off) return error.BadPatchValue;
+    const buf = try arena.alloc(u8, size);
+    try std.base64.standard.Decoder.decode(buf, s);
+    const out = try arena.alloc(u8, node_data.len);
+    @memcpy(out, node_data);
+    @memcpy(out[off .. off + size], buf);
+    return out;
 }
 
 /// Applies a list of patch entries (path-id -> fields) to one serialized
@@ -6143,4 +6252,56 @@ test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments"
     try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Script.m_PathID.x", .{ .int = 1 }));
     // a PPtr half only accepts an integer-like value
     try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Script.m_PathID", .{ .string = "x" }));
+}
+
+test "applyNodeBytes replaces a raw node range from base64" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const node = [_]u8{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07 };
+
+    // A mid-node range is replaced, the rest survives untouched.
+    const patched = try applyNodeBytes(a, &node, .{
+        .name = "CAB-x.resS",
+        .value = .{
+            .obj = &[_]unityz.value.Field{
+                .{ .name = "offset", .value = .{ .int = 2 } },
+                .{ .name = "bytes", .value = .{ .string = "AwD/" } }, // {0x03,0x00,0xff}
+            },
+        },
+    });
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x01, 0x03, 0x00, 0xff, 0x05, 0x06, 0x07 }, patched);
+
+    // Out-of-range writes are rejected so sidecar references stay valid.
+    try std.testing.expectError(error.BadPatchValue, applyNodeBytes(a, &node, .{ .name = "CAB-x.resS", .value = .{ .obj = &[_]unityz.value.Field{
+        .{ .name = "offset", .value = .{ .int = 7 } },
+        .{ .name = "bytes", .value = .{ .string = "AwD/" } },
+    } } }));
+    try std.testing.expectError(error.BadPatchValue, applyNodeBytes(a, &node, .{
+        .name = "CAB-x.resS",
+        .value = .{
+            .obj = &[_]unityz.value.Field{
+                .{ .name = "offset", .value = .{ .int = 0 } },
+                .{ .name = "bytes", .value = .{ .string = "AwD/AA==AwD/AA==" } }, // 12 bytes > node
+            },
+        },
+    }));
+    // a malformed literal is rejected (the length check fires first when
+    // the bad text decodes to a size that does not fit)
+    try std.testing.expectError(error.BadPatchValue, applyNodeBytes(a, &node, .{ .name = "CAB-x.resS", .value = .{ .obj = &[_]unityz.value.Field{
+        .{ .name = "offset", .value = .{ .int = 0 } },
+        .{ .name = "bytes", .value = .{ .string = "!!!not-base64!!!" } },
+    } } }));
+    // the value must be an object of exactly offset + bytes
+    try std.testing.expectError(error.BadPatchValue, applyNodeBytes(a, &node, .{ .name = "CAB-x.resS", .value = .{ .string = "AwD/" } }));
+    try std.testing.expectError(error.BadPatchValue, applyNodeBytes(a, &node, .{ .name = "CAB-x.resS", .value = .{ .obj = &[_]unityz.value.Field{
+        .{ .name = "offset", .value = .{ .int = 0 } },
+        .{ .name = "what", .value = .{ .int = 1 } },
+    } } }));
+    // a node-path key vs a numeric path-id key
+    try std.testing.expect(isRawNodeKey("CAB-abc.resS"));
+    try std.testing.expect(isRawNodeKey("CAB-abc123.resource"));
+    try std.testing.expect(!isRawNodeKey("44"));
+    try std.testing.expect(!isRawNodeKey("CAB-abc:44"));
 }
