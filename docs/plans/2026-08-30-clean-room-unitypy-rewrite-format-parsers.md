@@ -1280,3 +1280,15 @@ every reported count and max delta matches (texture 1024x512 and the
 affected 122x298 sprite both report 14 pixels, R10 G10 B10 A0). Pixel
 lines now name the object id and class so results map back to objects.
 270/270 tests.
+
+2026-08-31 (extract --format tga|bmp|raw): textures and sprites export as
+PNG by default, plus TGA (uncompressed 32bpp, top-left origin, real
+alpha), BMP (32bpp BI_BITFIELDS with an RGBA mask set, so alpha survives
+where BI_RGB would force 255), and raw RGBA8 bytes - UnityPy only writes
+PNG. New src/tga.zig and src/bmp.zig follow png.zig's shape (encode +
+test-only round-trip reader); build.zig registers them as test roots.
+
+Verified end-to-end on the real atlas bundle: all 8 objects (7 sprites +
+the crunched 1024x512 texture) extracted in every format decode
+pixel-identical to the PNG baseline through an independent Pillow reader,
+alpha included. 274/274 tests.

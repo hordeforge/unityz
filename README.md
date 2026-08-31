@@ -58,7 +58,9 @@ All commands accept a directory and process every file in it.
 `extract` filters with `--class`/`--path-id`/`--raw`, exports value trees with
 `--json` (plus a `manifest.json` index of every exported object; inside
 bundles/webfiles each node's objects land in its own `objects/<node>/`
-subdirectory so identical path ids never collide), and
+subdirectory so identical path ids never collide), writes textures and
+sprites as PNG by default or TGA / BMP / raw RGBA8 with
+`--format tga|bmp|raw` (UnityPy only writes PNG), and
 auto-creates `--outdir <dir>`; `edit` supports
 dotted-indexed field paths, `--out <file>`, and `--verify`, which
 round-trip-checks the edited output and refuses to write if it does not
@@ -243,6 +245,8 @@ interpolation.
   ASTC HDR (66-71), crunch ETC_RGB4/ETC2_RGBA8/DXT1/DXT5 via
   `src/vendor/unitycrunch/`)
 - `src/png.zig` - minimal PNG encoder
+- `src/tga.zig` - minimal TGA encoder (uncompressed 32bpp, alpha-carrying)
+- `src/bmp.zig` - minimal BMP encoder (32bpp BI_BITFIELDS, alpha-carrying)
 - `src/vendor/unitycrunch/` - vendored unitycrunch decompressor
   (ZLIB-licensed C++, built with `-DNDEBUG` so corrupt input can't abort)
 - `build.zig`, `build.zig.zon` - package metadata and build steps

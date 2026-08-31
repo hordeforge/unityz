@@ -62,6 +62,12 @@ pub const texture = @import("texture.zig");
 /// Minimal PNG encoder.
 pub const png = @import("png.zig");
 
+/// Minimal TGA encoder (uncompressed 32bpp, top-left origin).
+pub const tga = @import("tga.zig");
+
+/// Minimal BMP encoder (32bpp BI_RGB, top-down).
+pub const bmp = @import("bmp.zig");
+
 /// FSB5 audio bank metadata parser (sample rate, channels, loop points).
 pub const fsb5 = @import("fsb5.zig");
 
