@@ -158,11 +158,13 @@ pub fn main(init: std.process.Init) !void {
             const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ path, entry.name });
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch |err| {
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
+                try stderr.flush();
                 continue;
             };
             runCommand(command, full, rest, bytes, stdout) catch |err| {
                 if (err == error.WriteFailed) std.process.exit(141);
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
+                try stderr.flush();
             };
         }
         finalFlush(stdout);
@@ -420,7 +422,9 @@ fn extractFile(subdir: ?[]const u8, name: []const u8, contents: []const u8) !voi
         else
             sd;
         defer if (base_owned) std.heap.page_allocator.free(base);
-        ensureDirPath(io_global.io, base) catch {};
+        // Propagate a failed mkdir: swallowing it turns "cannot create
+        // <dir>: AccessDenied" into a bare FileNotFound on the write.
+        try ensureDirPath(io_global.io, base);
         const full = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ sd, name });
         defer std.heap.page_allocator.free(full);
         try writeFileToCwd(full, contents);
@@ -593,7 +597,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
 
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
-        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch |err| {
+            try stdout.print("  object {d} (class {d}): decode failed: {s}\n", .{ o.path_id, o.class_id, @errorName(err) });
+            skipped += 1;
+            continue;
+        };
 
         if (json_mode) {
             // JSON mode: export the object's value tree, not a decoded asset
@@ -638,8 +646,16 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 };
                 // Unity stores texture rows bottom-up; PNGs are top-down, so
                 // flip to match on-screen appearance (and UnityPy's export).
-                const flipped = unityz.texture.flipVertical(arena, rgba, t.width, t.height) catch continue;
-                const png = unityz.png.encode(arena, t.width, t.height, flipped) catch continue;
+                const flipped = unityz.texture.flipVertical(arena, rgba, t.width, t.height) catch |err| {
+                    try stdout.print("  texture {d}: flip failed: {s}\n", .{ o.path_id, @errorName(err) });
+                    skipped += 1;
+                    continue;
+                };
+                const png = unityz.png.encode(arena, t.width, t.height, flipped) catch |err| {
+                    try stdout.print("  texture {d}: PNG encode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                    skipped += 1;
+                    continue;
+                };
                 var name_buf: [64]u8 = undefined;
                 const name = try std.fmt.bufPrint(&name_buf, "texture_{d}_{d}x{d}.png", .{ o.path_id, t.width, t.height });
                 try extractFile(subdir, name, png);
@@ -717,7 +733,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
             },
             43 => { // Mesh -> Wavefront OBJ
                 const mesh = unityz.classes.Mesh.fromValue(v);
-                const obj = writeMeshObj(arena, &sf, v, &mesh) catch continue;
+                const obj = writeMeshObj(arena, &sf, v, &mesh) catch |err| {
+                    try stdout.print("  mesh {d}: OBJ conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
+                    skipped += 1;
+                    continue;
+                };
                 if (obj.len == 0) continue; // unsupported layout, nothing written
                 var name_buf: [160]u8 = undefined;
                 const mesh_name = std.mem.trimEnd(u8, mesh.name, "\x00");
@@ -748,7 +768,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
             },
             213 => { // Sprite -> cropped / mesh-rendered PNG
                 const rr = renderSprite(arena, &sf, sidecars, v, o.path_id) orelse continue;
-                const png = unityz.png.encode(arena, rr.w, rr.h, rr.data) catch continue;
+                const png = unityz.png.encode(arena, rr.w, rr.h, rr.data) catch |err| {
+                    try stdout.print("  sprite {d}: PNG encode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                    skipped += 1;
+                    continue;
+                };
                 const sprite = unityz.classes.Sprite.fromValue(v);
                 var name_buf: [160]u8 = undefined;
                 const sprite_name = std.mem.trimEnd(u8, sprite.name, "\x00");
@@ -1629,7 +1653,7 @@ fn printSerialized(path: []const u8, bytes: []const u8, dump: bool, objects: boo
             }
         }
         if (!found) {
-            counts.append(arena, .{ .class_id = o.class_id, .count = 1 }) catch {};
+            try counts.append(arena, .{ .class_id = o.class_id, .count = 1 });
         }
     }
     std.mem.sort(ClassCount, counts.items, {}, struct {
@@ -2348,6 +2372,15 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     if (failures.items.len != 0) verify_failed_flag = true;
 }
 
+/// Reports a per-file failure on stderr, keeping it out of the stdout
+/// stream that carries the command's (possibly JSON) result.
+fn warnToStderr(path: []const u8, err: anyerror) void {
+    var buf: [512]u8 = undefined;
+    var w: Io.File.Writer = .init(.stderr(), io_global.io, &buf);
+    w.interface.print("unityz: {s}: {s}\n", .{ path, @errorName(err) }) catch return;
+    w.interface.flush() catch {};
+}
+
 /// Compares two directories file-by-file by content hash, reporting
 /// unchanged/changed/new/deleted files and totals. UnityPy has no tree
 /// comparison.
@@ -2364,7 +2397,12 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
     while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
         const full = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_a, entry.name });
-        const data = std.Io.Dir.cwd().readFileAlloc(io, full, std.heap.page_allocator, .unlimited) catch continue;
+        const data = std.Io.Dir.cwd().readFileAlloc(io, full, std.heap.page_allocator, .unlimited) catch |err| {
+            // Dropping it silently would report the file as "only in" the
+            // other directory, which reads as a real difference.
+            warnToStderr(full, err);
+            continue;
+        };
         try files_a.append(std.heap.page_allocator, .{ .name = entry.name, .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
     }
 
@@ -2376,7 +2414,10 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
     while (try it2.next(io)) |entry| {
         if (entry.kind != .file) continue;
         const full = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_b, entry.name });
-        const data = std.Io.Dir.cwd().readFileAlloc(io, full, std.heap.page_allocator, .unlimited) catch continue;
+        const data = std.Io.Dir.cwd().readFileAlloc(io, full, std.heap.page_allocator, .unlimited) catch |err| {
+            warnToStderr(full, err);
+            continue;
+        };
         try files_b.append(std.heap.page_allocator, .{ .name = entry.name, .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
     }
 
@@ -3639,6 +3680,16 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                 try stdout.print("unityz: {s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
                 return;
             };
+            // A selector that will not parse must stop the edit before
+            // anything is written: the serialized branch already rejects
+            // it up front, and silently skipping one here would rewrite
+            // the file having applied only part of the patch.
+            for (entries) |entry| {
+                _ = parseSelector(entry.name) catch {
+                    try stdout.print("unityz: bad patch entry '{s}'\n", .{entry.name});
+                    return;
+                };
+            }
             var replacements: std.ArrayList(unityz.bundle.NodeReplacement) = .empty;
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
@@ -3668,6 +3719,16 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                 try stdout.print("unityz: {s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
                 return;
             };
+            // A selector that will not parse must stop the edit before
+            // anything is written: the serialized branch already rejects
+            // it up front, and silently skipping one here would rewrite
+            // the file having applied only part of the patch.
+            for (entries) |entry| {
+                _ = parseSelector(entry.name) catch {
+                    try stdout.print("unityz: bad patch entry '{s}'\n", .{entry.name});
+                    return;
+                };
+            }
             var replacements: std.ArrayList(unityz.webfile.EntryReplacement) = .empty;
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
@@ -3713,13 +3774,26 @@ fn writeEditOutput(arena: std.mem.Allocator, path: []const u8, out_path: ?[]cons
     }
     const io = io_global.io;
     const write_path = out_path orelse path;
-    const file = std.Io.Dir.cwd().createFile(io, write_path, .{}) catch |err| {
-        try stdout.print("unityz: {s}: {s}\n", .{ write_path, @errorName(err) });
+    // Write a sibling temp file and rename it into place. Without an
+    // out-path `edit` rewrites its own input, and a direct write that
+    // fails partway (full disk, I/O error) would leave the asset
+    // truncated with the original bytes already gone.
+    const tmp_path = try std.fmt.allocPrint(arena, "{s}.unityz-tmp", .{write_path});
+    const cwd = std.Io.Dir.cwd();
+    const file = cwd.createFile(io, tmp_path, .{}) catch |err| {
+        try stdout.print("unityz: {s}: cannot create temp file '{s}': {s}\n", .{ write_path, tmp_path, @errorName(err) });
         return false;
     };
-    defer file.close(io);
     file.writeStreamingAll(io, bytes) catch |err| {
-        try stdout.print("unityz: write failed: {s}\n", .{@errorName(err)});
+        file.close(io);
+        cwd.deleteFile(io, tmp_path) catch {};
+        try stdout.print("unityz: {s}: write failed: {s}\n", .{ write_path, @errorName(err) });
+        return false;
+    };
+    file.close(io);
+    cwd.rename(tmp_path, cwd, write_path, io) catch |err| {
+        cwd.deleteFile(io, tmp_path) catch {};
+        try stdout.print("unityz: {s}: rename failed: {s}\n", .{ write_path, @errorName(err) });
         return false;
     };
     return true;
