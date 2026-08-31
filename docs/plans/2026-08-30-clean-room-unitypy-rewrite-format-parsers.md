@@ -1651,3 +1651,24 @@ FsbLoader.Frequencies. fsb5.py itself rejects both codes (raises
 "Frequency value 0/10 is not valid"), so unityz is strictly more
 robust there. Codes 11-15 still report unknown (0), and two
 minimal-bank unit tests pin codes 0 and 10. 282/282 tests.
+
+2026-08-31 (FSB5 GCADPCM decode): mode 6 (FMOD_SOUND_FORMAT_GCADPCM)
+now decodes in pure Zig - the GC DSP framing FSB5 uses: fixed 8-byte
+blocks, 14 samples each, block byte 0 packing the predictor index
+(high nibble) and scale exponent (low nibble), 7 bytes of signed
+nibbles high-nibble-first, with the 8 coefficient pairs read
+big-endian from the new DSPCOEFS metadata chunk (46 bytes per
+channel: 32 coef bytes + 14 FMOD-written bytes that decoders skip).
+Mirrors vgmstream's ngc_dsp_decoder.c and Fmod5Sharp's
+FmodGcadPcmRebuilder.
+
+Verified byte-exact against Fmod5Sharp's C#
+decoder (built and run via dotnet) on its real gcadpcm.fsb bank
+(8064 samples, 0 diffs, real signal - min -13145 / max 15101).
+Mono only: vgmstream decodes multi-channel GCADPCM with a
+subframe-interleave framing (2-byte interleave) that has no sample
+available to verify, so multi-channel mode 6 reports
+UnsupportedChannels rather than guess. fsb5.Sample carries the coefs;
+the extract WAV path and the .fsb.json sidecar pick them up
+automatically. Two unit tests: a hand-computed identity-filter block
+and a DSPCOEFS chunk parse. 285/285 tests.
