@@ -71,7 +71,7 @@ pub fn primitiveKind(type_name: []const u8) ?Primitive {
     return null;
 }
 
-fn isPPtrType(type_name: []const u8) bool {
+pub fn isPPtrType(type_name: []const u8) bool {
     return std.mem.eql(u8, type_name, "PPtr") or std.mem.startsWith(u8, type_name, "PPtr<");
 }
 
@@ -94,16 +94,6 @@ pub fn readObject(allocator: std.mem.Allocator, r: *streams.Reader, root: *const
 }
 
 fn readNode(
-    allocator: std.mem.Allocator,
-    r: *streams.Reader,
-    node: *const typetree.Node,
-    suppress_align: bool,
-) Error!value.Value {
-    const result = try readNodeInner(allocator, r, node, suppress_align);
-    return result;
-}
-
-fn readNodeInner(
     allocator: std.mem.Allocator,
     r: *streams.Reader,
     node: *const typetree.Node,
@@ -228,7 +218,7 @@ fn readNodeInner(
 /// - the sole `Array` child for `map` (and legacy vector-like) wrappers;
 /// - null otherwise — a record may contain `Array`-typed fields, which are
 ///   handled when the recursion reaches them.
-fn collectionArray(node: *const typetree.Node) ?*const typetree.Node {
+pub fn collectionArray(node: *const typetree.Node) ?*const typetree.Node {
     if (std.mem.eql(u8, node.type_name, "Array")) return node;
     if (node.children.len != 1) return null;
     const only = &node.children[0];
@@ -276,7 +266,12 @@ fn readPPtr(
             const prim = primitiveKind(child.type_name) orelse return error.Corrupt;
             if (!isInteger(prim) or widthOf(prim) > 4) return error.Corrupt;
             const v = try readPrimitive(r, prim);
-            file_id = @intCast(v.asInt() orelse return error.Corrupt);
+            const raw = v.asInt() orelse return error.Corrupt;
+            // The guard above admits `unsigned int`, so a file declaring
+            // `m_FileID` as UInt32 can carry a value past i32: reject it the
+            // way any other corrupt field is rejected rather than letting
+            // `@intCast` fault.
+            file_id = std.math.cast(i32, raw) orelse return error.Corrupt;
             continue;
         }
         if (isPathIdName(child.name)) {

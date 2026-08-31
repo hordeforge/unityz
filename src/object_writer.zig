@@ -88,7 +88,7 @@ fn writeNode(
         if (!suppress_align and nodeAligned(node)) try w.alignTo4();
         return;
     }
-    if (isPPtrType(type_name)) {
+    if (object_reader.isPPtrType(type_name)) {
         try writePPtr(w, node, v, suppress_align);
         return;
     }
@@ -98,7 +98,7 @@ fn writeNode(
         return error.UnsupportedManagedReference;
     }
 
-    const array_node = collectionArray(node) orelse {
+    const array_node = object_reader.collectionArray(node) orelse {
         if (std.mem.eql(u8, type_name, "map")) return error.TypeMismatch;
         if (node.children.len != 0) {
             // Record: write each child's value in order.
@@ -141,7 +141,7 @@ fn writeNode(
             .array => |a| blk: {
                 const out = try w.allocator.alloc(u8, a.len);
                 for (a, 0..) |item, i| {
-                    out[i] = @intCast(item.asInt() orelse return error.TypeMismatch);
+                    out[i] = try narrowInt(u8, item.asInt() orelse return error.TypeMismatch);
                 }
                 break :blk out;
             },
@@ -185,18 +185,6 @@ fn nodeAligned(node: *const typetree.Node) bool {
     return (node.meta_flags & object_reader.align_flag) != 0;
 }
 
-fn isPPtrType(type_name: []const u8) bool {
-    return std.mem.eql(u8, type_name, "PPtr") or std.mem.startsWith(u8, type_name, "PPtr<");
-}
-
-fn collectionArray(node: *const typetree.Node) ?*const typetree.Node {
-    if (std.mem.eql(u8, node.type_name, "Array")) return node;
-    if (node.children.len != 1) return null;
-    const only = &node.children[0];
-    if (std.mem.eql(u8, only.type_name, "Array")) return only;
-    return null;
-}
-
 fn writePrimitive(w: *streams.Writer, prim: object_reader.Primitive, v: value.Value) Error!void {
     switch (prim) {
         .bool => {
@@ -206,14 +194,14 @@ fn writePrimitive(w: *streams.Writer, prim: object_reader.Primitive, v: value.Va
             };
             try w.writeByte(@intFromBool(b));
         },
-        .i8 => try w.writeInt(i8, @intCast(try asInt(v))),
-        .u8 => try w.writeInt(u8, @intCast(try asInt(v))),
-        .i16 => try w.writeInt(i16, @intCast(try asInt(v))),
-        .u16 => try w.writeInt(u16, @intCast(try asInt(v))),
-        .i32 => try w.writeInt(i32, @intCast(try asInt(v))),
-        .u32 => try w.writeInt(u32, @intCast(try asInt(v))),
+        .i8 => try w.writeInt(i8, try narrowInt(i8, try asInt(v))),
+        .u8 => try w.writeInt(u8, try narrowInt(u8, try asInt(v))),
+        .i16 => try w.writeInt(i16, try narrowInt(i16, try asInt(v))),
+        .u16 => try w.writeInt(u16, try narrowInt(u16, try asInt(v))),
+        .i32 => try w.writeInt(i32, try narrowInt(i32, try asInt(v))),
+        .u32 => try w.writeInt(u32, try narrowInt(u32, try asInt(v))),
         .i64 => try w.writeInt(i64, try asInt(v)),
-        .u64 => try w.writeInt(u64, @intCast(try asUint(v))),
+        .u64 => try w.writeInt(u64, try asUint(v)),
         .f32 => try w.writeFloat(f32, @floatCast(try asFloat(v))),
         .f64 => try w.writeFloat(f64, try asFloat(v)),
     }
@@ -221,6 +209,14 @@ fn writePrimitive(w: *streams.Writer, prim: object_reader.Primitive, v: value.Va
 
 fn asInt(v: value.Value) Error!i64 {
     return v.asInt() orelse error.TypeMismatch;
+}
+
+/// Narrows an edited integer to the width its type tree node declares.
+/// Values come from user JSON (`unityz edit ... m_Width 99999999999`), so a
+/// value the field cannot hold is an operating error to report, not a
+/// `@intCast` the compiler is allowed to turn into a crash.
+fn narrowInt(comptime T: type, v: i64) Error!T {
+    return std.math.cast(T, v) orelse error.TypeMismatch;
 }
 
 fn asUint(v: value.Value) Error!u64 {
@@ -246,7 +242,7 @@ fn writePPtr(w: *streams.Writer, node: *const typetree.Node, v: value.Value, sup
         .obj => |fields| blk: {
             const file = findField(fields, "m_FileID") orelse return error.TypeMismatch;
             const path = findField(fields, "m_PathID") orelse return error.TypeMismatch;
-            break :blk value.PPtr{ .file_id = @intCast(try asInt(file)), .path_id = try asInt(path) };
+            break :blk value.PPtr{ .file_id = try narrowInt(i32, try asInt(file)), .path_id = try asInt(path) };
         },
         else => return error.TypeMismatch,
     };

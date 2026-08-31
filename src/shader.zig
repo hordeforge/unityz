@@ -343,44 +343,16 @@ fn asString(v: value.Value) ?[]const u8 {
 // ---------------------------------------------------------------------------
 
 /// Walks `m_ParsedForm`, appending d3d11 vertex sub-program blob indices to
-/// `vertex` and the parallel parameter-blob indices to `params`.
+/// `vertex` and the parallel parameter-blob indices to `params`. A filtered
+/// view of `collectCodeParams`, which owns the traversal.
 fn collectPrograms(arena: std.mem.Allocator, pf: value.Value, vertex: *std.ArrayList(u32), params: *std.ArrayList(u32)) !void {
-    const sub_shaders = asArray(fieldOf(pf, "m_SubShaders") orelse return) orelse return;
-    for (sub_shaders) |sub| {
-        const passes = asArray(fieldOf(sub, "m_Passes") orelse continue) orelse continue;
-        for (passes) |pass| {
-            if (pass != .obj) continue;
-            for (pass.obj) |f| {
-                if (f.value != .obj) continue;
-                const prog = f.value;
-                if (fieldOf(prog, "m_PlayerSubPrograms") == null) continue;
-                const groups = asArray(fieldOf(prog, "m_PlayerSubPrograms").?) orelse continue;
-                const pgroups = if (fieldOf(prog, "m_ParameterBlobIndices")) |pi|
-                    (asArray(pi) orelse &.{})
-                else
-                    &.{};
-                for (groups, 0..) |group, gi| {
-                    const subs = asArray(group) orelse continue;
-                    const parr = if (gi < pgroups.len) (asArray(pgroups[gi]) orelse &.{}) else &.{};
-                    for (subs, 0..) |sub_obj, k| {
-                        const gpu = intField(sub_obj, "m_GpuProgramType") orelse continue;
-                        const gpu_u: u32 = @intCast(gpu);
-                        if (!isD3d11Type(gpu_u)) continue;
-                        if (isVertexType(gpu_u)) {
-                            if (intField(sub_obj, "m_BlobIndex")) |bi| {
-                                try vertex.append(arena, @intCast(bi));
-                            }
-                        }
-                        // parameter-blob index parallel to this position
-                        if (k < parr.len) {
-                            if (parr[k].asInt()) |pi| {
-                                try params.append(arena, @intCast(pi));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    var codes: std.ArrayList(u32) = .empty;
+    defer codes.deinit(arena);
+    var code_types: std.ArrayList(u32) = .empty;
+    defer code_types.deinit(arena);
+    try collectCodeParams(arena, pf, &codes, &code_types, params);
+    for (codes.items, code_types.items) |blob_index, gpu_type| {
+        if (isVertexType(gpu_type)) try vertex.append(arena, blob_index);
     }
 }
 
@@ -391,51 +363,11 @@ fn collectPrograms(arena: std.mem.Allocator, pf: value.Value, vertex: *std.Array
 pub fn skinInfo(arena: std.mem.Allocator, v: value.Value) !?SkinInfo {
     const pf = fieldOf(v, "m_ParsedForm") orelse return null;
 
-    // --- platform metadata ---
-    const platforms = asArray((fieldOf(v, "platforms") orelse fieldOf(v, "m_Platforms")) orelse return null) orelse return null;
-    var plat_index: ?usize = null;
-    for (platforms, 0..) |p, i| {
-        if (p.asInt()) |pi| {
-            if (pi == platform_d3d11) {
-                plat_index = i;
-                break;
-            }
-        }
-    }
-    const idx = plat_index orelse return null;
-
-    const offsets = asArray((fieldOf(v, "offsets") orelse fieldOf(v, "m_Offsets")) orelse return null) orelse return null;
-    const comp_lens = asArray((fieldOf(v, "compressedLengths") orelse fieldOf(v, "m_CompressedLengths")) orelse return null) orelse return null;
-    const decomp_lens = asArray((fieldOf(v, "decompressedLengths") orelse fieldOf(v, "m_DecompressedLengths")) orelse return null) orelse return null;
-    const blob = switch ((fieldOf(v, "compressedBlob") orelse fieldOf(v, "m_CompressedBlob") orelse fieldOf(v, "m_Script")) orelse return null) {
-        .bytes => |b| b,
-        else => return null,
-    };
-    if (idx >= offsets.len or idx >= comp_lens.len or idx >= decomp_lens.len) return null;
-
-    const off_tiers = asArray(offsets[idx]) orelse return null;
-    const comp_tiers = asArray(comp_lens[idx]) orelse return null;
-    const decomp_tiers = asArray(decomp_lens[idx]) orelse return null;
-    // Blob indices are per hardware tier; the parsed form does not say which
-    // tier a sub-program's index belongs to, so only a single tier is defined.
-    if (off_tiers.len != 1 or comp_tiers.len != 1 or decomp_tiers.len != 1) return null;
-    const off0 = off_tiers[0].asInt() orelse return null;
-    const comp0 = comp_tiers[0].asInt() orelse return null;
-    const decomp0 = decomp_tiers[0].asInt() orelse return null;
-    if (off0 < 0 or comp0 < 0 or decomp0 < 0) return null;
-    const start: usize = @intCast(off0);
-    const comp_len: usize = @intCast(comp0);
-    if (start + comp_len > blob.len) return null;
-
-    // --- decompress the d3d11 platform blob ---
-    const needs_lz4 = comp_len != @as(usize, @intCast(decomp0));
-    const data = if (needs_lz4)
-        try lz4.decompress(arena, blob[start .. start + comp_len], @intCast(decomp0))
-    else
-        blob[start .. start + comp_len];
-
-    // --- record table ---
-    const records = try parseRecords(arena, data);
+    // Platform blob resolution and decompression are shared with the
+    // decode/verify path; see `openD3d11Blob`.
+    const d3d11 = (try openD3d11Blob(arena, v)) orelse return null;
+    const data = d3d11.data;
+    const records = d3d11.records;
 
     // --- gather vertex program + parameter blob indices ---
     var vertex: std.ArrayList(u32) = .empty;
