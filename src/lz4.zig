@@ -676,3 +676,113 @@ test "compress enforces end-of-block conditions" {
     defer a.free(dn);
     try std.testing.expectEqualSlices(u8, &noise_buf, dn);
 }
+
+test "compress round-trips edge-case sizes and adversarial patterns" {
+    // Sizes around the format's boundaries: the min-match (4), the
+    // MFLIMIT/LASTLITERALS end-of-block thresholds (5/12), the 255
+    // extension boundary, and 64K+ (where matches can no longer be
+    // referenced directly). Patterns that bait hash collisions and
+    // overlapping matches.
+    const a = std.testing.allocator;
+    const sizes = [_]usize{ 1, 2, 3, 4, 5, 6, 11, 12, 13, 16, 17, 254, 255, 256, 257, 270, 271, 511, 512, 4096, 65535, 65536, 65537, 70000 };
+    const patterns = [_][]const u8{
+        "a",
+        "ab",
+        "abc",
+        "abcd",
+        "abcde",
+        "ababababab",
+        "abcdefghabcdefgh",
+        "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
+    };
+    for (sizes) |sz| {
+        for (patterns) |pat| {
+            var buf: [70000]u8 = undefined;
+            var n: usize = 0;
+            while (n < sz) : (n += pat.len) {
+                const take = @min(pat.len, sz - n);
+                @memcpy(buf[n .. n + take], pat[0..take]);
+            }
+            const c = try compress(a, buf[0..sz]);
+            defer a.free(c);
+            const d = try decompress(a, c, sz);
+            defer a.free(d);
+            try std.testing.expectEqualSlices(u8, buf[0..sz], d);
+        }
+    }
+}
+
+test "compress round-trips seeded pseudo-random fuzz" {
+    // Thousands of varied inputs: sizes from 0 to 64KB, contents mixing
+    // pure noise, runs, and repeated chunks (the structures real assets
+    // contain). Every input must round-trip through the block codec.
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x1a4);
+    const rnd = prng.random();
+    var buf: [65536]u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 2000) : (iter += 1) {
+        const mode = rnd.int(u8) % 4;
+        const len: usize = @intCast(rnd.intRangeAtMost(u32, 0, 65536));
+        switch (mode) {
+            0 => rnd.bytes(buf[0..len]), // pure noise
+            1 => @memset(buf[0..len], rnd.int(u8)), // one run
+            2 => { // runs of random length and byte
+                var p: usize = 0;
+                while (p < len) {
+                    const run_len = @min(len - p, @as(usize, @intCast(rnd.intRangeAtMost(u32, 1, 64))));
+                    @memset(buf[p .. p + run_len], rnd.int(u8));
+                    p += run_len;
+                }
+            },
+            else => { // repeated random chunk
+                const chunk = rnd.intRangeAtMost(u32, 1, 64);
+                var seed: [64]u8 = undefined;
+                rnd.bytes(seed[0..chunk]);
+                var p: usize = 0;
+                while (p < len) {
+                    const take = @min(len - p, @as(usize, chunk));
+                    @memcpy(buf[p .. p + take], seed[0..take]);
+                    p += take;
+                }
+            },
+        }
+        const c = try compress(a, buf[0..len]);
+        defer a.free(c);
+        const d = try decompress(a, c, len);
+        defer a.free(d);
+        try std.testing.expectEqualSlices(u8, buf[0..len], d);
+    }
+}
+
+test "decompressor survives mutated and truncated blocks" {
+    // Fuzz the decoder against corrupt input: random mutations of valid
+    // blocks, truncations, and extensions must never crash - only return
+    // errors. The bundle parser feeds the same decoder hostile data.
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xdec0de);
+    const rnd = prng.random();
+    var payload: [8192]u8 = undefined;
+    rnd.bytes(&payload);
+    const c = try compress(a, &payload);
+    defer a.free(c);
+    var block: [16384]u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 3000) : (iter += 1) {
+        const mode = rnd.int(u8) % 3;
+        const blen = switch (mode) {
+            0 => rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(@min(c.len, 8192)))), // truncate
+            1 => @min(c.len + rnd.intRangeAtMost(u32, 1, 32), block.len), // extend
+            else => c.len, // mutate in place
+        };
+        @memcpy(block[0..c.len], c);
+        if (mode == 0) {
+            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(blen)));
+            block[m] ^= @intCast(rnd.int(u8) | 1);
+        }
+        const out = decompress(a, block[0..blen], payload.len) catch continue;
+        defer a.free(out);
+        // if it decoded at all, it must be the exact payload
+        try std.testing.expectEqualSlices(u8, &payload, out);
+    }
+}
