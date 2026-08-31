@@ -831,6 +831,43 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} ({d}x{d})\n", .{ name, rr.w, rr.h });
                 extracted += 1;
             },
+            687078895 => { // SpriteAtlas -> packed-sprite mapping JSON
+                const atlas_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const packed_sprites = unityz.classes.fieldOf(v, "m_PackedSprites") orelse continue;
+                const names = unityz.classes.fieldOf(v, "m_PackedSpriteNamesToIndex") orelse continue;
+                if (packed_sprites != .array or names != .array or packed_sprites.array.len != names.array.len) continue;
+                var buf: std.ArrayList(u8) = .empty;
+                var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+                const w = &aw.writer;
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, atlas_name);
+                try w.writeAll(",\"sprites\":[");
+                for (packed_sprites.array, 0..) |sp, i| {
+                    if (i != 0) try w.writeByte(',');
+                    try w.writeAll("{\"path_id\":");
+                    try w.print("{d},\"name\":", .{pptrPathId(sp) orelse 0});
+                    try writeJsonString(w, switch (names.array[i]) {
+                        .string => |s| s,
+                        else => "",
+                    });
+                    try w.writeByte('}');
+                }
+                try w.writeAll("]}\n");
+                const out = aw.toArrayList();
+                // sanitizeComponent needs a mutable buffer; copy the
+                // file-owned name first so it cannot steer the output path.
+                var clean_buf: [192]u8 = undefined;
+                const clean_name = if (atlas_name.len != 0)
+                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{atlas_name}))
+                else
+                    "";
+                var name_buf: [192]u8 = undefined;
+                const fname = try std.fmt.bufPrint(&name_buf, "atlas_{d}_{s}.json", .{ o.path_id, if (clean_name.len != 0) clean_name else "unnamed" });
+                try extractFile(subdir, fname, out.items);
+                try stdout.print("extracted {s} ({d} packed sprites)\n", .{ fname, packed_sprites.array.len });
+                try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = atlas_name, .subdir = subdir });
+                extracted += 1;
+            },
             114 => { // MonoBehaviour
                 const mb = unityz.classes.MonoBehaviour.fromValue(v);
                 // the raw serialized script graph follows the type tree
@@ -1210,6 +1247,21 @@ fn meshF32(
 
 fn fieldStr(v: unityz.value.Value, name: []const u8) []const u8 {
     return unityz.classes.stringField(v, name) orelse "";
+}
+
+/// The target path id of a PPtr-typed value: the `.pptr` variant directly,
+/// or an object carrying `m_FileID`/`m_PathID` fields. Null when neither.
+fn pptrPathId(v: unityz.value.Value) ?i64 {
+    return switch (v) {
+        .pptr => |p| p.path_id,
+        .obj => blk: {
+            if (unityz.classes.fieldOf(v, "m_PathID")) |pv| {
+                if (pv.asInt()) |id| break :blk id;
+            }
+            break :blk null;
+        },
+        else => null,
+    };
 }
 
 /// Adapter so `value.jsonWrite` (which expects `writeAll`/`writeByte`/`print`)

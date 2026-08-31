@@ -1306,3 +1306,14 @@ directories: the mutated stream reports the same 14-pixel texture +
 sprite diffs as the file-level diff, identical directories report all
 zeros, `--class 213` scopes to sprites, and non-asset files in the
 directory are skipped. 274/274 tests.
+
+2026-08-31 (SpriteAtlas export + class-name table completion): the
+atlas_test bundle's mystery class 687078895 is Unity's SpriteAtlas
+(confirmed against UnityPy's ClassIDType), so `extract` now writes an
+`atlas_<id>_<name>.json` mapping every packed sprite's path id to its
+name (read from m_PackedSprites + m_PackedSpriteNamesToIndex, verified
+to align with the extracted sprite PNGs on the real atlas - 7/7 match),
+and `className` covers the rest of UnityPy's enum (the ~110 high-range
+registered ids: AnimatorStateMachine 1107, PackedAssets 1126, SpriteAtlas
+687078895, Tilemap 1839735485, VisualEffect 2083052967, ...), so stats/
+find label them instead of "Class". 274/274 tests.

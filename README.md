@@ -61,8 +61,12 @@ All commands accept a directory and process every file in it.
 bundles/webfiles each node's objects land in its own `objects/<node>/`
 subdirectory so identical path ids never collide), writes textures and
 sprites as PNG by default or TGA / BMP / raw RGBA8 with
-`--format tga|bmp|raw` (UnityPy only writes PNG), and
-auto-creates `--outdir <dir>`; `edit` supports
+`--format tga|bmp|raw` (UnityPy only writes PNG), exports SpriteAtlas
+objects as a JSON mapping packed sprite path ids to names (so extracted
+sprite PNGs can be matched back to their atlas slots), and
+auto-creates `--outdir <dir>`.
+
+`edit` supports
 dotted-indexed field paths, `--out <file>`, and `--verify`, which
 round-trip-checks the edited output and refuses to write if it does not
 pass (UnityPy edits never self-check).
