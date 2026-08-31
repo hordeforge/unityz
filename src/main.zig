@@ -431,11 +431,14 @@ fn resolveSidecar(sidecars: []const Sidecar, stream_path: []const u8, offset: u6
 
 
 /// One hit from a SpriteAtlas lookup: the texture the sprite was packed
-/// into, plus the atlas's textureRect for it (mirrors UnityPy, which crops
-/// the atlas's rect rather than the sprite's own copy).
+/// into, plus the atlas's textureRect, alphaTexture and settingsRaw for it
+/// (mirrors UnityPy, which crops the atlas's rect rather than the sprite's
+/// own copy).
 const AtlasHit = struct {
     texture: unityz.value.PPtr,
     rect: [4]f32,
+    alpha_texture: ?unityz.value.PPtr = null,
+    settings_raw: u32 = 0,
 };
 
 /// Compares two m_RenderDataKey values: `[Hash128, int]` where Hash128 is
@@ -467,12 +470,17 @@ fn atlasEntryHit(entry: unityz.value.Value) ?AtlasHit {
     var hit = AtlasHit{ .texture = undefined, .rect = .{ 0, 0, 0, 0 } };
     for (val.obj) |f| {
         if (f.value == .pptr and std.mem.eql(u8, f.name, "texture")) hit.texture = f.value.pptr;
+        if (f.value == .pptr and std.mem.eql(u8, f.name, "alphaTexture")) hit.alpha_texture = f.value.pptr;
         if (f.value == .obj and std.mem.eql(u8, f.name, "textureRect")) {
             const comps = [_][]const u8{ "x", "y", "width", "height" };
             for (comps, 0..) |c, i| {
                 const cf = unityz.classes.fieldOf(f.value, c) orelse continue;
                 if (cf.asFloat()) |fv| hit.rect[i] = @floatCast(fv);
             }
+        }
+        if (f.value.asInt() != null and std.mem.eql(u8, f.name, "settingsRaw")) {
+            const sr = f.value.asInt().?;
+            hit.settings_raw = @truncate(@as(u64, @bitCast(sr)));
         }
     }
     if (hit.texture.path_id == 0) return null;
@@ -689,35 +697,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ name, shd.len });
                 extracted += 1;
             },
-            213 => { // Sprite -> cropped PNG from its texture
+            213 => { // Sprite -> cropped / mesh-rendered PNG
+                const rr = renderSprite(arena, &sf, sidecars, v, o.path_id) orelse continue;
+                const png = unityz.png.encode(arena, rr.w, rr.h, rr.data) catch continue;
                 const sprite = unityz.classes.Sprite.fromValue(v);
-                // A {0,0} PPtr is the null reference: atlas-packed sprites
-                // leave m_RD.texture empty and name the atlas texture instead.
-                const hit = if (sprite.texture) |t| blk: {
-                    if (t.path_id != 0) break :blk AtlasHit{ .texture = t, .rect = sprite.rect };
-                    break :blk (atlasTextureFor(arena, &sf, v, o.path_id) orelse continue);
-                } else (atlasTextureFor(arena, &sf, v, o.path_id) orelse continue);
-                if (hit.texture.file_id != 0) continue; // external file not resolvable here
-                const tex_value = readObjectValue(arena, &sf, hit.texture.path_id) orelse continue;
-                const t = unityz.classes.Texture2D.fromValue(tex_value);
-                if (t.width == 0 or t.height == 0) continue;
-                var pixels: []const u8 = t.image_data;
-                if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
-                    const start: usize = @intCast(sf.data_offset + t.stream.offset);
-                    const end = start + t.stream.size;
-                    if (end <= sf.source.len) pixels = sf.source[start..end];
-                }
-                if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
-                    // streamed from a sibling .resS/.resource node
-                    pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
-                }
-                if (pixels.len == 0) continue;
-                const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch continue;
-                const cropped = unityz.classes.Sprite.spriteRgbaRect(arena, hit.rect, rgba, t.width, t.height) catch continue;
-                // PNG dims must match the crop's floor/ceil rounding, not int(rect)
-                const pw: u32 = @as(u32, @intFromFloat(@ceil(hit.rect[0] + hit.rect[2]))) - @as(u32, @intFromFloat(@floor(hit.rect[0])));
-                const ph: u32 = @as(u32, @intFromFloat(@ceil(hit.rect[1] + hit.rect[3]))) - @as(u32, @intFromFloat(@floor(hit.rect[1])));
-                const png = unityz.png.encode(arena, pw, ph, cropped) catch continue;
                 var name_buf: [160]u8 = undefined;
                 const sprite_name = std.mem.trimEnd(u8, sprite.name, "\x00");
                 const name = if (sprite_name.len != 0)
@@ -725,7 +708,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 else
                     try std.fmt.bufPrint(&name_buf, "sprite_{d}.png", .{o.path_id});
                 try extractFile(subdir, name, png);
-                try stdout.print("extracted {s} ({d}x{d})\n", .{ name, pw, ph });
+                try stdout.print("extracted {s} ({d}x{d})\n", .{ name, rr.w, rr.h });
                 extracted += 1;
             },
             114 => { // MonoBehaviour
@@ -840,6 +823,236 @@ fn readObjectValue(
         return unityz.object_reader.readObject(arena, &r2, &tree.roots[0]) catch null;
     }
     return null;
+}
+
+/// A decoded RGBA texture plus its dimensions.
+const DecodedTexture = struct { rgba: []const u8, w: u32, h: u32 };
+
+/// Decodes a file-local (file_id 0) Texture2D at `path_id` to RGBA, reading
+/// embedded image data, the in-file stream, or a sibling .resS sidecar.
+fn decodeSpriteTexture(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    sidecars: []const Sidecar,
+    path_id: i64,
+) ?DecodedTexture {
+    const tex_value = readObjectValue(arena, sf, path_id) orelse return null;
+    const t = unityz.classes.Texture2D.fromValue(tex_value);
+    if (t.width == 0 or t.height == 0) return null;
+    var pixels: []const u8 = t.image_data;
+    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
+        const start: usize = @intCast(sf.data_offset + t.stream.offset);
+        const end = start + t.stream.size;
+        if (end <= sf.source.len) pixels = sf.source[start..end];
+    }
+    if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
+        pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
+    }
+    if (pixels.len == 0) return null;
+    const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
+    return .{ .rgba = rgba, .w = t.width, .h = t.height };
+}
+
+/// Reads the m_VertexData (channel-packed) style sprite mesh: positions from
+/// channel 0, UV0 from the version-dependent channel, using the same layout
+/// rules as a Mesh object.
+const ChannelMesh = struct { positions: []const [3]f32, uvs: []const [2]f32 };
+
+fn readChannelMesh(
+    arena: std.mem.Allocator,
+    vd: unityz.value.Value,
+    sf: *const unityz.serialized.SerializedFile,
+) ?ChannelMesh {
+    var m = unityz.classes.Mesh{};
+    m.vertex_count = @intCast(unityz.classes.intField(vd, "m_VertexCount") orelse 0);
+    m.vertex_data = unityz.classes.bytesField(vd, "m_DataSize") orelse "";
+    if (unityz.classes.fieldOf(vd, "m_Channels")) |chans| {
+        if (chans == .array) {
+            const n = @min(chans.array.len, m.channels.len);
+            for (chans.array[0..n], 0..) |c, i| {
+                m.channels[i] = .{
+                    .stream = @intCast(unityz.classes.intField(c, "stream") orelse 0),
+                    .offset = @intCast(unityz.classes.intField(c, "offset") orelse 0),
+                    .format = @intCast(unityz.classes.intField(c, "format") orelse 0),
+                    .dimension = @intCast(unityz.classes.intField(c, "dimension") orelse 0),
+                };
+            }
+            m.channel_count = n;
+        }
+    }
+    const pos = m.channel(0) orelse return null;
+    if (pos.format != 0 or pos.dimension < 3) return null;
+    const stride = m.stride() orelse return null;
+    const vcount: usize = m.vertex_count;
+    if (m.vertex_data.len < stride * vcount) return null;
+    const ps = arena.alloc([3]f32, vcount) catch return null;
+    for (0..vcount) |i| {
+        const base = i * stride;
+        ps[i] = .{
+            readF32(m.vertex_data, base + pos.offset, sf.endian),
+            readF32(m.vertex_data, base + pos.offset + 4, sf.endian),
+            readF32(m.vertex_data, base + pos.offset + 8, sf.endian),
+        };
+    }
+    const uv_major = unityMajor(sf.unity_version);
+    const uv = m.channel(if (uv_major >= 2018) 4 else 3);
+    var uvs: []const [2]f32 = &.{};
+    if (uv) |t| {
+        if (t.format == 0 and t.dimension >= 2) {
+            const us = arena.alloc([2]f32, vcount) catch return null;
+            for (0..vcount) |i| {
+                const base = i * stride;
+                us[i] = .{
+                    readF32(m.vertex_data, base + t.offset, sf.endian),
+                    readF32(m.vertex_data, base + t.offset + 4, sf.endian),
+                };
+            }
+            uvs = us;
+        }
+    }
+    return .{ .positions = ps, .uvs = uvs };
+}
+
+/// Reads the sprite triangle index list from the render data's index buffer
+/// (bytes of u16) or one of the integer-array fields Unity writes.
+fn readSpriteTriangles(arena: std.mem.Allocator, rd: unityz.value.Value) ?[]const u32 {
+    if (unityz.classes.bytesField(rd, "m_IndexBuffer")) |buf| {
+        if (buf.len >= 6) {
+            const n = buf.len / 2;
+            const tris = arena.alloc(u32, n) catch return null;
+            for (0..n) |i| tris[i] = std.mem.readInt(u16, buf[i * 2 ..][0..2], .little);
+            return tris;
+        }
+    }
+    for ([_][]const u8{ "m_IndexBuffer", "indices", "triangles" }) |name| {
+        const f = unityz.classes.fieldOf(rd, name) orelse continue;
+        if (f == .array and f.array.len > 0) {
+            const n = f.array.len;
+            const tris = arena.alloc(u32, n) catch return null;
+            for (f.array, 0..) |x, i| tris[i] = @intCast(x.asInt() orelse @as(i64, 0));
+            return tris;
+        }
+    }
+    return null;
+}
+
+/// Reads a Sprite's tight/polygon mesh out of its own m_RD (positions, UVs,
+/// triangle indices), mirroring UnityPy's MeshHandler over SpriteRenderData.
+/// Returns null when the render data has no parseable mesh.
+fn spriteMeshFromValue(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    v: unityz.value.Value,
+) ?unityz.classes.SpriteMesh {
+    const rd = unityz.classes.fieldOf(v, "m_RD") orelse return null;
+    var positions: []const [3]f32 = &.{};
+    var uvs: []const [2]f32 = &.{};
+    if (unityz.classes.fieldOf(rd, "m_VertexData")) |vd| {
+        const cm = readChannelMesh(arena, vd, sf) orelse return null;
+        positions = cm.positions;
+        uvs = cm.uvs;
+    } else if (unityz.classes.fieldOf(rd, "vertices")) |verts| {
+        if (verts == .array and verts.array.len > 0) {
+            const n = verts.array.len;
+            const ps = arena.alloc([3]f32, n) catch return null;
+            const us = arena.alloc([2]f32, n) catch return null;
+            @memset(us, .{ 0, 0 });
+            for (verts.array, 0..) |ev, i| {
+                if (unityz.classes.vec3Field(ev, "pos")) |p| ps[i] = p;
+                if (unityz.classes.fieldOf(ev, "uv")) |uvf| {
+                    if (unityz.classes.floatField(uvf, "x")) |x| us[i][0] = @floatCast(x);
+                    if (unityz.classes.floatField(uvf, "y")) |y| us[i][1] = @floatCast(y);
+                }
+            }
+            positions = ps;
+            uvs = us;
+        }
+    }
+    const triangles = readSpriteTriangles(arena, rd) orelse return null;
+    if (positions.len == 0 or triangles.len == 0) return null;
+    return .{ .positions = positions, .uvs = uvs, .triangles = triangles };
+}
+
+/// The final (vertically flipped) RGBA sprite image and its dimensions.
+const RenderResult = struct { data: []const u8, w: u32, h: u32 };
+
+/// Produces the final flipped RGBA sprite image, following UnityPy's
+/// get_image_from_sprite: resolve the texture (and alpha texture), crop the
+/// rect, apply the packed rotation, then either mask the tight polygon or
+/// render the mesh; rows are always flipped last.
+fn renderSprite(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    sidecars: []const Sidecar,
+    v: unityz.value.Value,
+    sprite_path_id: i64,
+) ?RenderResult {
+    const sprite = unityz.classes.Sprite.fromValue(v);
+    // A {0,0} PPtr is the null reference: atlas-packed sprites leave
+    // m_RD.texture empty and name the atlas texture instead.
+    const hit = if (sprite.texture) |t| blk: {
+        if (t.path_id != 0) break :blk AtlasHit{
+            .texture = t, .rect = sprite.rect,
+            .alpha_texture = sprite.alpha_texture,
+            .settings_raw = sprite.settings_raw,
+        };
+        break :blk (atlasTextureFor(arena, sf, v, sprite_path_id) orelse return null);
+    } else (atlasTextureFor(arena, sf, v, sprite_path_id) orelse return null);
+    if (hit.texture.file_id != 0) return null; // external file not resolvable here
+
+    const tex = decodeSpriteTexture(arena, sf, sidecars, hit.texture.path_id) orelse return null;
+    var rgba: []const u8 = tex.rgba;
+    // Merge a separate alpha texture if present (packed sprites).
+    if (hit.alpha_texture) |at| {
+        if (at.path_id != 0 and at.file_id == 0) {
+            if (decodeSpriteTexture(arena, sf, sidecars, at.path_id)) |alpha_tex| {
+                if (alpha_tex.w == tex.w and alpha_tex.h == tex.h) {
+                    rgba = unityz.classes.mergeAlphaTexture(arena, rgba, alpha_tex.rgba, tex.w, tex.h) catch return null;
+                }
+            }
+        }
+    }
+
+    // Crop the rect (top-origin), then apply the packed rotation, matching
+    // UnityPy's order.
+    var crop = unityz.classes.Sprite.cropRectNoFlip(arena, hit.rect, rgba, tex.w, tex.h) catch return null;
+    if (sprite.isPacked()) {
+        const rot = unityz.classes.rotateSprite(arena, crop.data, @intCast(crop.w), @intCast(crop.h), sprite.packingRotation()) catch return null;
+        crop = .{ .data = rot.data, .w = rot.w, .h = rot.h };
+    }
+
+    var data: []const u8 = crop.data;
+    var w: u32 = @intCast(crop.w);
+    var h: u32 = @intCast(crop.h);
+
+    if (sprite.isTight()) {
+        const mesh = spriteMeshFromValue(arena, sf, v) orelse return null; // no mesh -> cannot render tight
+        var has_nonzero_uv = false;
+        if (mesh.uvs.len == mesh.positions.len and mesh.uvs.len > 0) {
+            for (mesh.uvs) |u| {
+                if (u[0] != 0 or u[1] != 0) {
+                    has_nonzero_uv = true;
+                    break;
+                }
+            }
+        }
+        if (has_nonzero_uv) {
+            // texture-mapped mesh produces its own tightly-cropped image
+            const rendered = unityz.classes.renderSpriteMesh(arena, mesh, sprite.pixels_to_units, rgba, tex.w, tex.h) catch return null;
+            data = rendered.data;
+            w = rendered.w;
+            h = rendered.h;
+        } else {
+            // polygon mask applied to the (rotated) crop
+            const masked = unityz.classes.maskSprite(arena, mesh, sprite.pixels_to_units, crop.data, @intCast(crop.w), @intCast(crop.h)) catch return null;
+            data = masked;
+            w = @intCast(crop.w);
+            h = @intCast(crop.h);
+        }
+    }
+
+    const flipped = unityz.texture.flipVertical(arena, data, w, h) catch return null;
+    return .{ .data = flipped, .w = w, .h = h };
 }
 
 /// Little-endian f32 at `data[pos..pos+4]` (the vertex data is packed in
