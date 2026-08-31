@@ -1233,15 +1233,19 @@ two-pass. 251/251 tests.
 2026-08-31 (shader sub-program blob decode): extended the existing
 shader-blob parser (from the skin-detection pass) into a full decoder.
 `src/shader.zig` now lists every record of the d3d11 platform blob as either
-a parameter blob or a code blob, and decodes each: parameter blobs carry the
-constant buffers (name, used_size, members with their byte index, nested
-structs) and the texture/cbuffer-bind/UAV/sampler entries; code blobs carry
-the 38-byte program-data header (version, SRV/cbuffer/sampler counts, UAV,
-geometry primitive), the DXBC chunk set, the SHDR/SHEX declaration counts
-(srv/cbuffer/sampler/UAV + temp registers), the ISGN input signature, the
-RDEF constant-buffer member offsets, and the trailing ParserBindChannels
-(source,target) pairs. Non-d3d11 program payloads (SMOL-V/GLSL) are recorded
-as undecoded rather than guessed. Surfaced under `show` and a new `shader`
+a parameter blob or a code blob, and decodes each.
+
+Parameter blobs carry the constant buffers (name, used_size, members with
+their byte index, nested structs) and the texture/cbuffer-bind/UAV/sampler
+entries. Code blobs carry the 38-byte program-data header (version,
+SRV/cbuffer/sampler counts, UAV, geometry primitive), the DXBC chunk set,
+the SHDR/SHEX declaration counts (srv/cbuffer/sampler/UAV + temp
+registers), the ISGN input signature, the RDEF constant-buffer member
+offsets, and the trailing ParserBindChannels (source,target) pairs.
+Non-d3d11 program payloads (SMOL-V/GLSL) are recorded as undecoded rather
+than guessed.
+
+Surfaced under `show` and a new `shader`
 command (`<path> <node:path-id>`), which extends the Shader's JSON with a
 `shaderBlob` field; `verify` adds a class-48 check that re-encodes each
 parameter blob byte for byte.
@@ -1260,3 +1264,19 @@ arena and broke the next object's read; counts are now bounded against the
 data length, matching the existing "reject counts larger than the remaining
 metadata" rule. Unit tests cover the parameter-blob round-trip (incl. the
 nameless base buffer) and `verifyBlob` on a synthetic shader.
+
+2026-08-31 (diff --pixels covers matched objects and sprites): the pixel
+pass previously fired only on objects whose serialized bytes changed. But
+texture/sprite pixels usually stream from a sibling `.resS` node, so an
+edited stream byte changes no object hash and `diff --pixels` reported
+"0 changed" on files that were visually different. The pass now runs on
+every matched Texture2D and Sprite, and sprites are rendered through
+their full pipeline (crop rect, packed rotation, alpha-texture merge,
+tight/polygon mesh) before comparing.
+
+Verified against an independent
+Pillow crop on a real bundle pair with a byte-mutated crunch stream:
+every reported count and max delta matches (texture 1024x512 and the
+affected 122x298 sprite both report 14 pixels, R10 G10 B10 A0). Pixel
+lines now name the object id and class so results map back to objects.
+270/270 tests.

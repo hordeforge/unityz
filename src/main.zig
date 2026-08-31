@@ -2705,30 +2705,56 @@ fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
 /// `diff --pixels`: decodes a Texture2D object in both files and reports
 /// pixel-level differences (per-channel differing-byte counts and the
 /// maximum per-channel delta). Node-aware: `fa.node` selects the container
-/// entry. Pixels may be embedded in the object or streamed inside the same
-/// serialized file; externally-streamed (.resS sidecar) pixels are not
-/// resolved here.
+/// entry. Pixels may be embedded in the object, streamed inside the same
+/// serialized file, or streamed from a sibling `.resS` / `.resource`
+/// sidecar node inside the same container, all resolved here.
 fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !void {
-    const rgba_a = try findTextureRgba(arena, a_bytes, fa);
-    const rgba_b = try findTextureRgba(arena, b_bytes, fa);
+    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .texture);
+    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .texture);
     if (rgba_a == null or rgba_b == null) {
-        try stdout.print("    (pixels: texture could not be decoded in one or both files)\n", .{});
+        try stdout.print("    (pixels: object {d} texture could not be decoded in one or both files)\n", .{fa.path_id});
         return;
     }
     const a = rgba_a.?;
     const b = rgba_b.?;
-    if (a.width != b.width or a.height != b.height) {
-        try stdout.print("    (pixels: size differs {d}x{d} vs {d}x{d})\n", .{ a.width, a.height, b.width, b.height });
+    if (a.w != b.w or a.h != b.h) {
+        try stdout.print("    (pixels: object {d} size differs {d}x{d} vs {d}x{d})\n", .{ fa.path_id, a.w, a.h, b.w, b.h });
         return;
     }
+    try diffRgbaPixels(fa, a.data, b.data, a.w, a.h, stdout);
+}
+
+/// `diff --pixels` for a Sprite: renders both sprites (crop rect, packed
+/// rotation, alpha-texture merge, tight/polygon mesh) and compares the
+/// RGBA. Object bytes are unchanged when only the streamed atlas pixels
+/// change, so this is the only diff signal that sees those edits.
+fn diffSpritePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, stdout: *Io.Writer) !void {
+    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .sprite);
+    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .sprite);
+    if (rgba_a == null or rgba_b == null) {
+        try stdout.print("    (pixels: object {d} sprite could not be rendered in one or both files)\n", .{fa.path_id});
+        return;
+    }
+    const a = rgba_a.?;
+    const b = rgba_b.?;
+    if (a.w != b.w or a.h != b.h) {
+        try stdout.print("    (pixels: object {d} size differs {d}x{d} vs {d}x{d})\n", .{ fa.path_id, a.w, a.h, b.w, b.h });
+        return;
+    }
+    try diffRgbaPixels(fa, a.data, b.data, a.w, a.h, stdout);
+}
+
+/// Shared per-channel RGBA comparison; `width`/`height` describe both
+/// buffers (they must have the same length).
+fn diffRgbaPixels(fa: Fp, a: []const u8, b: []const u8, width: u32, height: u32, stdout: *Io.Writer) !void {
     var per_channel = [_]usize{ 0, 0, 0, 0 };
     var max_delta = [_]u32{ 0, 0, 0, 0 };
     var diff_pixels: usize = 0;
     var i: usize = 0;
-    while (i < a.rgba.len) : (i += 4) {
+    while (i < a.len) : (i += 4) {
         var any = false;
         for (0..4) |c| {
-            const d: u32 = @abs(@as(i32, a.rgba[i + c]) - @as(i32, b.rgba[i + c]));
+            const d: u32 = @abs(@as(i32, a[i + c]) - @as(i32, b[i + c]));
             if (d != 0) {
                 per_channel[c] += 1;
                 any = true;
@@ -2737,17 +2763,34 @@ fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []c
         }
         if (any) diff_pixels += 1;
     }
-    try stdout.print("    (pixels: {d}x{d}, {d} pixels differ; max delta R{d} G{d} B{d} A{d})\n", .{ a.width, a.height, diff_pixels, max_delta[0], max_delta[1], max_delta[2], max_delta[3] });
+    const name = className(fa.class_id) orelse "Class";
+    try stdout.print("    (pixels: object {d} ({s}) {d}x{d}, {d} pixels differ; max delta R{d} G{d} B{d} A{d})\n", .{ fa.path_id, name, width, height, diff_pixels, max_delta[0], max_delta[1], max_delta[2], max_delta[3] });
 }
 
-const TexPixels = struct { rgba: []const u8, width: u32, height: u32 };
+test "diffRgbaPixels counts per-channel diffs and max deltas" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var buf: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    const a = [_]u8{ 10, 20, 30, 40, 255, 255, 255, 255 };
+    const b = [_]u8{ 12, 20, 35, 44, 250, 245, 255, 255 };
+    try diffRgbaPixels(.{ .path_id = 7, .class_id = 28, .hash = 0, .size = 0 }, &a, &b, 2, 1, &aw.writer);
+    try std.testing.expectEqualStrings("    (pixels: object 7 (Texture2D) 2x1, 2 pixels differ; max delta R5 G10 B5 A4)\n", aw.toArrayList().items);
+}
 
-/// Decodes a Texture2D object's pixels from a file (container-aware,
-/// resolving `.resS` / `.resource` sidecar nodes inside the same
-/// container), or returns null when the object is absent or cannot be
-/// decoded.
-fn findTextureRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?TexPixels {
-    var out: ?TexPixels = null;
+/// RGBA8 pixels plus dimensions, from a decoded Texture2D or a rendered
+/// Sprite.
+const Rgba = struct { data: []const u8, w: u32, h: u32 };
+
+const RgbaKind = enum { texture, sprite };
+
+/// Decodes a Texture2D (28) or renders a Sprite (213) object's pixels from
+/// a file, container-aware: `.resS` / `.resource` sidecar nodes inside the
+/// same bundle/webfile are resolved, and `fa.node` selects the container
+/// entry. Returns null when the object is absent or cannot be decoded.
+fn findObjectRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, kind: RgbaKind) !?Rgba {
+    var out: ?Rgba = null;
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = try unityz.bundle.parse(arena, bytes);
@@ -2764,7 +2807,7 @@ fn findTextureRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?TexPix
                 if (fa.node) |sn| {
                     if (!std.mem.eql(u8, n.path, sn)) continue;
                 }
-                out = try findTextureInSerialized(arena, n.data, fa.path_id, sidecars.items);
+                out = try findObjectRgbaInSerialized(arena, n.data, fa.path_id, sidecars.items, kind);
                 if (out != null) return out;
             }
         },
@@ -2781,23 +2824,27 @@ fn findTextureRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?TexPix
                 if (fa.node) |sn| {
                     if (!std.mem.eql(u8, e.path, sn)) continue;
                 }
-                out = try findTextureInSerialized(arena, e.data, fa.path_id, sidecars.items);
+                out = try findObjectRgbaInSerialized(arena, e.data, fa.path_id, sidecars.items, kind);
                 if (out != null) return out;
             }
         },
         .serialized => {
             if (fa.node != null) return null;
-            out = try findTextureInSerialized(arena, bytes, fa.path_id, &.{});
+            out = try findObjectRgbaInSerialized(arena, bytes, fa.path_id, &.{}, kind);
         },
         else => {},
     }
     return out;
 }
 
-fn findTextureInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar) !?TexPixels {
+fn findObjectRgbaInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar, kind: RgbaKind) !?Rgba {
     const sf = unityz.serialized.parse(arena, bytes) catch return null;
+    const want: i32 = switch (kind) {
+        .texture => 28,
+        .sprite => 213,
+    };
     const o = for (sf.objects) |*oo| {
-        if (oo.class_id == 28 and oo.path_id == path_id) break oo;
+        if (oo.class_id == want and oo.path_id == path_id) break oo;
     } else return null;
     const data = sf.objectData(o) orelse return null;
     const ti = o.type_index orelse return null;
@@ -2807,12 +2854,20 @@ fn findTextureInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id:
     var r = unityz.streams.Reader.init(data);
     r.endian = sf.endian;
     const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return null;
-    const t = unityz.classes.Texture2D.fromValue(v);
-    if (t.width == 0 or t.height == 0) return null;
-    const pixels = texturePixels(&sf, sidecars, t);
-    if (pixels.len == 0) return null;
-    const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
-    return .{ .rgba = rgba, .width = t.width, .height = t.height };
+    switch (kind) {
+        .texture => {
+            const t = unityz.classes.Texture2D.fromValue(v);
+            if (t.width == 0 or t.height == 0) return null;
+            const pixels = texturePixels(&sf, sidecars, t);
+            if (pixels.len == 0) return null;
+            const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
+            return .{ .data = rgba, .w = t.width, .h = t.height };
+        },
+        .sprite => {
+            const rr = renderSprite(arena, &sf, sidecars, v, path_id) orelse return null;
+            return .{ .data = rr.data, .w = rr.w, .h = rr.h };
+        },
+    }
 }
 
 
@@ -2905,14 +2960,19 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                     }
                     reported += 1;
                 }
-                if (pixels and fa.class_id == 28) {
-                    // Texture2D: decode both and report pixel-level
-                    // differences (beyond UnityPy, whose comparisons never
-                    // look at pixels)
-                    try diffTexturePixels(arena, bytes, other_bytes, fa, stdout);
-                }
             } else {
                 unchanged += 1;
+            }
+            // The pixel pass runs on every matched texture/sprite, not only
+            // changed objects: streamed pixels live outside the serialized
+            // payload, so an edited .resS byte changes no object hash. This
+            // is the only signal that sees such edits.
+            if (pixels) {
+                switch (fa.class_id) {
+                    28 => try diffTexturePixels(arena, bytes, other_bytes, fa, stdout),
+                    213 => try diffSpritePixels(arena, bytes, other_bytes, fa, stdout),
+                    else => {},
+                }
             }
             break;
         }
