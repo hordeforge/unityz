@@ -132,6 +132,7 @@ pub fn build(b: *std.Build) void {
         "src/bmp.zig",
         "src/fsb5.zig",
         "src/audio.zig",
+        "src/vorbis.zig",
         "src/object_writer.zig",
         "src/serialized_writer.zig",
     }) |module_path| {

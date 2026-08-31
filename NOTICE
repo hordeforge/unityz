@@ -60,3 +60,39 @@ ZLIB LICENSE, as carried by crn_decomp.h and crnlib.h:
 
   3. This notice may not be removed or altered from any source distribution.
 ================================================================================
+
+================================================================================
+vorbis_headers -- FMOD FSB5 Vorbis setup-header table
+Location in this distribution: src/vorbis_headers.bin, src/vorbis_headers_index.zig
+
+The setup-header table (CRC32-keyed Vorbis identification/setup packets for
+the FMOD encoder configurations used in FSB5 banks) is derived from
+Fmod5Sharp's vorbis_headers_converted.json
+(https://github.com/SamboyCoding/Fmod5Sharp), which is distributed under
+the MIT License:
+
+  Copyright (c) 2020 Samboy063
+  https://github.com/SamboyCoding/Fmod5Sharp
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the "Software"),
+  to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+  and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included
+  in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  DEALINGS IN THE SOFTWARE.
+
+The table itself is encoder-generated data (Vorbis codebook and mode
+configuration packets) extracted from FMOD-produced FSB5 banks; it contains
+no audio content.
+================================================================================

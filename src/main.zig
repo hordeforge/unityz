@@ -854,10 +854,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     }
                     // Codecs that decode in pure Zig (PCM8/16/24/32/FLOAT,
                     // IMA ADPCM) also export as a playable WAV, no external
-                    // tools needed. Vorbis banks (mode 15) need a
-                    // transform codec and stay as .fsb - UnityPy shells out
-                    // to ffmpeg for every conversion, so this is
-                    // beyond-parity.
+                    // tools needed. Vorbis banks (mode 15) are remuxed to a
+                    // playable Ogg (headers synthesized, setup header from
+                    // the crc-keyed table) - UnityPy shells out to ffmpeg
+                    // for every conversion, so this is beyond-parity.
                     if (try unityz.fsb5.parse(arena, audio)) |bank| {
                         if (unityz.audio.decodable(bank.mode)) {
                             for (bank.samples, 0..) |s, si| {
@@ -874,6 +874,20 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                                     try std.fmt.bufPrint(&wav_name_buf, "audio_{d}_{s}_s{d}.wav", .{ o.path_id, base_name, si });
                                 try extractFile(subdir, sanitizeComponent(wav_name), wav);
                                 try stdout.print("extracted {s} ({d} samples, {s})\n", .{ wav_name, s.sample_count, unityz.audio.modeName(bank.mode) });
+                                extracted += 1;
+                            }
+                        } else if (bank.mode == 15) {
+                            // Vorbis: remux the raw packet stream into a
+                            // playable Ogg. Unknown setup CRCs stay .fsb.
+                            for (bank.samples, 0..) |s, si| {
+                                const ogg = unityz.vorbis.rebuildOgg(arena, audio, bank.data_start, s) catch null orelse continue;
+                                var ogg_name_buf: [160]u8 = undefined;
+                                const ogg_name = if (bank.samples.len == 1)
+                                    try std.fmt.bufPrint(&ogg_name_buf, "audio_{d}_{s}.ogg", .{ o.path_id, base_name })
+                                else
+                                    try std.fmt.bufPrint(&ogg_name_buf, "audio_{d}_{s}_s{d}.ogg", .{ o.path_id, base_name, si });
+                                try extractFile(subdir, sanitizeComponent(ogg_name), ogg);
+                                try stdout.print("extracted {s} ({d} samples, {s})\n", .{ ogg_name, s.sample_count, unityz.audio.modeName(bank.mode) });
                                 extracted += 1;
                             }
                         }

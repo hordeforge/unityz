@@ -23,6 +23,10 @@ pub const Sample = struct {
     /// 16 big-endian s16 per channel (8 pairs), followed by 14 bytes of
     /// per-channel header data that FMOD writes but decoders skip.
     dsp_coefs: []const i16 = &.{},
+    /// Vorbis (mode 15) setup-header CRC from the VORBISDATA chunk; the
+    /// CRC identifies the encoder's setup packet (codebooks + modes) in
+    /// the vorbis_headers table, which the Ogg reconstruction needs.
+    vorbis_crc: ?u32 = null,
 };
 
 pub const Bank = struct {
@@ -86,6 +90,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Bank {
         var loop_start: ?u32 = null;
         var loop_end: ?u32 = null;
         var dsp_coefs: []const i16 = &.{};
+        var vorbis_crc: ?u32 = null;
         while (next_chunk) {
             if (pos + 4 > headers_end) return null;
             const chunk = std.mem.readInt(u32, data[pos..][0..4], .little);
@@ -119,7 +124,10 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Bank {
                         dsp_coefs = coefs;
                     }
                 },
-                else => {}, // other chunks (VORBISDATA etc.) are data, not metadata
+                11 => { // VORBISDATA: u32 setup-header CRC + seek table
+                    if (chunk_size >= 4) vorbis_crc = std.mem.readInt(u32, data[pos..][0..4], .little);
+                },
+                else => {}, // other chunks are data, not metadata
             }
             pos += chunk_size;
         }
@@ -132,6 +140,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Bank {
             .loop_start = loop_start,
             .loop_end = loop_end,
             .dsp_coefs = dsp_coefs,
+            .vorbis_crc = vorbis_crc,
         };
     }
 

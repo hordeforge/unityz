@@ -75,6 +75,10 @@ pub const fsb5 = @import("fsb5.zig");
 /// ADPCM) - no external tools needed.
 pub const audio = @import("audio.zig");
 
+/// FSB5 Vorbis (mode 15) to playable Ogg reconstruction - headers
+/// synthesized, setup header from the crc-keyed table, no external tools.
+pub const vorbis = @import("vorbis.zig");
+
 /// TypeTree-driven object serializer (inverse of the reader).
 pub const object_writer = @import("object_writer.zig");
 

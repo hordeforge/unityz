@@ -40,6 +40,7 @@ pub fn modeName(mode: u32) []const u8 {
         5 => "PCMFLOAT",
         6 => "GCADPCM",
         7 => "IMA ADPCM",
+        15 => "Vorbis",
         else => "unknown",
     };
 }
