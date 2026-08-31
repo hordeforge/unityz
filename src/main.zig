@@ -78,7 +78,9 @@ const usage =
     \\  (add --out <file> to write elsewhere instead of in place;
     \\   --verify round-trip-checks the result and refuses to write on failure;
     \\   a base64 string value patches a byte-array field, e.g.
-    \\   edit f.unity3d CAB-..:44 m_IndexBuffer '"AwD/AA=="' replaces raw bytes)
+    \\   edit f.unity3d CAB-..:44 m_IndexBuffer '"AwD/AA=="' replaces raw
+    \\   bytes; inside a replaced subtree the same rule applies, so an
+    \\   extract --json export round-trips back through edit --patch)
     \\
     \\Patch example: {"2": {"m_Name": "renamed"}, "7": {"m_LocalPosition.y": 1.25}}
     \\  (edit --patch <file> applies every entry in one atomic rewrite;
@@ -5361,6 +5363,11 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
 const PathSeg = struct {
     name: []const u8 = "",
     index: ?usize = null,
+    /// The whole dot-segment this name came from, including any `[N]`
+    /// groups (e.g. `m_MeshMetrics[0]`). Unity type trees occasionally
+    /// name plain fields with literal brackets, so the raw text is the
+    /// fallback when the name alone does not match.
+    raw: []const u8 = "",
 };
 
 /// Splits a dotted edit path into segments; each segment may carry any
@@ -5385,7 +5392,7 @@ fn parseFieldPath(text: []const u8) ![]const PathSeg {
         // a name, optionally followed by index groups
         if (std.mem.indexOfScalar(u8, rest, '[')) |open| {
             if (open == 0) return error.BadPath;
-            try segs.append(allocator, .{ .name = rest[0..open] });
+            try segs.append(allocator, .{ .name = rest[0..open], .raw = raw });
             rest = rest[open..];
             while (rest.len > 0 and rest[0] == '[') {
                 const close = std.mem.indexOfScalar(u8, rest, ']') orelse return error.BadPath;
@@ -5395,7 +5402,7 @@ fn parseFieldPath(text: []const u8) ![]const PathSeg {
             }
             if (rest.len != 0) return error.BadPath;
         } else {
-            try segs.append(allocator, .{ .name = rest });
+            try segs.append(allocator, .{ .name = rest, .raw = raw });
         }
     }
     if (segs.items.len == 0) return error.BadPath;
@@ -5459,6 +5466,22 @@ fn setFieldPath(allocator: std.mem.Allocator, v: unityz.value.Value, segs: []con
             .obj => |f| f,
             else => return error.BadPath,
         };
+        // Some Unity type trees name plain fields with literal brackets
+        // (a mesh's "m_MeshMetrics[0]" is a float, not an array access).
+        // When the raw dot-segment text matches a field literally, the
+        // trailing index segments are part of the name, so the whole
+        // dotted field is one leaf.
+        if (seg.raw.len != 0 and !std.mem.eql(u8, seg.raw, seg.name)) {
+            var j: usize = i;
+            while (j < segs.len and (segs[j].name.len == 0 or j == i)) j += 1;
+            if (j == segs.len) {
+                for (fields) |f| {
+                    if (std.mem.eql(u8, f.name, seg.raw)) {
+                        return replaceObjField(fields, seg.raw, try asTargetValue(allocator, f.value, new_value), true);
+                    }
+                }
+            }
+        }
         const child = blk: {
             for (fields) |f| {
                 if (std.mem.eql(u8, f.name, seg.name)) break :blk f.value;
@@ -5479,8 +5502,12 @@ fn setFieldPath(allocator: std.mem.Allocator, v: unityz.value.Value, segs: []con
 }
 
 /// Converts `new_value` to the shape of the target `old`: a base64 string
-/// literal becomes bytes when the field is a byte array.
+/// literal becomes bytes when the field is a byte array. The conversion is
+/// recursive, so a patch that replaces a whole subtree (e.g. a mesh's
+/// `m_VertexData`) round-trips the base64 string its embedded byte fields
+/// were exported as, not just a directly-addressed leaf.
 fn asTargetValue(allocator: std.mem.Allocator, old: unityz.value.Value, new_value: unityz.value.Value) !unityz.value.Value {
+    // Byte-array target, base64 string literal: decode to raw bytes.
     if (old == .bytes and new_value == .string) {
         const s = new_value.string;
         const size = try std.base64.standard.Decoder.calcSizeForSlice(s);
@@ -5488,6 +5515,32 @@ fn asTargetValue(allocator: std.mem.Allocator, old: unityz.value.Value, new_valu
         errdefer allocator.free(buf);
         try std.base64.standard.Decoder.decode(buf, s);
         return .{ .bytes = buf };
+    }
+    // Same-shaped containers: coerce each child against its counterpart in
+    // the target. Elements with no counterpart (a grown array) pass through.
+    if (old == .obj and new_value == .obj) {
+        var out: std.ArrayList(unityz.value.Field) = .empty;
+        try out.ensureTotalCapacity(allocator, new_value.obj.len);
+        for (new_value.obj) |f| {
+            const old_child = blk: {
+                for (old.obj) |of| {
+                    if (std.mem.eql(u8, of.name, f.name)) break :blk of.value;
+                }
+                break :blk null;
+            };
+            const coerced = if (old_child) |oc| try asTargetValue(allocator, oc, f.value) else f.value;
+            try out.append(allocator, .{ .name = f.name, .value = coerced });
+        }
+        return .{ .obj = try out.toOwnedSlice(allocator) };
+    }
+    if (old == .array and new_value == .array) {
+        const n = @min(old.array.len, new_value.array.len);
+        var out: std.ArrayList(unityz.value.Value) = .empty;
+        try out.ensureTotalCapacity(allocator, new_value.array.len);
+        for (new_value.array, 0..) |item, i| {
+            try out.append(allocator, if (i < n) try asTargetValue(allocator, old.array[i], item) else item);
+        }
+        return .{ .array = try out.toOwnedSlice(allocator) };
     }
     return new_value;
 }
@@ -6025,6 +6078,42 @@ test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments"
     std.testing.allocator.free(patched.obj[0].value.bytes);
     // a bad base64 literal is rejected
     try std.testing.expectError(error.InvalidCharacter, set(std.testing.allocator, with_bytes, "m_IndexBuffer", .{ .string = "!!!not-base64!!!" }));
+
+    // Replacing a whole subtree coerces the base64 strings inside it, so an
+    // `extract --json` export fed back through `edit --patch` round-trips
+    // its embedded byte fields (a mesh's m_VertexData, not just a leaf).
+    const with_subtree = unityz.value.Value{ .obj = &[_]unityz.value.Field{
+        .{ .name = "m_VertexData", .value = .{ .obj = &[_]unityz.value.Field{
+            .{ .name = "m_VertexCount", .value = .{ .int = 2 } },
+            .{ .name = "m_Data", .value = .{ .bytes = &[_]u8{ 0x00, 0x01, 0x02, 0x03 } } },
+        } } },
+    } };
+    const replaced = try set(std.testing.allocator, with_subtree, "m_VertexData", .{ .obj = &[_]unityz.value.Field{
+        .{ .name = "m_VertexCount", .value = .{ .int = 1382 } },
+        .{ .name = "m_Data", .value = .{ .string = "AwD/AA==" } },
+    } });
+    const vd = testFieldOf(replaced, "m_VertexData").?;
+    try std.testing.expectEqual(@as(i64, 1382), testFieldOf(vd, "m_VertexCount").?.int);
+    try std.testing.expectEqualSlices(u8, &.{ 0x03, 0x00, 0xff, 0x00 }, testFieldOf(vd, "m_Data").?.bytes);
+    std.testing.allocator.free(testFieldOf(vd, "m_Data").?.bytes);
+    std.testing.allocator.free(vd.obj);
+
+    // Some type trees name plain fields with literal index brackets (a
+    // mesh's "m_MeshMetrics[0]" is a float, not an array access); the path
+    // parser must not read the brackets as indexing.
+    const with_metric = unityz.value.Value{ .obj = &[_]unityz.value.Field{
+        .{ .name = "m_MeshMetrics[0]", .value = .{ .float = 1.0 } },
+        .{ .name = "m_MeshMetrics[1]", .value = .{ .float = 2.0 } },
+        .{ .name = "m_Values", .value = .{ .array = &[_]unityz.value.Value{
+            .{ .int = 10 },
+            .{ .int = 20 },
+        } } },
+    } };
+    const metric = try set(std.testing.allocator, with_metric, "m_MeshMetrics[0]", .{ .float = 0.5 });
+    try std.testing.expectEqual(@as(f64, 0.5), testFieldOf(metric, "m_MeshMetrics[0]").?.float);
+    // the ordinary array-index reading still works alongside
+    const idx2 = try set(std.testing.allocator, with_metric, "m_Values[1]", .{ .int = 99 });
+    try std.testing.expectEqual(@as(i64, 99), testFieldOf(idx2, "m_Values").?.array[1].int);
 
     // An indexed segment replaces one element and preserves order.
     const indexed = try set(std.testing.allocator, original, "m_Values[1]", .{ .int = 99 });

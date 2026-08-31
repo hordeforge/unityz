@@ -1845,3 +1845,26 @@ m_IndexBuffer to a 16-byte buffer round-trips clean under --verify
 documents the form (`edit f.unity3d CAB-..:44 m_IndexBuffer
 '"AwD/AA=="'`). Unit test covers the decode and the rejection of
 malformed base64. 289/289 tests.
+
+2026-08-31 (edit --patch: extract --json round-trip): feeding an
+`extract --json` export back through `edit --patch` now round-trips
+byte-exactly, which exposed and fixed three real gaps. (1) The
+object writer accepted only `.float` values for float fields, but
+`extract --json` prints whole-number floats (quaternion w:1, position
+x:0) without a decimal point, so every Transform failed; `asFloat`
+now widens int/uint like `asInt` already did.
+
+(2) Base64-to-bytes conversion only ran on a directly-addressed leaf,
+so replacing a whole subtree (a mesh's `m_VertexData`) left embedded
+byte fields as strings; `asTargetValue` now coerces recursively,
+walking the target shape. (3) Some type trees name plain fields with
+literal brackets (a mesh's `m_MeshMetrics[0]` is a float, not an
+array access), which `parseFieldPath` misread as indexing; a literal
+raw-text match now wins over the name+index reading.
+
+Verified on the real scene bundle: all 73 objects patched with their
+own exported JSON, `--verify` round-trips clean, re-extraction diff
+shows 0/73 value-tree changes, and UnityPy still reads all 73
+objects. Unit tests pin the float widening (object_writer), the
+recursive byte coercion, and the literal-bracket field name.
+290/290 tests.
