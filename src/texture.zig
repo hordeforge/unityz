@@ -726,10 +726,14 @@ const bc6h_factors = [_][16]u8{
 fn bc6hReadBr(br: *Bc6hReader, num: usize) u32 {
     const pos = br.pos / 8;
     const shift = br.pos & 7;
-    var data: u32 = 0;
     const avail = 16 - pos;
     const take = @min(avail, 4);
-    @memcpy(@as(*[4]u8, @ptrCast(&data))[0..take], br.block[pos..][0..take]);
+    // BC6H bit order is little-endian within the block, so assemble the
+    // window explicitly rather than reinterpreting the bytes of a u32,
+    // which would read them in host order on a big-endian target.
+    var bytes = [_]u8{ 0, 0, 0, 0 };
+    @memcpy(bytes[0..take], br.block[pos..][0..take]);
+    const data = std.mem.readInt(u32, &bytes, .little);
     br.pos += num;
     return (data >> @intCast(shift)) & ((@as(u32, 1) << @intCast(num)) - 1);
 }
