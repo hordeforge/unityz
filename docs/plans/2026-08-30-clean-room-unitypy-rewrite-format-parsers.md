@@ -2195,3 +2195,11 @@ UnityWeb v6 wrapping the real scene serialized node: both tools read
 all 73 objects, verify clean. Unit tests cover the v6 parse; the
 rejection test now covers v0/v1 (v6 is no longer rejected). 358/358
 tests.
+
+2026-09-01 (legacy v6 edit verification): the v6 path closes out the
+legacy surface: edit --patch --verify on the synthetic UnityWeb v6
+round-trips clean (rebuild clamps to UnityFS v6), re-verify clean,
+UnityPy reads all 73 objects, and diff reports the rename (72
+unchanged, 1 changed). Every legacy version (v2-6) is now verified
+across parse, verify, edit (both forms), extract, diff, hash, stats,
+find, show, hierarchy.
