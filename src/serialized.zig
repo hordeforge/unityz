@@ -663,3 +663,61 @@ fn writeObject(w: *streams.Writer, path_id: i64, rel_start: i64, size: u32, type
     try w.writeInt(u32, size);
     try w.writeInt(u32, type_index);
 }
+
+test "serialized parser survives mutated and truncated input" {
+    // Hostile input must never crash the serialized parser: mutations of
+    // valid v22 and v4 files (bytes flipped, lengths nudged, headers
+    // truncated, header fields corrupted) must parse cleanly or fail with
+    // an error - never panic, never hand out mis-sized object data.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const v22 = try buildV22Fixture(a);
+    defer a.free(v22);
+    // the minimal v4 fixture from the parse test
+    const v4 = [_]u8{
+        0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x1d,
+        0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x10,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    var prng = std.Random.DefaultPrng.init(0x5e21);
+    const rnd = prng.random();
+    var buf: [4096]u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 3000) : (iter += 1) {
+        const source: []const u8 = if (iter % 2 == 0) v22 else &v4;
+        const mode = rnd.int(u8) % 4;
+        const blen = switch (mode) {
+            0 => rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len))), // truncate
+            1 => source.len, // mutate in place
+            2 => @min(source.len + rnd.intRangeAtMost(u32, 1, 64), buf.len), // extend
+            else => rnd.intRangeAtMost(u32, 0, 64), // tiny random
+        };
+        @memcpy(buf[0..source.len], source);
+        if (mode == 1) {
+            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len)));
+            buf[m] ^= @intCast(rnd.int(u8) | 1);
+        } else if (mode == 3 and blen > 0) {
+            rnd.bytes(buf[0..blen]);
+        } else if (mode == 2 and source.len >= 12) {
+            // nudge a header length field (metadata/file size)
+            const m = rnd.intRangeAtMost(u32, 0, 11);
+            buf[m] ^= @intCast(rnd.int(u8) | 1);
+        }
+        const sf = parse(a, buf[0..blen]) catch continue;
+        // if it parsed, every object's data must be within the source
+        for (sf.objects) |*o| {
+            if (sf.objectData(o)) |d| {
+                // the data must borrow from the (possibly truncated) source
+                const src = buf[0..blen];
+                const d_start = @intFromPtr(d.ptr);
+                const d_end = d_start + d.len;
+                const s_start = @intFromPtr(src.ptr);
+                if (d_start < s_start or d_end > s_start + src.len) return error.BadSlice;
+            }
+        }
+    }
+}
