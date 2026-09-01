@@ -2169,3 +2169,10 @@ commands verified on the synthetic UnityRaw bundle - stats, hash
 and UnityWeb files works, and diff against the edited copy correctly
 reports the rename (72 unchanged, 1 changed). The legacy container
 support is fully integrated across the command surface.
+
+2026-09-01 (legacy bundle extract + single-edit sweep): the last
+verification corners of the legacy support: all extract modes
+(tga/bmp/raw/json/raw-mode) work on the UnityRaw bundle, and the
+single-object edit form (edit <file> <node:path-id> <field> <value>
+--verify) round-trips clean with UnityPy reading all 73 objects from
+the edited file.
