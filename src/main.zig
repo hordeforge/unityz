@@ -1629,6 +1629,63 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ name, ta.script.len });
                 extracted += 1;
             },
+            329 => { // VideoClip -> streamed video file + metadata JSON
+                const clip_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const orig_path = unityz.classes.stringField(v, "m_OriginalPath") orelse "";
+                var stream_path: []const u8 = "";
+                var stream_offset: i64 = 0;
+                var stream_size: i64 = 0;
+                if (unityz.classes.fieldOf(v, "m_ExternalResources")) |er| {
+                    stream_path = unityz.classes.stringField(er, "m_Source") orelse "";
+                    stream_offset = unityz.classes.intField(er, "m_Offset") orelse 0;
+                    stream_size = unityz.classes.intField(er, "m_Size") orelse 0;
+                }
+                var video: []const u8 = &.{};
+                if (stream_size > 0 and stream_path.len != 0) {
+                    video = resolveSidecar(sidecars, stream_path, @intCast(stream_offset), @intCast(stream_size));
+                }
+                if (video.len == 0) continue; // no stream data (embedded or absent)
+                var ext: []const u8 = "mp4";
+                if (std.mem.startsWith(u8, video, "\x1aE\xdf\xa3")) {
+                    ext = "webm"; // EBML
+                } else if (std.mem.startsWith(u8, video, "OggS")) {
+                    ext = "ogv";
+                } else if (std.mem.startsWith(u8, video, "RIFF")) {
+                    ext = "avi";
+                }
+                var name_buf: [192]u8 = undefined;
+                const base_name = if (clip_name.len != 0)
+                    try std.fmt.bufPrint(&name_buf, "video_{d}_{s}.{s}", .{ o.path_id, clip_name, ext })
+                else
+                    try std.fmt.bufPrint(&name_buf, "video_{d}.{s}", .{ o.path_id, ext });
+                const fname = sanitizeComponent(base_name);
+                try extractFile(subdir, fname, video);
+                try stdout.print("extracted {s} ({d} bytes, {s})\n", .{ fname, video.len, ext });
+                extracted += 1;
+                // metadata sidecar: what the type tree says about the clip
+                var mbuf: std.ArrayList(u8) = .empty;
+                var maw = std.Io.Writer.Allocating.fromArrayList(arena, &mbuf);
+                const mw = &maw.writer;
+                try mw.writeAll("{\"name\":");
+                try writeJsonString(mw, clip_name);
+                try mw.writeAll(",\"originalPath\":");
+                try writeJsonString(mw, orig_path);
+                try mw.print(",\"width\":{d},\"height\":{d},\"frameRate\":{d},\"frameCount\":{d},\"format\":{d}", .{
+                    unityz.classes.intField(v, "Width") orelse unityz.classes.intField(v, "m_ProxyWidth") orelse 0,
+                    unityz.classes.intField(v, "Height") orelse unityz.classes.intField(v, "m_ProxyHeight") orelse 0,
+                    unityz.classes.intField(v, "m_FrameRate") orelse 0,
+                    unityz.classes.intField(v, "m_FrameCount") orelse 0,
+                    unityz.classes.intField(v, "m_Format") orelse 0,
+                });
+                try mw.print(",\"stream\":{{\"source\":", .{});
+                try writeJsonString(mw, stream_path);
+                try mw.print(",\"offset\":{d},\"size\":{d}}}}}", .{ stream_offset, stream_size });
+                var mname_buf: [128]u8 = undefined;
+                const mname = try std.fmt.bufPrint(&mname_buf, "{s}.json", .{fname});
+                try extractFile(subdir, mname, maw.toArrayList().items);
+                try stdout.print("extracted {s} (clip metadata)\n", .{mname});
+                extracted += 1;
+            },
             83 => { // AudioClip
                 const ac = unityz.classes.AudioClip.fromValue(v);
                 var audio: []const u8 = ac.audio_data;

@@ -2449,7 +2449,9 @@ bundle/webfile paths via editSerializedObject and the bare serialized
 path fall back to injectedTreeFor), completing the typeless story for
 every command: extract, verify, show, hierarchy, find, skin, and edit.
 The full Mono-game modding loop now works - decode a typeless object,
-edit a field, reserialize byte-exactly, round-trip verify. Verified on
+edit a field, reserialize byte-exactly, round-trip verify.
+
+Verified on
 the real 7DTD bundle: editing texture 136's m_Width 1024 -> 64 with
 --trees --verify round-trips clean and the edited file re-reads the new
 value. 379/379 tests.
@@ -2460,7 +2462,9 @@ decode failures and zero skipped objects: 260 PNGs (textures, sprites,
 cubemap faces), 7130 JSONs (value trees, fonts' and compute shaders'
 descriptors, mixer graph, animator/override/script registries,
 particle summaries, clip curves/bindings, manifest), 7 OBJs, and 6
-audio files (FSB5 + decoded WAV). Spot checks: fonts are valid
+audio files (FSB5 + decoded WAV).
+
+Spot checks: fonts are valid
 TTF/OTF, the 2048x2048 cubemap face decodes, mixer snapshots and
 animator controllers resolve names, WAVs are valid RIFF PCM16. Every
 class with content in the bundle exports, and every command (extract,
@@ -2469,4 +2473,13 @@ The remaining gaps are external: VideoClip/TerrainData/UnityArchive
 have no samples anywhere in the environment, and m_Script managed
 object graphs need .NET assemblies (beyond UnityPy parity, which cannot
 parse them either).
+
+2026-09-02 (sample sweep): that "no samples" claim was a class-ID bug -
+27 is the abstract Texture base (TerrainData is 156) and 333/334 are
+not VideoClip (329 is). TerrainData objects exist in Raft (36), Stranded
+Deep (51, matching its Terrains), Green Hell (1), and The Forest (1);
+VideoClip exists in Green Hell (16, 1080p60 and 4K cutscenes), and
+`extract` now pulls the streamed video out of the `.resource` sidecar
+as `.mp4` plus a metadata JSON. UnityArchive remains the only container
+with no samples.
 
