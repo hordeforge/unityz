@@ -2075,3 +2075,10 @@ mutating, truncating, and extending a valid synthetic blob - both the
 plain form and the LZ4-compressed form real shaders store - through
 verifyBlob: every pass verifies cleanly or fails with an error, never
 crashes. 343/343 tests.
+
+2026-09-01 (typetree parse mutation fuzz): the type-tree wire parser
+(legacy recursive + flat blob encodings) gets the hostile-input
+treatment: 3000 seeded iterations mutating, truncating, and
+randomizing valid v17-blob and v11-legacy fixtures through parse() -
+every parse succeeds with reachable roots or errors cleanly, never
+crashes. 348/348 tests.
