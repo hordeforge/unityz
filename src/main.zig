@@ -622,6 +622,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 if (unityz.container.sniff(e.data).container == .serialized) continue;
                 try sidecars.append(arena, .{ .path = e.path, .data = e.data });
             }
+            for (try diskSidecars(arena, path)) |sc| try sidecars.append(arena, sc);
             for (wf.entries) |e| {
                 if (path_filter) |pf| {
                     if (pf.node) |sn| {
@@ -655,6 +656,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 if (unityz.container.sniff(n.data).container == .serialized) continue;
                 try sidecars.append(arena, .{ .path = n.path, .data = n.data });
             }
+            for (try diskSidecars(arena, path)) |sc| try sidecars.append(arena, sc);
             for (b.nodes) |n| {
                 if (path_filter) |pf| {
                     if (pf.node) |sn| {
@@ -3370,6 +3372,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                     try sidecars.append(arena, .{ .path = n.path, .data = n.data });
                 }
             }
+            for (try diskSidecars(arena, path)) |sc| try sidecars.append(arena, sc);
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 if (path_filter) |pf| {
@@ -3398,6 +3401,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                     try sidecars.append(arena, .{ .path = e.path, .data = e.data });
                 }
             }
+            for (try diskSidecars(arena, path)) |sc| try sidecars.append(arena, sc);
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
                 if (path_filter) |pf| {
