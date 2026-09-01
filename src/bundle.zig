@@ -478,7 +478,10 @@ pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []c
     defer out.deinit();
     out.endian = .big;
     try out.writeStringToNull(unityfs_signature);
-    try out.writeInt(u32, b.version);
+    // A legacy UnityWeb/UnityRaw source (v2-5) is rebuilt as a UnityFS
+    // container, which needs a version >= 6; clamp so the output is valid
+    // rather than inheriting the legacy version.
+    try out.writeInt(u32, @max(b.version, 6));
     // The parser reads both version strings for every UnityFS version
     // (including format-6 bundles from Unity 5.x/2017/2018); the rebuild
     // must write them unconditionally too, or v6 output misparses.
@@ -671,6 +674,57 @@ test "parse an lz4-compressed unityfs bundle, info at end" {
     try std.testing.expectEqual(@as(u32, 0x82), b.flags);
     try std.testing.expectEqualStrings(payload, b.nodes[0].data);
     try std.testing.expectEqualStrings("2020.3.33f1", b.unity_version);
+}
+
+test "rebuild converts a legacy bundle to valid UnityFS" {
+    const a = std.testing.allocator;
+    // Build a minimal UnityRaw v5, rebuild it, and check the output is a
+    // parseable UnityFS container (version >= 6), not an invalid file
+    // inheriting the legacy version 5.
+    var w = streams.Writer.init(a);
+    defer w.deinit();
+    w.endian = .big;
+    try w.writeStringToNull(unityraw_signature);
+    try w.writeInt(u32, 5);
+    try w.writeStringToNull("5.x.x");
+    try w.writeStringToNull("5.6.7f1");
+    try w.writeBytes(&[_]u8{0} ** 16);
+    try w.writeInt(u32, 0); // crc
+    try w.writeInt(u32, 0); // minStreamed
+    const hdr_off = w.getWritten().len;
+    try w.writeInt(u32, 0); // headerSize
+    try w.writeInt(u32, 1); // levels
+    try w.writeInt(i32, 1); // levelCount
+    try w.writeInt(u32, 0); // compressedSize
+    try w.writeInt(u32, 0); // uncompressedSize
+    try w.writeInt(u32, 0); // completeFileSize
+    try w.writeInt(u32, 0); // fileInfoHeaderSize
+    var d = streams.Writer.init(a);
+    defer d.deinit();
+    d.endian = .big;
+    try d.writeInt(i32, 1);
+    try d.writeStringToNull("CAB-abc");
+    try d.writeInt(u32, @intCast(d.getWritten().len + 8));
+    try d.writeInt(u32, 11);
+    try d.writeBytes("CAB-abcdefgh");
+    const hdr_size = w.getWritten().len;
+    std.mem.writeInt(u32, w.buf.items[hdr_off..][0..4], @intCast(hdr_size), .big);
+    std.mem.writeInt(u32, w.buf.items[hdr_off + 12 ..][0..4], @intCast(d.getWritten().len), .big);
+    std.mem.writeInt(u32, w.buf.items[hdr_off + 16 ..][0..4], @intCast(d.getWritten().len), .big);
+    std.mem.writeInt(u32, w.buf.items[hdr_off + 20 ..][0..4], @intCast(hdr_size + d.getWritten().len), .big);
+    try w.writeBytes(d.getWritten());
+    const legacy_bytes = w.getWritten();
+
+    var b = try parse(a, legacy_bytes);
+    defer b.deinit(a);
+    try std.testing.expectEqual(@as(u32, 5), b.version);
+
+    const rebuilt = try rebuild(a, &b, &.{.{ .path = "CAB-abc", .data = "NEWDATA" }});
+    defer a.free(rebuilt);
+    var b2 = try parse(a, rebuilt);
+    defer b2.deinit(a);
+    try std.testing.expect(b2.version >= 6);
+    try std.testing.expectEqualStrings("NEWDATA", b2.nodes[0].data);
 }
 
 test "rebuild converts an LZMA source to LZ4" {
