@@ -2102,3 +2102,17 @@ mutated-but-parseable v22 files with no replacements and (b) random
 replacement payloads (0-4KB) for object 100 - every rewrite produces
 bytes or errors cleanly, never crashes, and the output is walkable
 by the parser. 354/354 tests.
+
+2026-09-01 (full CLI regression sweep): after 23 consecutive PRs
+(#47-#69), a comprehensive sweep of the CLI surface across all five
+real samples (banner, char_118, xinzexi, atlas, scene): info, verify,
+stats, hash, extract (recursive), find, show, hierarchy, shader, skin
+on every sample; --json modes (info/diff/verify); edit --verify
+round-trips through the LZ4 bundle rebuild and the gzip webfile
+rebuild; extract --json recursive.
+
+All pass. The one non-zero exit (skin on the scene bundle) is the
+designed contract: renderer 46 is a SkinnedMeshRenderer (class 137)
+referencing the non-skinning Shamway/Unlit shader - the shamway
+self-test creature exists to exercise exactly that flag. No
+regressions found.
