@@ -84,6 +84,8 @@ pub const object_writer = @import("object_writer.zig");
 
 /// SerializedFile rewrite (edited objects written back).
 pub const serialized_writer = @import("serialized_writer.zig");
+
+/// .NET assembly metadata reader (MonoBehaviour script field layouts).
 pub const dotnet = @import("dotnet.zig");
 
 /// File extensions of Unity asset files this project intends to support.

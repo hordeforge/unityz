@@ -9,7 +9,7 @@ const std = @import("std");
 
 /// A reference to another object (`PPtr<T>`): a file index plus a path ID.
 pub const PPtr = struct {
-    /// 0 = same file, > 0 = index into the externals table.
+    /// 0 = same file, > 0 a 1-based index into the externals table.
     file_id: i32,
     path_id: i64,
 
