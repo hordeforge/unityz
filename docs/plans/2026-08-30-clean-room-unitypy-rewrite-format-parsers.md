@@ -2044,3 +2044,11 @@ chunks, sizes 0-30KB, empty and tiny second entries), asserting every
 entry survives byte-exactly. Also gave the test-only buildFixture a
 named FileSpec type (anonymous struct params do not unify). 337/337
 tests.
+
+2026-09-01 (bundle/webfile parse mutation fuzz): the container
+parsers get the hostile-input treatment the lz4 decoder already had.
+A seeded fuzz mutates, truncates, extends, and randomizes a valid
+bundle (3000 iterations, LZ4 source) and a valid webfile (2000
+iterations, gzip and plain sources): every parse must succeed cleanly
+or fail with an error - never crash - and parsed node/entry data must
+be readable. 339/339 tests.

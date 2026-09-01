@@ -921,3 +921,48 @@ test "lzham decompresses a known UnityFS block" {
     // A corrupt/truncated stream fails rather than faulting.
     try std.testing.expectError(error.DecompressFailed, lzhamDecompress(a, compressed[0..10], expected.len));
 }
+
+test "bundle parser survives mutated and truncated input" {
+    // Hostile input must never crash the bundle parser: mutations of a
+    // valid bundle (bytes flipped, lengths nudged, headers truncated) must
+    // either parse cleanly or fail with an error - never panic.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const bundle_bytes = try buildBundleFixture(a, .{
+        .info_at_end = false,
+        .compression = .lz4,
+        .payload = "the quick brown fox jumps over the lazy dog\n" ** 8,
+        .payload_path = "CAB-abc",
+        .raw_block = &[_]u8{ 0x2E, 'a', 'b', 0x02, 0x00 },
+        .block_flags = 0x02,
+    });
+    defer a.free(bundle_bytes);
+
+    var prng = std.Random.DefaultPrng.init(0xbb0b);
+    const rnd = prng.random();
+    var buf: [4096]u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 3000) : (iter += 1) {
+        const mode = rnd.int(u8) % 4;
+        const blen = switch (mode) {
+            0 => rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(bundle_bytes.len))), // truncate
+            1 => @min(bundle_bytes.len + rnd.intRangeAtMost(u32, 1, 64), buf.len), // extend
+            2 => bundle_bytes.len, // mutate
+            else => rnd.intRangeAtMost(u32, 0, 256), // tiny random
+        };
+        @memcpy(buf[0..bundle_bytes.len], bundle_bytes);
+        if (mode == 0 or mode == 3) {
+            // zero random bytes for tiny/truncated inputs
+            if (blen > 0) rnd.bytes(buf[0..@min(blen, 64)]);
+        } else if (mode == 2) {
+            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(bundle_bytes.len)));
+            buf[m] ^= @intCast(rnd.int(u8) | 1);
+        }
+        var b = parse(a, buf[0..blen]) catch continue;
+        defer b.deinit(a);
+        // if it parsed, the node data must be readable without faulting
+        for (b.nodes) |n| _ = n.data;
+    }
+}
