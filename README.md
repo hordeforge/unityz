@@ -113,6 +113,22 @@ the on-disk sidecar files next to it; `extract` and `verify` load them
 automatically, so streamed textures/audio export without bundling the
 file first.
 
+There is no off-the-shelf generator for this shape, so unityz ships one:
+`scripts/structsdump-to-trees.py` converts the public AssetRipper
+TypeTreeDumps `StructsDump/release/<version>.dump` into a trees file for
+that exact Unity version:
+
+```bash
+curl -sL https://raw.githubusercontent.com/AssetRipper/TypeTreeDumps/main/StructsDump/release/2022.3.62f2.dump -o 2022.3.62f2.dump
+uv run scripts/structsdump-to-trees.py 2022.3.62f2.dump -o trees-2022.3.62f2.json
+./zig-out/bin/unityz extract game.unity3d --recursive --trees trees-2022.3.62f2.json
+```
+
+Verified on the real 7DTD bundle (Unity 2022.3.62f2, typeless): 197
+textures, 13 sprites, and 6 meshes export, and 1586/1588 objects in
+resources.assets round-trip clean - the two exceptions stream from an
+external sidecar file, not a decode failure.
+
 Textures and sprites export as PNG by default or TGA / BMP / raw RGBA8
 with `--format tga|bmp|raw` (UnityPy only writes PNG). SpriteAtlas
 objects export as a JSON mapping packed sprite path ids to names (so

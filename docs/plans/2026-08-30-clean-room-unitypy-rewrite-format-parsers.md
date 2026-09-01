@@ -2262,3 +2262,25 @@ counts, constant-buffer layouts with params).
 Verified on the real 7DTD bundle: 260/260 exported code files
 byte-identical to the inline object data, DXBC/SPIR-V headers
 structurally valid. 373/373 tests.
+2026-09-01 (trees generator): typeless Mono files become fully decodable
+for any game version. There is no off-the-shelf generator for the
+`--trees` JSON shape (the parallel `--trees` feature was validated on
+Raft only), so `scripts/structsdump-to-trees.py` converts the public
+AssetRipper TypeTreeDumps `StructsDump/release/<version>.dump` into a
+trees file for that exact Unity version.
+
+Two dump-format traps surfaced during conversion: types may be
+multi-word (`unsigned int m_LightmapFlags` - the first naive parser
+silently dropped the whole field, shifting every later offset and
+breaking all decodes with Corrupt), and names may contain spaces
+(`TypelessData image data` - the type/name split must match the known
+multi-word types first, then take the name as everything after the
+type token). Abstract classes (Object, EditorExtension, ...) emit empty
+trees, which resolve to nothing and are harmless.
+
+Verified on the real 7DTD bundle (Unity 2022.3.62f2, typeless): 197
+textures (including streamed ones resolved from the bundle-internal
+.resS sidecar), 13 sprites, and 6 meshes export; `verify` round-trips
+1586/1588 objects in resources.assets clean, the two exceptions
+streaming from an external sidecar file. UnityPy cannot decode typeless
+files at all without its own tree database.
