@@ -2384,3 +2384,14 @@ transform paths, so it never matched). Verified on the real 7DTD
 sharedassets2.assets: all 95 clips are muscle clips and now report
 4116 bindings total (e.g. pipeRifleReload: muscleClipSize 28452, 31
 bindings). 376/376 tests.
+
+2026-09-01 (typeless-file diagnostics): extract and verify now count the
+objects skipped because the file carries no type trees (Mono builds
+strip them) and no injected trees were supplied, and print a hint after
+the summary - "N object(s) skipped: this file has no type trees (Mono
+build); pass --trees <file.json> or --raw to decode them". Previously a
+typeless file without --trees silently reported "0 assets extracted, 0
+skipped" / "0 objects checked", indistinguishable from an empty file.
+Verified on the real 7DTD bundle: extract without --trees now explains
+the 202 skipped textures; with --trees the hint disappears; verify on
+the bare file explains all 1768 skipped objects. 376/376 tests.
