@@ -2052,3 +2052,11 @@ bundle (3000 iterations, LZ4 source) and a valid webfile (2000
 iterations, gzip and plain sources): every parse must succeed cleanly
 or fail with an error - never crash - and parsed node/entry data must
 be readable. 339/339 tests.
+
+2026-09-01 (serialized parse mutation fuzz): the serialized parser
+gets the hostile-input treatment bundle/webfile got in step 139: 3000
+seeded iterations mutating, truncating, extending, and randomizing
+valid v22 and v4 files, with header length fields nudged - every
+parse succeeds or errors cleanly, never crashes, and any parsed
+object's data must borrow from the (possibly truncated) source
+bounds-checked via pointer arithmetic. 341/341 tests.
