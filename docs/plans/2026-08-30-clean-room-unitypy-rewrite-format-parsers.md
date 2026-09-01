@@ -2162,3 +2162,10 @@ container to valid UnityFS and round-trips cleanly: verified on the
 synthetic UnityRaw and UnityWeb bundles (edit --patch --verify clean,
 re-verify clean, UnityPy reads all 73 objects); unit test covers the
 conversion. 357/357 tests.
+
+2026-09-01 (legacy bundle full-command sweep): the remaining CLI
+commands verified on the synthetic UnityRaw bundle - stats, hash
+(+ --json), find, show, hierarchy all work; diff between the UnityRaw
+and UnityWeb files works, and diff against the edited copy correctly
+reports the rename (72 unchanged, 1 changed). The legacy container
+support is fully integrated across the command surface.
