@@ -2284,3 +2284,21 @@ textures (including streamed ones resolved from the bundle-internal
 1586/1588 objects in resources.assets clean, the two exceptions
 streaming from an external sidecar file. UnityPy cannot decode typeless
 files at all without its own tree database.
+
+2026-09-01 (cubemap export): Cubemap (class 89) objects export their
+six faces as PNGs. A cubemap serializes like a Texture2D with
+`m_ImageCount` = 6: the stream holds six consecutive mip chains, each
+`m_CompleteImageSize` bytes (verified: 6 x complete == stream size for
+all three real 7DTD cubemaps, including an 8-mip 128x128 BC6H one from
+level0.resS).
+
+The first mip of each face decodes with the same pipeline as Texture2D
+(mip0 slice = `expectedSize(format, w, h)`, now public), so face PNGs
+export for any supported format - the real samples covered DXT5
+(2048x2048 skybox), BC7 (1024x1024), and BC6H, all streamed from
+bundle-internal .resS sidecars. Face order follows Unity's CubemapFace
+enum (0=+X .. 5=-Z), and faces are named
+posx/negx/posy/negy/posz/negz.
+
+UnityPy has no Cubemap export at all. Verified: 18/18 face PNGs valid,
+stream slices byte-exact. 373/373 tests.

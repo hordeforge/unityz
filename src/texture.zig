@@ -615,7 +615,7 @@ fn copyPixels(out: []u8, data: []const u8, w: usize, h: usize, stride: usize, co
     }
 }
 
-fn expectedSize(tex_format: i32, width: u32, height: u32) ?usize {
+pub fn expectedSize(tex_format: i32, width: u32, height: u32) ?usize {
     const w: usize = @intCast(width);
     const h: usize = @intCast(height);
     return switch (tex_format) {
