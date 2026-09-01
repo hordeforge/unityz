@@ -2089,3 +2089,9 @@ iterations mutating, truncating, and randomizing the hand-built bank
 (header, sample table, chunk chain) through parse() - every parse
 succeeds with a reachable sample table or errors cleanly, never
 crashes. 350/350 tests.
+
+2026-09-01 (image encoder round-trip fuzz): the PNG/TGA/BMP encoders
+round-trip random RGBA buffers through their test-only decoders at
+edge widths (1..1024, incl. 15/16/17, 255/256/257) and heights
+(1..64) - exercising stride/row handling across ~120 combos per
+format. 353/353 tests.
