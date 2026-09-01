@@ -2366,3 +2366,21 @@ no AnimatorController export at all.
 Verified on the real 7DTD PlayOnSpawn controller: the single layer and
 its balloon_spin state resolve their names, 1 blend tree, clip 576
 referenced. 376/376 tests.
+
+2026-09-01 (animation clip bindings): humanoid muscle clips store their
+animation in the muscle clip, not the legacy curve arrays, so the
+existing curve JSON came out empty for them. The clip export now also
+surfaces muscleClipSize, the event count, and the genericBindings from
+m_ClipBindingConstant: every animated property with a named attribute
+(m_LocalPosition.x, m_LocalRotation.y, ... via the binding-attribute
+enum for the first twelve values) and the type id (4 = Transform, 95 =
+Animator).
+
+The binding path is a hash of the rig's transform path; it only
+resolves through the owning avatar's TOS, which is usually not in the
+bundle, so it is emitted raw (an attempted resolution through the
+AnimatorController TOS was dropped - that table holds state paths, not
+transform paths, so it never matched). Verified on the real 7DTD
+sharedassets2.assets: all 95 clips are muscle clips and now report
+4116 bindings total (e.g. pipeRifleReload: muscleClipSize 28452, 31
+bindings). 376/376 tests.

@@ -381,6 +381,13 @@ controller's TOS hash-to-path table (a state's `m_NameID` maps to e.g.
 the referenced clips, and the full path table. UnityPy has no
 AnimatorController export at all.
 
+AnimationClips (class 74) export their curves as JSON, and humanoid
+muscle clips additionally surface `muscleClipSize`, the event count,
+and the `genericBindings` (animated property per binding with a named
+attribute like `m_LocalPosition.x`; the path is the rig's transform
+hash, resolvable only through the owning avatar's TOS). UnityPy reads
+clips generically but never surfaces curves or bindings.
+
 Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
