@@ -1551,6 +1551,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const ac = unityz.classes.AnimatorController.fromValue(v);
                 try writeAnimatorFiles(arena, subdir, o.path_id, ac, manifest, &extracted, stdout);
             },
+            221 => { // AnimatorOverrideController -> clip override mapping JSON
+                const oc = unityz.classes.AnimatorOverrideController.fromValue(v);
+                try writeOverrideFiles(arena, subdir, o.path_id, oc, &sf, basename(path), injected, manifest, &extracted, stdout);
+            },
             43 => { // Mesh -> Wavefront OBJ
                 const mesh = unityz.classes.Mesh.fromValue(v);
                 const obj = writeMeshObj(arena, &sf, v, &mesh) catch |err| {
@@ -2200,6 +2204,79 @@ fn writeAnimatorFiles(
     try stdout.print("extracted {s} (animator controller)\n", .{name});
     extracted.* += 1;
     try manifest.append(arena, .{ .path_id = path_id, .class_id = 91, .name = ac.name, .subdir = subdir });
+}
+
+/// AnimatorOverrideController export: the base controller plus the clip
+/// override pairs with the clip names resolved through the file's objects.
+/// UnityPy has no export for this class.
+fn writeOverrideFiles(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    oc: unityz.classes.AnimatorOverrideController,
+    sf: *const unityz.serialized.SerializedFile,
+    own_basename: []const u8,
+    injected: ?*const InjectedTrees,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: *Io.Writer,
+) !void {
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"path_id\":{d},\"name\":\"{s}\",\"controller\":", .{ path_id, oc.name });
+    if (oc.controller) |c| {
+        try w.print("{{\"path_id\":{d}}}", .{c.path_id});
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\"overrides\":[");
+    for (oc.overrides, 0..) |ov, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.writeAll("{\"original\":");
+        try writeClipRef(w, arena, sf, own_basename, injected, ov.original);
+        try w.writeAll(",\"replacement\":");
+        try writeClipRef(w, arena, sf, own_basename, injected, ov.replacement);
+        try w.writeByte('}');
+    }
+    try w.writeAll("]}");
+    var list = aw.toArrayList();
+    const meta = try list.toOwnedSlice(arena);
+    const base_name = std.mem.trimEnd(u8, oc.name, "\x00");
+    var name_buf: [160]u8 = undefined;
+    const name = sanitizeComponent(if (base_name.len != 0)
+        try std.fmt.bufPrint(&name_buf, "animator_override_{d}_{s}.json", .{ path_id, base_name })
+    else
+        try std.fmt.bufPrint(&name_buf, "animator_override_{d}.json", .{path_id}));
+    try extractFile(subdir, name, meta);
+    try stdout.print("extracted {s} ({d} override pairs)\n", .{ name, oc.overrides.len });
+    extracted.* += 1;
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = 221, .name = oc.name, .subdir = subdir });
+}
+
+/// Writes an AnimationClip PPtr as {"path_id": N, "name": "..."} with the
+/// clip's m_Name resolved through the file's objects.
+fn writeClipRef(
+    w: *Io.Writer,
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    own_basename: []const u8,
+    injected: ?*const InjectedTrees,
+    clip: ?unityz.value.PPtr,
+) !void {
+    if (clip) |c| {
+        try w.print("{{\"path_id\":{d}", .{c.path_id});
+        if (readObjectValue(arena, sf, c.path_id, own_basename, injected)) |cv| {
+            const n = unityz.classes.stringField(cv, "m_Name") orelse "";
+            if (n.len != 0) {
+                try w.writeAll(",\"name\":");
+                try writeJsonString(w, n);
+            }
+        }
+        try w.writeByte('}');
+    } else {
+        try w.writeAll("null");
+    }
 }
 
 const MonoScriptCache = std.AutoHashMapUnmanaged(i64, unityz.classes.MonoScript);

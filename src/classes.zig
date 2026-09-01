@@ -1339,6 +1339,40 @@ pub const AnimatorController = struct {
     }
 };
 
+/// Unity AnimatorOverrideController (class 221): the base controller plus
+/// the clip-override pairs (original -> replacement). UnityPy has no export
+/// for it.
+pub const AnimatorOverrideController = struct {
+    name: []const u8 = "",
+    controller: ?value.PPtr = null,
+    overrides: []const Override = &.{},
+
+    pub const Override = struct {
+        original: ?value.PPtr = null,
+        replacement: ?value.PPtr = null,
+    };
+
+    pub fn fromValue(v: value.Value) AnimatorOverrideController {
+        var self = AnimatorOverrideController{
+            .name = stringField(v, "m_Name") orelse "",
+            .controller = pptrField(v, "m_Controller"),
+        };
+        if (fieldOf(v, "m_Clips")) |f| {
+            if (f == .array) {
+                var list: std.ArrayList(Override) = .empty;
+                for (f.array) |item| {
+                    list.append(std.heap.page_allocator, .{
+                        .original = pptrField(item, "m_OriginalClip"),
+                        .replacement = pptrField(item, "m_OverrideClip"),
+                    }) catch {};
+                }
+                self.overrides = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+            }
+        }
+        return self;
+    }
+};
+
 pub const GameObject = struct {
     name: []const u8 = "",
     layer: i64 = 0,
@@ -2790,4 +2824,21 @@ test "animatorController fromValue resolves TOS names" {
     try std.testing.expect(ac.states[0].loop);
     try std.testing.expectEqual(@as(usize, 1), ac.any_state_transitions);
     try std.testing.expectEqual(@as(i64, 576), ac.clips[0].path_id);
+}
+
+test "animatorOverrideController fromValue reads the override pairs" {
+    const v = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "3PWeaponController" } },
+        .{ .name = "m_Controller", .value = .{ .pptr = .{ .file_id = 0, .path_id = 129 } } },
+        .{ .name = "m_Clips", .value = .{ .array = &[_]value.Value{.{ .obj = &[_]value.Field{
+            .{ .name = "m_OriginalClip", .value = .{ .pptr = .{ .file_id = 0, .path_id = 77 } } },
+            .{ .name = "m_OverrideClip", .value = .{ .pptr = .{ .file_id = 0, .path_id = 67 } } },
+        } }} } },
+    } };
+    const oc = AnimatorOverrideController.fromValue(v);
+    try std.testing.expectEqualStrings("3PWeaponController", oc.name);
+    try std.testing.expectEqual(@as(i64, 129), oc.controller.?.path_id);
+    try std.testing.expectEqual(@as(usize, 1), oc.overrides.len);
+    try std.testing.expectEqual(@as(i64, 77), oc.overrides[0].original.?.path_id);
+    try std.testing.expectEqual(@as(i64, 67), oc.overrides[0].replacement.?.path_id);
 }

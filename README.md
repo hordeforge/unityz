@@ -389,6 +389,12 @@ attribute like `m_LocalPosition.x`; the path is the rig's transform
 hash, resolvable only through the owning avatar's TOS). UnityPy reads
 clips generically but never surfaces curves or bindings.
 
+AnimatorOverrideControllers (class 221) export an
+`animator_override_<id>_<name>.json` with the base controller and the
+clip override pairs, both clip names resolved through the file's
+objects (e.g. `tacticalAssaultRifleReload` -> `tacticalAssaultRifleReload3P`).
+UnityPy has no export for this class.
+
 Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
