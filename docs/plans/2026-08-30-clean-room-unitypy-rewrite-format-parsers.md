@@ -2395,3 +2395,12 @@ skipped" / "0 objects checked", indistinguishable from an empty file.
 Verified on the real 7DTD bundle: extract without --trees now explains
 the 202 skipped textures; with --trees the hint disappears; verify on
 the bare file explains all 1768 skipped objects. 376/376 tests.
+
+2026-09-01 (animator override export): AnimatorOverrideController (class
+221) objects export an `animator_override_<id>_<name>.json` with the
+base controller PPtr and the m_Clips override pairs (original ->
+replacement), both clip names resolved through the file's objects via
+readObjectValue (injected trees for typeless files). Verified on the
+real 7DTD 3PWeaponController: all 7 pairs resolve their clip names
+(e.g. tacticalAssaultRifleReload -> tacticalAssaultRifleReload3P).
+UnityPy has no export for this class. 377/377 tests.
