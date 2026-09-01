@@ -2135,3 +2135,9 @@ wrapping the real scene serialized node: both tools read all 73
 objects from the UnityRaw and the UnityWeb files, verify clean,
 extract works; unit tests cover both formats + the v0/v6 rejections.
 356/356 tests.
+
+2026-09-01 (legacy bundle parse fuzz): the bundle mutation fuzz now
+alternates between the LZ4 UnityFS fixture and a synthetic UnityRaw v5
+bundle, so the new parseLegacy path gets the same hostile-input
+treatment as the rest of the parser (3000 iterations, alternating
+sources). 356/356 tests.
