@@ -112,6 +112,13 @@ VideoClip objects export their streamed video straight from the
 source path, dimensions, frame rate/count, format, stream offset/size).
 Verified against Green Hell's 1080p60 and 4K cutscenes.
 
+TerrainData objects export their heightmap as a normalized PGM image
+(`terrain_<id>_<name>.pgm`, 16-bit grayscale) plus a metadata JSON
+(resolution, sample count, height range, world scale). The 2021.x
+TerrainData tree ships in `trees/TerrainData-2021.x.json`; merge it into
+your `--trees` file to decode them (verified on Raft, Stranded Deep, and
+Green Hell, from 257x257 island zones to a 4097x4097 jungle).
+
 Mono builds strip the class type trees from serialized files, leaving
 typeless objects undecodable. `--trees <file.json>` supplies them:
 `extract`, `show`, `verify`, `find`, and `edit` all decode with the
