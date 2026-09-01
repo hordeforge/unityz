@@ -1686,6 +1686,66 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} (clip metadata)\n", .{mname});
                 extracted += 1;
             },
+            156 => { // TerrainData -> normalized heightmap PGM + metadata JSON
+                const td_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const hm = unityz.classes.fieldOf(v, "m_Heightmap") orelse continue;
+                const hv = unityz.classes.fieldOf(hm, "m_Heights") orelse continue;
+                if (hv != .array or hv.array.len == 0) continue;
+                const resolution = unityz.classes.intField(hm, "m_Resolution") orelse 0;
+                if (resolution < 2) continue;
+                // heights are (res+1)^2 SInt16 samples; the image is a square
+                // of the square root's side
+                const side_u = isqrt(hv.array.len);
+                if (side_u < 2) continue;
+                const side: u32 = @intCast(side_u);
+                var min_h: i64 = std.math.maxInt(i64);
+                var max_h: i64 = std.math.minInt(i64);
+                for (hv.array) |h| {
+                    const hv_i = h.asInt() orelse 0;
+                    min_h = @min(min_h, hv_i);
+                    max_h = @max(max_h, hv_i);
+                }
+                const range = max_h - min_h;
+                var hbuf: std.ArrayList(u8) = .empty;
+                var haw = std.Io.Writer.Allocating.fromArrayList(arena, &hbuf);
+                const hw = &haw.writer;
+                try hw.print("P5\n{d} {d}\n65535\n", .{ side, side });
+                for (hv.array) |h| {
+                    const hv_i = h.asInt() orelse 0;
+                    const v16: u16 = if (range == 0) 0 else @intCast(@divTrunc((hv_i - min_h) * 65535, range));
+                    try hw.writeByte(@intCast(v16 >> 8));
+                    try hw.writeByte(@intCast(v16 & 0xff));
+                }
+                var name_buf: [192]u8 = undefined;
+                const base_name = if (td_name.len != 0)
+                    try std.fmt.bufPrint(&name_buf, "terrain_{d}_{s}.pgm", .{ o.path_id, td_name })
+                else
+                    try std.fmt.bufPrint(&name_buf, "terrain_{d}.pgm", .{o.path_id});
+                const fname = sanitizeComponent(base_name);
+                try extractFile(subdir, fname, haw.toArrayList().items);
+                try stdout.print("extracted {s} ({d}x{d} heightmap, {d} samples)\n", .{ fname, side, side, hv.array.len });
+                extracted += 1;
+                // metadata sidecar: resolution, scale, height range
+                var mbuf: std.ArrayList(u8) = .empty;
+                var maw = std.Io.Writer.Allocating.fromArrayList(arena, &mbuf);
+                const mw = &maw.writer;
+                try mw.writeAll("{\"name\":");
+                try writeJsonString(mw, td_name);
+                try mw.print(",\"resolution\":{d},\"samples\":{d},\"heightMin\":{d},\"heightMax\":{d}", .{ resolution, hv.array.len, min_h, max_h });
+                if (unityz.classes.fieldOf(hm, "m_Scale")) |sc| {
+                    try mw.print(",\"scale\":{{\"x\":{d},\"y\":{d},\"z\":{d}}}", .{
+                        unityz.classes.floatField(sc, "x") orelse 0,
+                        unityz.classes.floatField(sc, "y") orelse 0,
+                        unityz.classes.floatField(sc, "z") orelse 0,
+                    });
+                }
+                try mw.writeByte('}');
+                var mname_buf: [128]u8 = undefined;
+                const mname = try std.fmt.bufPrint(&mname_buf, "{s}.json", .{fname});
+                try extractFile(subdir, mname, maw.toArrayList().items);
+                try stdout.print("extracted {s} (heightmap metadata)\n", .{mname});
+                extracted += 1;
+            },
             83 => { // AudioClip
                 const ac = unityz.classes.AudioClip.fromValue(v);
                 var audio: []const u8 = ac.audio_data;
@@ -2197,6 +2257,18 @@ fn basename(path: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| return path[i + 1 ..];
     if (std.mem.lastIndexOfScalar(u8, path, '\\')) |i| return path[i + 1 ..];
     return path;
+}
+
+/// Integer square root (Newton), used to size the heightmap image.
+fn isqrt(n: usize) usize {
+    if (n < 2) return n;
+    var x: usize = n;
+    var y: usize = (x + 1) / 2;
+    while (y < x) {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    return x;
 }
 
 /// Forces a file-supplied name to stay one path component: an asset's

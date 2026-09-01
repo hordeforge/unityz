@@ -1,0 +1,895 @@
+{
+ "__class_ids__": {
+  "TerrainData": 156
+ },
+ "TerrainData": [
+  {
+   "m_Type": "TerrainData",
+   "m_Name": "Base",
+   "m_Level": 0,
+   "m_MetaFlag": 32768
+  },
+  {
+   "m_Type": "string",
+   "m_Name": "m_Name",
+   "m_Level": 1,
+   "m_MetaFlag": 557057
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 2,
+   "m_MetaFlag": 540673
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 3,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "char",
+   "m_Name": "data",
+   "m_Level": 3,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "SplatDatabase",
+   "m_Name": "m_SplatDatabase",
+   "m_Level": 1,
+   "m_MetaFlag": 32769
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_TerrainLayers",
+   "m_Level": 2,
+   "m_MetaFlag": 32769
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 16385
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "PPtr<TerrainLayer>",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_FileID",
+   "m_Level": 5,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "SInt64",
+   "m_Name": "m_PathID",
+   "m_Level": 5,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_AlphaTextures",
+   "m_Level": 2,
+   "m_MetaFlag": 32769
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 16385
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "PPtr<Texture2D>",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_FileID",
+   "m_Level": 5,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "SInt64",
+   "m_Name": "m_PathID",
+   "m_Level": 5,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_AlphamapResolution",
+   "m_Level": 2,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_BaseMapResolution",
+   "m_Level": 2,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "DetailDatabase",
+   "m_Name": "m_DetailDatabase",
+   "m_Level": 1,
+   "m_MetaFlag": 32769
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_Patches",
+   "m_Level": 2,
+   "m_MetaFlag": 557057
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 573441
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "DetailPatch",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 557057
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "layerIndices",
+   "m_Level": 5,
+   "m_MetaFlag": 557057
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 6,
+   "m_MetaFlag": 540673
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 7,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "UInt8",
+   "m_Name": "data",
+   "m_Level": 7,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "numberOfObjects",
+   "m_Level": 5,
+   "m_MetaFlag": 557057
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 6,
+   "m_MetaFlag": 540673
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 7,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "UInt8",
+   "m_Name": "data",
+   "m_Level": 7,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_DetailPrototypes",
+   "m_Level": 2,
+   "m_MetaFlag": 32769
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 16385
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "DetailPrototype",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "PPtr<GameObject>",
+   "m_Name": "prototype",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_FileID",
+   "m_Level": 6,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "SInt64",
+   "m_Name": "m_PathID",
+   "m_Level": 6,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "PPtr<Texture2D>",
+   "m_Name": "prototypeTexture",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_FileID",
+   "m_Level": 6,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "SInt64",
+   "m_Name": "m_PathID",
+   "m_Level": 6,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "minWidth",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "maxWidth",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "minHeight",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "maxHeight",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "noiseSeed",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "noiseSpread",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "holeTestRadius",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "ColorRGBA",
+   "m_Name": "healthyColor",
+   "m_Level": 5,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "r",
+   "m_Level": 6,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "g",
+   "m_Level": 6,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "b",
+   "m_Level": 6,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "a",
+   "m_Level": 6,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "ColorRGBA",
+   "m_Name": "dryColor",
+   "m_Level": 5,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "r",
+   "m_Level": 6,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "g",
+   "m_Level": 6,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "b",
+   "m_Level": 6,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "a",
+   "m_Level": 6,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "renderMode",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "usePrototypeMesh",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "useInstancing",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_PatchCount",
+   "m_Level": 2,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_PatchSamples",
+   "m_Level": 2,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "ColorRGBA",
+   "m_Name": "WavingGrassTint",
+   "m_Level": 2,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "r",
+   "m_Level": 3,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "g",
+   "m_Level": 3,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "b",
+   "m_Level": 3,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "a",
+   "m_Level": 3,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "m_WavingGrassStrength",
+   "m_Level": 2,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "m_WavingGrassAmount",
+   "m_Level": 2,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "m_WavingGrassSpeed",
+   "m_Level": 2,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_TreeInstances",
+   "m_Level": 2,
+   "m_MetaFlag": 557057
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 540673
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "TreeInstance",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "Vector3f",
+   "m_Name": "position",
+   "m_Level": 5,
+   "m_MetaFlag": 2621441
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "x",
+   "m_Level": 6,
+   "m_MetaFlag": 2621441
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "y",
+   "m_Level": 6,
+   "m_MetaFlag": 2621441
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "z",
+   "m_Level": 6,
+   "m_MetaFlag": 2621441
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "widthScale",
+   "m_Level": 5,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "heightScale",
+   "m_Level": 5,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "rotation",
+   "m_Level": 5,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "ColorRGBA",
+   "m_Name": "color",
+   "m_Level": 5,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "unsigned int",
+   "m_Name": "rgba",
+   "m_Level": 6,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "ColorRGBA",
+   "m_Name": "lightmapColor",
+   "m_Level": 5,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "unsigned int",
+   "m_Name": "rgba",
+   "m_Level": 6,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "index",
+   "m_Level": 5,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_TreePrototypes",
+   "m_Level": 2,
+   "m_MetaFlag": 32769
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 16385
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "TreePrototype",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "PPtr<GameObject>",
+   "m_Name": "prefab",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_FileID",
+   "m_Level": 6,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "SInt64",
+   "m_Name": "m_PathID",
+   "m_Level": 6,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "bendFactor",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "navMeshLod",
+   "m_Level": 5,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_PreloadTextureAtlasData",
+   "m_Level": 2,
+   "m_MetaFlag": 32769
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 16385
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "PPtr<Texture2D>",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_FileID",
+   "m_Level": 5,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "SInt64",
+   "m_Name": "m_PathID",
+   "m_Level": 5,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "Heightmap",
+   "m_Name": "m_Heightmap",
+   "m_Level": 1,
+   "m_MetaFlag": 32769
+  },
+  {
+   "m_Type": "TerrainDataRuntime",
+   "m_Name": "m_RuntimeDetailData",
+   "m_Level": 2,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_RuntimeValue[0]",
+   "m_Level": 3,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_RuntimeValue[1]",
+   "m_Level": 3,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_RuntimeValue[2]",
+   "m_Level": 3,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_RuntimeValue[3]",
+   "m_Level": 3,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_RuntimeValue[4]",
+   "m_Level": 3,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_RuntimeValue[5]",
+   "m_Level": 3,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_RuntimeValue[6]",
+   "m_Level": 3,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_RuntimeValue[7]",
+   "m_Level": 3,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_RuntimeValue[8]",
+   "m_Level": 3,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_Heights",
+   "m_Level": 2,
+   "m_MetaFlag": 557057
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 540673
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "SInt16",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_Holes",
+   "m_Level": 2,
+   "m_MetaFlag": 557057
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 540673
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "UInt8",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_HolesLOD",
+   "m_Level": 2,
+   "m_MetaFlag": 557057
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 540673
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "UInt8",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "bool",
+   "m_Name": "m_EnableHolesTextureCompression",
+   "m_Level": 2,
+   "m_MetaFlag": 16385
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_PrecomputedError",
+   "m_Level": 2,
+   "m_MetaFlag": 557057
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 540673
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_MinMaxPatchHeights",
+   "m_Level": 2,
+   "m_MetaFlag": 557057
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 3,
+   "m_MetaFlag": 540673
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "data",
+   "m_Level": 4,
+   "m_MetaFlag": 524289
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_Resolution",
+   "m_Level": 2,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_Levels",
+   "m_Level": 2,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "Vector3f",
+   "m_Name": "m_Scale",
+   "m_Level": 2,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "x",
+   "m_Level": 3,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "y",
+   "m_Level": 3,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "float",
+   "m_Name": "z",
+   "m_Level": 3,
+   "m_MetaFlag": 2097153
+  },
+  {
+   "m_Type": "vector",
+   "m_Name": "m_PreloadShaders",
+   "m_Level": 1,
+   "m_MetaFlag": 32769
+  },
+  {
+   "m_Type": "Array",
+   "m_Name": "Array",
+   "m_Level": 2,
+   "m_MetaFlag": 16385
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "size",
+   "m_Level": 3,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "PPtr<Shader>",
+   "m_Name": "data",
+   "m_Level": 3,
+   "m_MetaFlag": 1
+  },
+  {
+   "m_Type": "int",
+   "m_Name": "m_FileID",
+   "m_Level": 4,
+   "m_MetaFlag": 8388609
+  },
+  {
+   "m_Type": "SInt64",
+   "m_Name": "m_PathID",
+   "m_Level": 4,
+   "m_MetaFlag": 8388609
+  }
+ ]
+}
