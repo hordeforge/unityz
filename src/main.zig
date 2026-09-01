@@ -1538,6 +1538,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const ps = unityz.classes.ParticleSystem.fromValue(v);
                 try writeParticleFiles(arena, subdir, o.path_id, ps, manifest, &extracted, stdout);
             },
+            91 => { // AnimatorController -> layer/state summary JSON
+                const ac = unityz.classes.AnimatorController.fromValue(v);
+                try writeAnimatorFiles(arena, subdir, o.path_id, ac, manifest, &extracted, stdout);
+            },
             43 => { // Mesh -> Wavefront OBJ
                 const mesh = unityz.classes.Mesh.fromValue(v);
                 const obj = writeMeshObj(arena, &sf, v, &mesh) catch |err| {
@@ -2101,6 +2105,62 @@ fn writeParticleFiles(
     try stdout.print("extracted {s} (particle system summary)\n", .{name});
     extracted.* += 1;
     try manifest.append(arena, .{ .path_id = path_id, .class_id = 198, .name = "", .subdir = subdir });
+}
+
+/// AnimatorController summary export: layers and states with names resolved
+/// through the controller's TOS hash table, transition/blend-tree counts,
+/// the parameter count, and the referenced clips. UnityPy has no
+/// AnimatorController export at all.
+fn writeAnimatorFiles(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    ac: unityz.classes.AnimatorController,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: *Io.Writer,
+) !void {
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"path_id\":{d},\"name\":\"{s}\",\"layers\":[", .{ path_id, ac.name });
+    for (ac.layers, 0..) |l, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("{{\"stateMachineIndex\":{d},\"name\":\"{s}\",\"blendingMode\":{d},\"defaultWeight\":{d},\"ikPass\":{}}}", .{ l.state_machine_index, ac.tosPath(l.binding), l.blending_mode, l.default_weight, l.ik_pass });
+    }
+    try w.writeByte(']');
+    try w.print(",\"stateMachines\":{d},\"states\":[", .{ac.state_machine_count});
+    for (ac.states, 0..) |st, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("{{\"name\":\"{s}\",\"fullPath\":\"{s}\",\"speed\":{d},\"loop\":{},\"transitions\":{d},\"blendTrees\":{d}}}", .{ ac.tosPath(st.name_id), ac.tosPath(st.full_path_id), st.speed, st.loop, st.transition_count, st.blend_tree_count });
+    }
+    try w.print("],\"anyStateTransitions\":{d},\"defaultState\":{d},\"parameters\":{d},\"clips\":[", .{ ac.any_state_transitions, ac.default_state, ac.parameters });
+    for (ac.clips, 0..) |c, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("{d}", .{c.path_id});
+    }
+    try w.writeByte(']');
+    if (ac.tos.len != 0) {
+        try w.writeAll(",\"paths\":[");
+        for (ac.tos, 0..) |t, i| {
+            if (i != 0) try w.writeByte(',');
+            try w.print("{{\"hash\":{d},\"path\":\"{s}\"}}", .{ t.hash, t.path });
+        }
+        try w.writeByte(']');
+    }
+    try w.writeByte('}');
+    var list = aw.toArrayList();
+    const meta = try list.toOwnedSlice(arena);
+    const base_name = std.mem.trimEnd(u8, ac.name, "\x00");
+    var name_buf: [160]u8 = undefined;
+    const name = sanitizeComponent(if (base_name.len != 0)
+        try std.fmt.bufPrint(&name_buf, "animator_{d}_{s}.json", .{ path_id, base_name })
+    else
+        try std.fmt.bufPrint(&name_buf, "animator_{d}.json", .{path_id}));
+    try extractFile(subdir, name, meta);
+    try stdout.print("extracted {s} (animator controller)\n", .{name});
+    extracted.* += 1;
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = 91, .name = ac.name, .subdir = subdir });
 }
 
 const MonoScriptCache = std.AutoHashMapUnmanaged(i64, unityz.classes.MonoScript);

@@ -374,6 +374,13 @@ gravity, max particles, emission rate, burst count, shape type/angle/
 radius), and the enabled flag of every module. UnityPy has no
 ParticleSystem export at all.
 
+AnimatorControllers (class 91) export an `animator_<id>_<name>.json`
+summary: layers and states with their names resolved through the
+controller's TOS hash-to-path table (a state's `m_NameID` maps to e.g.
+"balloon_spin"), transition and blend-tree counts, the parameter count,
+the referenced clips, and the full path table. UnityPy has no
+AnimatorController export at all.
+
 Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
