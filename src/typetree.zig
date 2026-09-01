@@ -591,3 +591,72 @@ test "fromFlatNodes rejects corrupt level sequences" {
     deep[0] = .{ .level = max_depth + 1, .type_name = "x", .name = "x" };
     try std.testing.expectError(error.Corrupt, fromFlatNodes(a, &deep));
 }
+
+test "type-tree parser survives mutated and truncated wire data" {
+    // Hostile type-tree wire data (corrupt blob tables, garbage legacy
+    // strings, truncated lengths) must never crash the parser: mutations
+    // and truncations of valid blob (v17) and legacy (v11) fixtures must
+    // parse cleanly or fail with an error.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // blob fixture (v17), as built by the parse test
+    var bw = streams.Writer.init(a);
+    defer bw.deinit();
+    try bw.writeInt(i32, 4); // node count
+    try bw.writeInt(i32, 0); // string buffer size
+    try writeBlobNode(&bw, 1, 0, common_string_flag + commonStringOffset("GameObject").?, common_string_flag + commonStringOffset("m_GameObject").?, 0, 0, 0);
+    try writeBlobNode(&bw, 1, 1, common_string_flag + commonStringOffset("Transform").?, common_string_flag + commonStringOffset("m_Index").?, 0, 0, 0);
+    try writeBlobNode(&bw, 1, 1, common_string_flag + commonStringOffset("Texture2D").?, common_string_flag + commonStringOffset("m_Type").?, 0, 0, 0);
+    try writeBlobNode(&bw, 1, 2, common_string_flag + commonStringOffset("string").?, common_string_flag + commonStringOffset("m_Name").?, 0, 0, 0);
+    const blob_fixture = bw.getWritten();
+
+    // legacy fixture (v11), as built by the legacy parse test
+    var lw = streams.Writer.init(a);
+    defer lw.deinit();
+    try lw.writeAlignedString("MonoBehaviour");
+    try lw.writeAlignedString("Base<MonoBehaviour>");
+    try lw.writeInt(i32, 0);
+    try lw.writeInt(i32, 0);
+    try lw.writeInt(i32, 0);
+    try lw.writeInt(i32, 1);
+    try lw.writeInt(i32, 0);
+    try lw.writeInt(i32, 1);
+    try lw.writeAlignedString("int");
+    try lw.writeAlignedString("m_Enabled");
+    try lw.writeInt(i32, 4);
+    try lw.writeInt(i32, 0);
+    try lw.writeInt(i32, 0);
+    try lw.writeInt(i32, 1);
+    try lw.writeInt(i32, 0);
+    try lw.writeInt(i32, 0);
+    const legacy_fixture = lw.getWritten();
+
+    var prng = std.Random.DefaultPrng.init(0x7ee);
+    const rnd = prng.random();
+    var buf: [512]u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 3000) : (iter += 1) {
+        const source: []const u8 = if (iter % 2 == 0) blob_fixture else legacy_fixture;
+        const fver: u32 = if (iter % 2 == 0) 17 else 11;
+        const mode = rnd.int(u8) % 3;
+        const blen = switch (mode) {
+            0 => rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len))),
+            1 => source.len,
+            else => rnd.intRangeAtMost(u32, 0, 64),
+        };
+        @memcpy(buf[0..source.len], source);
+        if (mode == 1 and source.len > 0) {
+            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len - 1)));
+            buf[m] ^= @intCast(rnd.int(u8) | 1);
+        } else if (mode == 2 and blen > 0) {
+            rnd.bytes(buf[0..blen]);
+        }
+        var r = streams.Reader.init(buf[0..blen]);
+        const tree = parse(a, &r, fver, false) catch continue;
+        // a parsed tree must have at least one root and reachable children
+        try std.testing.expect(tree.roots.len >= 1);
+        for (tree.roots) |*root| _ = root.children;
+    }
+}
