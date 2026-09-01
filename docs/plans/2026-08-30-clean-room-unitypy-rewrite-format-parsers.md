@@ -2151,3 +2151,14 @@ unityz (0,0,0,0) vs UnityPy (44,44,69,0): polygon-edge rasterization
 rounding between unityz's paintTriangle and UnityPy's PIL
 copy_triangle, visible nowhere (fully transparent). Recorded as a
 known cosmetic parity note, not a defect.
+
+2026-09-01 (legacy bundle edit): testing edit on a legacy bundle
+exposed a real gap - rebuild copied the legacy version (5) into the
+UnityFS output header, where versions < 6 are invalid, so the edited
+file failed its own --verify (the safety net caught it; UnityPy was
+lenient). Rebuild now clamps the output version to the UnityFS minimum
+(6), so editing a legacy UnityWeb/UnityRaw bundle converts the
+container to valid UnityFS and round-trips cleanly: verified on the
+synthetic UnityRaw and UnityWeb bundles (edit --patch --verify clean,
+re-verify clean, UnityPy reads all 73 objects); unit test covers the
+conversion. 357/357 tests.
