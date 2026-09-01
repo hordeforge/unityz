@@ -1127,24 +1127,61 @@ test "bundle parser survives mutated and truncated input" {
     });
     defer a.free(bundle_bytes);
 
+    // a legacy UnityRaw v5 bundle (the parseLegacy path)
+    var lw = streams.Writer.init(a);
+    defer lw.deinit();
+    lw.endian = .big;
+    try lw.writeStringToNull(unityraw_signature);
+    try lw.writeInt(u32, 5);
+    try lw.writeStringToNull("5.x.x");
+    try lw.writeStringToNull("5.6.7f1");
+    try lw.writeBytes(&[_]u8{0} ** 16);
+    try lw.writeInt(u32, 0); // crc
+    try lw.writeInt(u32, 0); // minStreamed
+    const legacy_hdr_off = lw.getWritten().len;
+    try lw.writeInt(u32, 0); // headerSize
+    try lw.writeInt(u32, 1); // levels
+    try lw.writeInt(i32, 1); // levelCount
+    try lw.writeInt(u32, 0); // compressedSize
+    try lw.writeInt(u32, 0); // uncompressedSize
+    try lw.writeInt(u32, 0); // completeFileSize
+    try lw.writeInt(u32, 0); // fileInfoHeaderSize
+    var ld = streams.Writer.init(a);
+    defer ld.deinit();
+    ld.endian = .big;
+    try ld.writeInt(i32, 1);
+    try ld.writeStringToNull("CAB-abc");
+    try ld.writeInt(u32, @intCast(ld.getWritten().len + 8));
+    try ld.writeInt(u32, 8);
+    try ld.writeBytes("PAYLOAD!");
+    const legacy_hdr_size = lw.getWritten().len;
+    std.mem.writeInt(u32, lw.buf.items[legacy_hdr_off..][0..4], @intCast(legacy_hdr_size), .big);
+    std.mem.writeInt(u32, lw.buf.items[legacy_hdr_off + 12 ..][0..4], @intCast(ld.getWritten().len), .big);
+    std.mem.writeInt(u32, lw.buf.items[legacy_hdr_off + 16 ..][0..4], @intCast(ld.getWritten().len), .big);
+    std.mem.writeInt(u32, lw.buf.items[legacy_hdr_off + 20 ..][0..4], @intCast(legacy_hdr_size + ld.getWritten().len), .big);
+    try lw.writeBytes(ld.getWritten());
+    const legacy_bytes = lw.getWritten();
+    const sources = [_][]const u8{ bundle_bytes, legacy_bytes };
+
     var prng = std.Random.DefaultPrng.init(0xbb0b);
     const rnd = prng.random();
     var buf: [4096]u8 = undefined;
     var iter: usize = 0;
     while (iter < 3000) : (iter += 1) {
+        const source = sources[iter % sources.len];
         const mode = rnd.int(u8) % 4;
         const blen = switch (mode) {
-            0 => rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(bundle_bytes.len))), // truncate
-            1 => @min(bundle_bytes.len + rnd.intRangeAtMost(u32, 1, 64), buf.len), // extend
-            2 => bundle_bytes.len, // mutate
+            0 => rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len))), // truncate
+            1 => @min(source.len + rnd.intRangeAtMost(u32, 1, 64), buf.len), // extend
+            2 => source.len, // mutate
             else => rnd.intRangeAtMost(u32, 0, 256), // tiny random
         };
-        @memcpy(buf[0..bundle_bytes.len], bundle_bytes);
+        @memcpy(buf[0..source.len], source);
         if (mode == 0 or mode == 3) {
             // zero random bytes for tiny/truncated inputs
             if (blen > 0) rnd.bytes(buf[0..@min(blen, 64)]);
         } else if (mode == 2) {
-            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(bundle_bytes.len)));
+            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len)));
             buf[m] ^= @intCast(rnd.int(u8) | 1);
         }
         var b = parse(a, buf[0..blen]) catch continue;
