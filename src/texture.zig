@@ -4884,11 +4884,11 @@ test "texture decode survives mutated and random compressed streams" {
     const rnd = prng.random();
 
     const formats = [_]i32{
-        format.dxt1,         format.dxt3,       format.dxt5,
-        format.bc4,          format.bc5,        format.bc7,
-        format.bc6h,         format.etc_rgb4,   format.etc2_rgb,
-        format.etc2_rgba1,   format.etc2_rgba8, format.etc_rgb4_3ds,
-        format.etc_rgba8_3ds, format.dxt1_crunched, format.dxt5_crunched,
+        format.dxt1,              format.dxt3,                format.dxt5,
+        format.bc4,               format.bc5,                 format.bc7,
+        format.bc6h,              format.etc_rgb4,            format.etc2_rgb,
+        format.etc2_rgba1,        format.etc2_rgba8,          format.etc_rgb4_3ds,
+        format.etc_rgba8_3ds,     format.dxt1_crunched,       format.dxt5_crunched,
         format.etc_rgb4_crunched, format.etc2_rgba8_crunched,
     };
     var seed: [65536]u8 = undefined;
