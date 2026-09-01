@@ -953,6 +953,35 @@ fn writeManifest(arena: std.mem.Allocator, entries: []const ManifestEntry, stdou
 /// Writes an extracted file, placing it under `subdir` when the object
 /// came from a container node (see extractSerialized); the subdirectory
 /// is created under the output directory when missing.
+/// Shared epilogue for the single-sidecar summary exporters: derive the
+/// sidecar name from the prefix and, when supplied, the object's own name
+/// (trimmed of trailing NUL), write the contents under it, count the
+/// extraction, and record the manifest entry.
+fn finalizeSidecar(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    prefix: []const u8,
+    object_name: ?[]const u8,
+    class_id: i32,
+    stdout_label: []const u8,
+    contents: []const u8,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: *Io.Writer,
+) !void {
+    var name_buf: [160]u8 = undefined;
+    const name = sanitizeComponent(if (object_name) |n| blk: {
+        const base = std.mem.trimEnd(u8, n, "\x00");
+        if (base.len != 0) break :blk try std.fmt.bufPrint(&name_buf, "{s}_{d}_{s}.json", .{ prefix, path_id, base });
+        break :blk try std.fmt.bufPrint(&name_buf, "{s}_{d}.json", .{ prefix, path_id });
+    } else try std.fmt.bufPrint(&name_buf, "{s}_{d}.json", .{ prefix, path_id }));
+    try extractFile(subdir, name, contents);
+    try stdout.print("extracted {s} ({s})\n", .{ name, stdout_label });
+    extracted.* += 1;
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = class_id, .name = object_name orelse "", .subdir = subdir });
+}
+
 fn extractFile(subdir: ?[]const u8, name: []const u8, contents: []const u8) !void {
     if (subdir) |sd| {
         const base_owned = extract_outdir != null;
@@ -2358,16 +2387,7 @@ fn writeMixerFiles(
     try w.print(",\"updateMode\":{d}}}", .{ac.update_mode});
     var list = aw.toArrayList();
     const meta = try list.toOwnedSlice(arena);
-    const base_name = std.mem.trimEnd(u8, ac.name, "\x00");
-    var name_buf: [160]u8 = undefined;
-    const name = sanitizeComponent(if (base_name.len != 0)
-        try std.fmt.bufPrint(&name_buf, "mixer_{d}_{s}.json", .{ path_id, base_name })
-    else
-        try std.fmt.bufPrint(&name_buf, "mixer_{d}.json", .{path_id}));
-    try extractFile(subdir, name, meta);
-    try stdout.print("extracted {s} (mixer graph)\n", .{name});
-    extracted.* += 1;
-    try manifest.append(arena, .{ .path_id = path_id, .class_id = 241, .name = ac.name, .subdir = subdir });
+    try finalizeSidecar(arena, subdir, path_id, "mixer", ac.name, 241, "mixer graph", meta, manifest, extracted, stdout);
 }
 
 /// AudioMixerGroupController export: name plus the flat child path-id list.
@@ -2391,16 +2411,7 @@ fn writeMixerGroupFiles(
     try w.writeAll("]}");
     var list = aw.toArrayList();
     const meta = try list.toOwnedSlice(arena);
-    const base_name = std.mem.trimEnd(u8, g.name, "\x00");
-    var name_buf: [160]u8 = undefined;
-    const name = sanitizeComponent(if (base_name.len != 0)
-        try std.fmt.bufPrint(&name_buf, "mixer_group_{d}_{s}.json", .{ path_id, base_name })
-    else
-        try std.fmt.bufPrint(&name_buf, "mixer_group_{d}.json", .{path_id}));
-    try extractFile(subdir, name, meta);
-    try stdout.print("extracted {s} (mixer group)\n", .{name});
-    extracted.* += 1;
-    try manifest.append(arena, .{ .path_id = path_id, .class_id = 243, .name = g.name, .subdir = subdir });
+    try finalizeSidecar(arena, subdir, path_id, "mixer_group", g.name, 243, "mixer group", meta, manifest, extracted, stdout);
 }
 
 /// AudioMixerSnapshotController export: name, transition time, and the
@@ -2420,16 +2431,7 @@ fn writeMixerSnapshotFiles(
     try w.print("{{\"path_id\":{d},\"name\":\"{s}\",\"time\":{d},\"parameters\":{d}}}", .{ path_id, s.name, s.time, s.values });
     var list = aw.toArrayList();
     const meta = try list.toOwnedSlice(arena);
-    const base_name = std.mem.trimEnd(u8, s.name, "\x00");
-    var name_buf: [160]u8 = undefined;
-    const name = sanitizeComponent(if (base_name.len != 0)
-        try std.fmt.bufPrint(&name_buf, "mixer_snapshot_{d}_{s}.json", .{ path_id, base_name })
-    else
-        try std.fmt.bufPrint(&name_buf, "mixer_snapshot_{d}.json", .{path_id}));
-    try extractFile(subdir, name, meta);
-    try stdout.print("extracted {s} (mixer snapshot)\n", .{name});
-    extracted.* += 1;
-    try manifest.append(arena, .{ .path_id = path_id, .class_id = 245, .name = s.name, .subdir = subdir });
+    try finalizeSidecar(arena, subdir, path_id, "mixer_snapshot", s.name, 245, "mixer snapshot", meta, manifest, extracted, stdout);
 }
 
 /// ParticleSystem summary export: the emitter's timeline, the main/emission/
@@ -2466,12 +2468,7 @@ fn writeParticleFiles(
     try w.writeAll("}}");
     var list = aw.toArrayList();
     const meta = try list.toOwnedSlice(arena);
-    var name_buf: [96]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "particle_{d}.json", .{path_id});
-    try extractFile(subdir, name, meta);
-    try stdout.print("extracted {s} (particle system summary)\n", .{name});
-    extracted.* += 1;
-    try manifest.append(arena, .{ .path_id = path_id, .class_id = 198, .name = "", .subdir = subdir });
+    try finalizeSidecar(arena, subdir, path_id, "particle", null, 198, "particle system summary", meta, manifest, extracted, stdout);
 }
 
 /// AnimatorController summary export: layers and states with names resolved
@@ -2518,16 +2515,7 @@ fn writeAnimatorFiles(
     try w.writeByte('}');
     var list = aw.toArrayList();
     const meta = try list.toOwnedSlice(arena);
-    const base_name = std.mem.trimEnd(u8, ac.name, "\x00");
-    var name_buf: [160]u8 = undefined;
-    const name = sanitizeComponent(if (base_name.len != 0)
-        try std.fmt.bufPrint(&name_buf, "animator_{d}_{s}.json", .{ path_id, base_name })
-    else
-        try std.fmt.bufPrint(&name_buf, "animator_{d}.json", .{path_id}));
-    try extractFile(subdir, name, meta);
-    try stdout.print("extracted {s} (animator controller)\n", .{name});
-    extracted.* += 1;
-    try manifest.append(arena, .{ .path_id = path_id, .class_id = 91, .name = ac.name, .subdir = subdir });
+    try finalizeSidecar(arena, subdir, path_id, "animator", ac.name, 91, "animator controller", meta, manifest, extracted, stdout);
 }
 
 /// AnimatorOverrideController export: the base controller plus the clip
@@ -2558,24 +2546,17 @@ fn writeOverrideFiles(
     for (oc.overrides, 0..) |ov, i| {
         if (i != 0) try w.writeByte(',');
         try w.writeAll("{\"original\":");
-        try writeClipRef(w, arena, sf, own_basename, injected, ov.original);
+        try writeNamedRef(w, arena, sf, own_basename, injected, ov.original);
         try w.writeAll(",\"replacement\":");
-        try writeClipRef(w, arena, sf, own_basename, injected, ov.replacement);
+        try writeNamedRef(w, arena, sf, own_basename, injected, ov.replacement);
         try w.writeByte('}');
     }
     try w.writeAll("]}");
     var list = aw.toArrayList();
     const meta = try list.toOwnedSlice(arena);
-    const base_name = std.mem.trimEnd(u8, oc.name, "\x00");
-    var name_buf: [160]u8 = undefined;
-    const name = sanitizeComponent(if (base_name.len != 0)
-        try std.fmt.bufPrint(&name_buf, "animator_override_{d}_{s}.json", .{ path_id, base_name })
-    else
-        try std.fmt.bufPrint(&name_buf, "animator_override_{d}.json", .{path_id}));
-    try extractFile(subdir, name, meta);
-    try stdout.print("extracted {s} ({d} override pairs)\n", .{ name, oc.overrides.len });
-    extracted.* += 1;
-    try manifest.append(arena, .{ .path_id = path_id, .class_id = 221, .name = oc.name, .subdir = subdir });
+    var label_buf: [48]u8 = undefined;
+    const label = try std.fmt.bufPrint(&label_buf, "{d} override pairs", .{oc.overrides.len});
+    try finalizeSidecar(arena, subdir, path_id, "animator_override", oc.name, 221, label, meta, manifest, extracted, stdout);
 }
 
 /// Animator (class 95) export: the component's controller and avatar with
@@ -2611,12 +2592,7 @@ fn writeAnimatorComponentFiles(
     });
     var list = aw.toArrayList();
     const meta = try list.toOwnedSlice(arena);
-    var name_buf: [96]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "animator_{d}.json", .{path_id});
-    try extractFile(subdir, name, meta);
-    try stdout.print("extracted {s} (animator component)\n", .{name});
-    extracted.* += 1;
-    try manifest.append(arena, .{ .path_id = path_id, .class_id = 95, .name = "", .subdir = subdir });
+    try finalizeSidecar(arena, subdir, path_id, "animator", null, 95, "animator component", meta, manifest, extracted, stdout);
 }
 
 /// Writes a PPtr as {"path_id": N, "name": "..."} with the target object's
@@ -2633,31 +2609,6 @@ fn writeNamedRef(
         try w.print("{{\"path_id\":{d}", .{r.path_id});
         if (readObjectValue(arena, sf, r.path_id, own_basename, injected)) |rv| {
             const n = unityz.classes.stringField(rv, "m_Name") orelse "";
-            if (n.len != 0) {
-                try w.writeAll(",\"name\":");
-                try writeJsonString(w, n);
-            }
-        }
-        try w.writeByte('}');
-    } else {
-        try w.writeAll("null");
-    }
-}
-
-/// Writes an AnimationClip PPtr as {"path_id": N, "name": "..."} with the
-/// clip's m_Name resolved through the file's objects.
-fn writeClipRef(
-    w: *Io.Writer,
-    arena: std.mem.Allocator,
-    sf: *const unityz.serialized.SerializedFile,
-    own_basename: []const u8,
-    injected: ?*const InjectedTrees,
-    clip: ?unityz.value.PPtr,
-) !void {
-    if (clip) |c| {
-        try w.print("{{\"path_id\":{d}", .{c.path_id});
-        if (readObjectValue(arena, sf, c.path_id, own_basename, injected)) |cv| {
-            const n = unityz.classes.stringField(cv, "m_Name") orelse "";
             if (n.len != 0) {
                 try w.writeAll(",\"name\":");
                 try writeJsonString(w, n);
@@ -3711,20 +3662,8 @@ fn printWebFile(path: []const u8, bytes: []const u8, dump: bool, objects: bool, 
     for (wf.entries) |e| {
         try stdout.print("  {s}  ({d} bytes)\n", .{ e.path, e.data.len });
     }
-    if (objects) {
-        for (wf.entries) |e| {
-            if (unityz.container.sniff(e.data).container != .serialized) continue;
-            try stdout.print("entry {s}:\n", .{e.path});
-            try dumpObjectTable(arena, e.data, stdout);
-        }
-    }
-    if (dump) {
-        for (wf.entries) |e| {
-            if (unityz.container.sniff(e.data).container != .serialized) continue;
-            try stdout.print("entry {s}:\n", .{e.path});
-            try dumpSerializedBytes(arena, e.data, stdout);
-        }
-    }
+    if (objects) try dumpContainerEntries(arena, wf.entries, "entry", false, stdout);
+    if (dump) try dumpContainerEntries(arena, wf.entries, "entry", true, stdout);
 }
 
 /// A Shader's display name: `m_ParsedForm.m_Name` (its authored name),
@@ -3837,20 +3776,8 @@ fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, j
     for (b.nodes) |n| {
         try stdout.print("  {s}  ({d} bytes)\n", .{ n.path, n.data.len });
     }
-    if (objects) {
-        for (b.nodes) |n| {
-            if (unityz.container.sniff(n.data).container != .serialized) continue;
-            try stdout.print("node {s}:\n", .{n.path});
-            try dumpObjectTable(arena, n.data, stdout);
-        }
-    }
-    if (dump) {
-        for (b.nodes) |n| {
-            if (unityz.container.sniff(n.data).container != .serialized) continue;
-            try stdout.print("node {s}:\n", .{n.path});
-            try dumpSerializedBytes(arena, n.data, stdout);
-        }
-    }
+    if (objects) try dumpContainerEntries(arena, b.nodes, "node", false, stdout);
+    if (dump) try dumpContainerEntries(arena, b.nodes, "node", true, stdout);
 }
 
 fn printSerialized(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
@@ -3954,6 +3881,27 @@ fn objectName(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedF
     r.endian = sf.endian;
     const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return "";
     return unityz.classes.stringField(v, "m_Name") orelse "";
+}
+
+/// One container `info` section: every serialized entry of the container,
+/// printed under its `node`/`entry` label followed by its object table, or
+/// its full serialized dump when `full_dump` is set.
+fn dumpContainerEntries(
+    arena: std.mem.Allocator,
+    entries: anytype,
+    entry_label: []const u8,
+    full_dump: bool,
+    stdout: *Io.Writer,
+) !void {
+    for (entries) |e| {
+        if (unityz.container.sniff(e.data).container != .serialized) continue;
+        try stdout.print("{s} {s}:\n", .{ entry_label, e.path });
+        if (full_dump) {
+            try dumpSerializedBytes(arena, e.data, stdout);
+        } else {
+            try dumpObjectTable(arena, e.data, stdout);
+        }
+    }
 }
 
 fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writer) !void {
@@ -7135,8 +7083,7 @@ fn verifyEditResult(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Wri
 /// one object inside a serialized node.
 fn isRawNodeKey(name: []const u8) bool {
     if (std.mem.indexOfScalar(u8, name, ':') != null) return false;
-    const v = std.fmt.parseInt(i64, name, 10) catch return true;
-    _ = v;
+    _ = std.fmt.parseInt(i64, name, 10) catch return true;
     return false;
 }
 
