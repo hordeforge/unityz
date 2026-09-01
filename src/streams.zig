@@ -173,6 +173,14 @@ pub const Reader = struct {
     }
 };
 
+/// Strips the trailing NUL bytes from an aligned/borrowed string slice.
+/// Unity's aligned strings carry the terminator plus zero padding after it,
+/// and name comparisons require all of it gone; a single-NUL trim leaves
+/// padding behind and breaks exact matches.
+pub fn trimNul(s: []const u8) []const u8 {
+    return std.mem.trimEnd(u8, s, "\x00");
+}
+
 /// Growable endian-aware writer backed by an allocator.
 ///
 /// Zig 0.16's `std.ArrayList` takes the allocator per operation, so the

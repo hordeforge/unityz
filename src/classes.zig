@@ -390,15 +390,7 @@ pub fn className(class_id: i32) ?[]const u8 {
 
 /// Finds a named field in a `.obj` value, or null.
 pub fn fieldOf(v: value.Value, name: []const u8) ?value.Value {
-    return switch (v) {
-        .obj => |fields| blk: {
-            for (fields) |f| {
-                if (std.mem.eql(u8, f.name, name)) break :blk f.value;
-            }
-            break :blk null;
-        },
-        else => null,
-    };
+    return value.fieldOf(v, name);
 }
 
 pub fn intField(v: value.Value, name: []const u8) ?i64 {

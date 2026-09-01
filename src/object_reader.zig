@@ -348,18 +348,6 @@ fn allocNode(
     return node;
 }
 
-fn fieldOf(v: value.Value, name: []const u8) ?value.Value {
-    switch (v) {
-        .obj => |fields| {
-            for (fields) |f| {
-                if (std.mem.eql(u8, f.name, name)) return f.value;
-            }
-        },
-        else => {},
-    }
-    return null;
-}
-
 test "read a rich record: primitives, string, pptr, struct, arrays" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -415,19 +403,19 @@ test "read a rich record: primitives, string, pptr, struct, arrays" {
     const v = try readObject(a, &r, root);
 
     try std.testing.expectEqual(@as(usize, 7), v.childCount());
-    try std.testing.expect((fieldOf(v, "m_Enabled")).?.bool);
-    try std.testing.expectEqualStrings("Player\x00", (fieldOf(v, "m_Name")).?.string);
-    const script = (fieldOf(v, "m_Script")).?.pptr;
+    try std.testing.expect((value.fieldOf(v, "m_Enabled")).?.bool);
+    try std.testing.expectEqualStrings("Player\x00", (value.fieldOf(v, "m_Name")).?.string);
+    const script = (value.fieldOf(v, "m_Script")).?.pptr;
     try std.testing.expectEqual(@as(i32, 0), script.file_id);
     try std.testing.expectEqual(@as(i64, 42), script.path_id);
-    try std.testing.expectEqual(@as(i64, 3), (fieldOf(v, "m_Count")).?.asInt().?);
-    const vec = (fieldOf(v, "m_Vector3")).?;
-    try std.testing.expectEqual(@as(f64, 1.0), (fieldOf(vec, "x")).?.float);
-    try std.testing.expectEqual(@as(f64, 3.0), (fieldOf(vec, "z")).?.float);
-    const values = (fieldOf(v, "m_Values")).?.array;
+    try std.testing.expectEqual(@as(i64, 3), (value.fieldOf(v, "m_Count")).?.asInt().?);
+    const vec = (value.fieldOf(v, "m_Vector3")).?;
+    try std.testing.expectEqual(@as(f64, 1.0), (value.fieldOf(vec, "x")).?.float);
+    try std.testing.expectEqual(@as(f64, 3.0), (value.fieldOf(vec, "z")).?.float);
+    const values = (value.fieldOf(v, "m_Values")).?.array;
     try std.testing.expectEqual(@as(usize, 3), values.len);
     try std.testing.expectEqual(@as(i64, 30), values[2].asInt().?);
-    const names = (fieldOf(v, "m_Names")).?.array;
+    const names = (value.fieldOf(v, "m_Names")).?.array;
     try std.testing.expectEqual(@as(usize, 2), names.len);
     try std.testing.expectEqualStrings("bb", names[1].string);
     try std.testing.expect(r.eof());
@@ -463,8 +451,8 @@ test "strings align even without the 0x4000 meta flag" {
 
     var r = streams.Reader.init(w.getWritten());
     const v = try readObject(a, &r, root);
-    try std.testing.expectEqualStrings("entityprobe.unity3d", (fieldOf(v, "m_Name")).?.string);
-    try std.testing.expectEqual(@as(i64, 7), (fieldOf(v, "m_Count")).?.asInt().?);
+    try std.testing.expectEqualStrings("entityprobe.unity3d", (value.fieldOf(v, "m_Name")).?.string);
+    try std.testing.expectEqual(@as(i64, 7), (value.fieldOf(v, "m_Count")).?.asInt().?);
     try std.testing.expect(r.eof());
 }
 
@@ -511,14 +499,14 @@ test "read map and typeless data" {
     var r = streams.Reader.init(w.getWritten());
     const v = try readObject(a, &r, root);
 
-    const map = (fieldOf(v, "m_Map")).?.array;
+    const map = (value.fieldOf(v, "m_Map")).?.array;
     try std.testing.expectEqual(@as(usize, 2), map.len);
     try std.testing.expectEqualStrings("k1", map[0].array[0].string);
     try std.testing.expectEqual(@as(i64, 5), map[0].array[1].asInt().?);
     try std.testing.expectEqualStrings("k2", map[1].array[0].string);
     try std.testing.expectEqual(@as(i64, 7), map[1].array[1].asInt().?);
-    try std.testing.expectEqualStrings("blob", (fieldOf(v, "m_Blob")).?.bytes);
-    try std.testing.expectEqualStrings("0123456789abcdef", (fieldOf(v, "m_Hash")).?.bytes);
+    try std.testing.expectEqualStrings("blob", (value.fieldOf(v, "m_Blob")).?.bytes);
+    try std.testing.expectEqualStrings("0123456789abcdef", (value.fieldOf(v, "m_Hash")).?.bytes);
     try std.testing.expect(r.eof());
 }
 
@@ -566,14 +554,14 @@ test "read a managed reference registry" {
     var r = streams.Reader.init(w.getWritten());
     const v = try readObject(a, &r, root);
 
-    const reg = (fieldOf(v, "m_ManagedReferencesRegistry")).?;
-    try std.testing.expectEqual(@as(i64, 1), (fieldOf(reg, "m_Version")).?.asInt().?);
-    const refs = (fieldOf(reg, "m_RefIds")).?.array;
+    const reg = (value.fieldOf(v, "m_ManagedReferencesRegistry")).?;
+    try std.testing.expectEqual(@as(i64, 1), (value.fieldOf(reg, "m_Version")).?.asInt().?);
+    const refs = (value.fieldOf(reg, "m_RefIds")).?.array;
     try std.testing.expectEqual(@as(usize, 2), refs.len);
-    try std.testing.expectEqual(@as(i64, 7), (fieldOf(refs[0], "m_ClassId")).?.asInt().?);
-    try std.testing.expectEqualStrings("Foo\x00", (fieldOf(refs[0], "m_ClassName")).?.string);
-    try std.testing.expectEqualStrings("abc", (fieldOf(refs[0], "m_Object")).?.bytes);
-    try std.testing.expectEqualStrings("Bar\x00", (fieldOf(refs[1], "m_ClassName")).?.string);
+    try std.testing.expectEqual(@as(i64, 7), (value.fieldOf(refs[0], "m_ClassId")).?.asInt().?);
+    try std.testing.expectEqualStrings("Foo\x00", (value.fieldOf(refs[0], "m_ClassName")).?.string);
+    try std.testing.expectEqualStrings("abc", (value.fieldOf(refs[0], "m_Object")).?.bytes);
+    try std.testing.expectEqualStrings("Bar\x00", (value.fieldOf(refs[1], "m_ClassName")).?.string);
     try std.testing.expect(r.eof());
 }
 

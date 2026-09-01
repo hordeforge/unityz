@@ -67,6 +67,19 @@ pub const Value = union(enum) {
     }
 };
 
+/// Finds a named field in a `.obj` value, or null.
+pub fn fieldOf(v: Value, name: []const u8) ?Value {
+    return switch (v) {
+        .obj => |fields| blk: {
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) break :blk f.value;
+            }
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
 /// Writes `v` as compact JSON to `writer` (any type with writeByte /
 /// writeAll / print). Bytes are rendered as base64; PPtrs as small objects.
 pub fn jsonWrite(v: Value, writer: anytype) !void {
