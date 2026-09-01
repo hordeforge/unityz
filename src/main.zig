@@ -1044,6 +1044,75 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
     }
 }
 
+/// Writes a Font's embedded TTF/OTF plus a metadata descriptor JSON. The
+/// font bytes always sit inline in the object in release binaries, so the
+/// extension comes from the sfnt magic ("OTTO" = OpenType/CFF, 0x00010000
+/// = TrueType). Fonts without embedded data (e.g. the engine's
+/// LegacyRuntime stub) still get the descriptor.
+fn writeFontFiles(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    class_id: i32,
+    f: unityz.classes.Font,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: *Io.Writer,
+) !void {
+    var ext: []const u8 = "ttf";
+    if (f.font_data.len >= 4 and std.mem.eql(u8, f.font_data[0..4], "OTTO")) ext = "otf";
+    const base_name = std.mem.trimEnd(u8, f.name, "\x00");
+    var name_buf: [160]u8 = undefined;
+    const name = sanitizeComponent(if (base_name.len != 0)
+        try std.fmt.bufPrint(&name_buf, "font_{d}_{s}.{s}", .{ path_id, base_name, ext })
+    else
+        try std.fmt.bufPrint(&name_buf, "font_{d}.{s}", .{ path_id, ext }));
+    if (f.font_data.len != 0) {
+        try extractFile(subdir, name, f.font_data);
+        try stdout.print("extracted {s} ({d} bytes, {s})\n", .{ name, f.font_data.len, ext });
+        extracted.* += 1;
+    } else {
+        try stdout.print("  font {d} ({s}): no embedded font data, metrics only\n", .{ path_id, f.name });
+    }
+    if (try fontMetadataJson(arena, path_id, class_id, f)) |meta| {
+        var meta_name_buf: [192]u8 = undefined;
+        const meta_name = try std.fmt.bufPrint(&meta_name_buf, "{s}.json", .{name});
+        try extractFile(subdir, meta_name, meta);
+    }
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = class_id, .name = f.name, .subdir = subdir });
+}
+
+/// Font descriptor JSON: name list, metrics, kerning/rect counts, fallback
+/// pointers, and the embedded data size. UnityPy has no font export at
+/// all, so this metadata is a unityz addition.
+fn fontMetadataJson(arena: std.mem.Allocator, path_id: i64, class_id: i32, f: unityz.classes.Font) !?[]u8 {
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"path_id\":{d},\"class\":{d},\"name\":\"{s}\",\"font_names\":[", .{ path_id, class_id, f.name });
+    for (f.font_names, 0..) |n, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("\"{s}\"", .{n});
+    }
+    try w.print("],\"font_size\":{d},\"line_spacing\":{d},\"tracking\":{d},\"pixel_scale\":{d}", .{ f.font_size, f.line_spacing, f.tracking, f.pixel_scale });
+    try w.print(",\"ascent\":{d},\"descent\":{d},\"ascii_start_offset\":{d},\"character_spacing\":{d},\"character_padding\":{d},\"convert_case\":{d}", .{ f.ascent, f.descent, f.ascii_start_offset, f.character_spacing, f.character_padding, f.convert_case });
+    try w.print(",\"default_style\":{d},\"font_rendering_mode\":{d},\"use_legacy_bounds_calculation\":{},\"should_round_advance_value\":{}", .{ f.default_style, f.font_rendering_mode, f.use_legacy_bounds_calculation, f.should_round_advance_value });
+    try w.print(",\"character_rects\":{d},\"kerning_values\":{d},\"font_data_size\":{d}", .{ f.character_rects, f.kerning_values, f.font_data.len });
+    if (f.default_material) |m| try w.print(",\"default_material\":{{\"file_id\":{d},\"path_id\":{d}}}", .{ m.file_id, m.path_id });
+    if (f.texture) |t| try w.print(",\"texture\":{{\"file_id\":{d},\"path_id\":{d}}}", .{ t.file_id, t.path_id });
+    if (f.fallback_fonts.len != 0) {
+        try w.writeAll(",\"fallback_fonts\":[");
+        for (f.fallback_fonts, 0..) |p, i| {
+            if (i != 0) try w.writeByte(',');
+            try w.print("{{\"file_id\":{d},\"path_id\":{d}}}", .{ p.file_id, p.path_id });
+        }
+        try w.writeByte(']');
+    }
+    try w.writeByte('}');
+    var list = aw.toArrayList();
+    return try list.toOwnedSlice(arena);
+}
+
 fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, name_filter: ?[]const u8, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("unityz: {s}: serialized file parse failed: {s}\n", .{ path, @errorName(err) });
@@ -1078,6 +1147,22 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
         if (type_index >= sf.types.len) continue;
         var tree = sf.types[type_index].type_tree;
         if (tree.roots.len == 0) {
+            if (o.class_id == 128) {
+                // Fonts embed their TrueType/OpenType bytes inline in the
+                // object, so typeless files decode from the raw serialized
+                // layout with no tree (the tree's NoTransfer flag only
+                // moves the payload in editor/YAML layouts).
+                const f = unityz.classes.Font.fromRaw(data, sf.endian, sf.unity_version) catch |err| {
+                    try stdout.print("  object {d} (class 128 Font): decode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                    skipped += 1;
+                    continue;
+                };
+                if (name_filter) |nf| {
+                    if (std.ascii.indexOfIgnoreCase(f.name, nf) == null) continue;
+                }
+                try writeFontFiles(arena, subdir, o.path_id, o.class_id, f, manifest, &extracted, stdout);
+                continue;
+            }
             // Mono builds ship no embedded trees; decode from the injected
             // table when one was supplied (`--trees`).
             if (injected) |inj| {
@@ -1265,6 +1350,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 }
                 try stdout.print("extracted {s} ({d} bytes, {s})\n", .{ name, audio.len, ext });
                 extracted += 1;
+            },
+            128 => { // Font
+                const f = unityz.classes.Font.fromValue(v);
+                try writeFontFiles(arena, subdir, o.path_id, o.class_id, f, manifest, &extracted, stdout);
             },
             43 => { // Mesh -> Wavefront OBJ
                 const mesh = unityz.classes.Mesh.fromValue(v);

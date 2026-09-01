@@ -2203,3 +2203,33 @@ UnityPy reads all 73 objects, and diff reports the rename (72
 unchanged, 1 changed). Every legacy version (v2-6) is now verified
 across parse, verify, edit (both forms), extract, diff, hash, stats,
 find, show, hierarchy.
+
+2026-09-01 (font export): Font (class 128) objects export their
+embedded TrueType/OpenType data plus a metadata sidecar. The serialized
+layout was reverse-engineered from four real 7DTD fonts (Unity
+2022.3.62f2) and cross-checked against AssetStudio's Font.cs and the
+AssetRipper TypeTreeDumps 2022.3.62f2 tree:
+
+the field order is m_Name, m_LineSpacing, m_DefaultMaterial,
+m_FontSize, m_Texture, m_AsciiStartOffset, m_Tracking,
+m_CharacterSpacing, m_CharacterPadding, m_ConvertCase,
+m_CharacterRects, m_KerningValues, m_PixelScale, m_FontData (i32 size
++ inline bytes), m_Ascent, m_Descent, m_DefaultStyle, m_FontNames,
+m_FallbackFonts, m_FontRenderingMode, m_UseLegacyBoundsCalculation,
+m_ShouldRoundAdvanceValue.
+
+The font bytes always sit inline in release binaries (the tree's
+NoTransfer flag only affects editor/YAML layouts), so typeless files -
+Mono builds strip type trees - decode via `Font.fromRaw` with no
+sidecar lookup; `Font.fromValue` covers files that keep trees. UnityPy
+has no Font export at all.
+
+Verified on the real 7DTD bundle (typeless): three fonts extracted (a
+16.5MB CFF OTF, a 72KB CFF OTF, a 350KB TrueType), the exported bytes
+are identical to the inline object data, the extension follows the
+sfnt magic ("OTTO" -> .otf, 0x00010000 -> .ttf), and fontconfig parses
+the outputs cleanly. The descriptor JSON records metrics, the font
+name list, kerning/rect counts, fallback pointers, and the embedded
+data size. LegacyRuntime (the engine's stub font, path_id 10102 in
+unity default resources) has size 0 and exports metrics only. 370/370
+tests.

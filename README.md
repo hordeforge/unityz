@@ -319,6 +319,15 @@ headers are synthesized, and the setup header (codebooks + modes) comes
 from a CRC-keyed table of FMOD encoder configurations - byte-identical
 to Fmod5Sharp's reconstruction and playable by any decoder. UnityPy
 shells out to ffmpeg for every conversion, so even that is at parity.
+
+Fonts (class 128) export their embedded TrueType/OpenType data
+(`.ttf`/`.otf`, extension from the sfnt magic) plus a metadata sidecar
+(metrics, font name list, kerning/rect counts, fallback pointers, and
+the embedded size). The font bytes always sit inline in the object in
+release binaries, so typeless files - Mono builds strip type trees -
+decode from the raw serialized layout with no sidecar lookup; UnityPy
+has no font export at all.
+
 Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
