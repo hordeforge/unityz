@@ -1555,6 +1555,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const oc = unityz.classes.AnimatorOverrideController.fromValue(v);
                 try writeOverrideFiles(arena, subdir, o.path_id, oc, &sf, basename(path), injected, manifest, &extracted, stdout);
             },
+            95 => { // Animator -> component summary JSON
+                const an = unityz.classes.Animator.fromValue(v);
+                try writeAnimatorComponentFiles(arena, subdir, o.path_id, an, &sf, basename(path), injected, manifest, &extracted, stdout);
+            },
             115 => { // MonoScript -> script registry JSON
                 const ms = unityz.classes.MonoScript.fromValue(v);
                 try writeScriptFiles(arena, subdir, o.path_id, ms, manifest, &extracted, stdout);
@@ -2256,6 +2260,72 @@ fn writeOverrideFiles(
     try stdout.print("extracted {s} ({d} override pairs)\n", .{ name, oc.overrides.len });
     extracted.* += 1;
     try manifest.append(arena, .{ .path_id = path_id, .class_id = 221, .name = oc.name, .subdir = subdir });
+}
+
+/// Animator (class 95) export: the component's controller and avatar with
+/// their names resolved through the file's objects, plus the playback flags.
+fn writeAnimatorComponentFiles(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    an: unityz.classes.Animator,
+    sf: *const unityz.serialized.SerializedFile,
+    own_basename: []const u8,
+    injected: ?*const InjectedTrees,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: *Io.Writer,
+) !void {
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"path_id\":{d},\"gameObject\":", .{path_id});
+    if (an.game_object) |go| {
+        try w.print("{{\"path_id\":{d}}}", .{go.path_id});
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\"controller\":");
+    try writeNamedRef(w, arena, sf, own_basename, injected, an.controller);
+    try w.writeAll(",\"avatar\":");
+    try writeNamedRef(w, arena, sf, own_basename, injected, an.avatar);
+    try w.print(",\"cullingMode\":{d},\"updateMode\":{d},\"applyRootMotion\":{},\"linearVelocityBlending\":{},\"stabilizeFeet\":{},\"hasTransformHierarchy\":{},\"allowConstantClipSamplingOptimization\":{},\"keepAnimatorStateOnDisable\":{},\"writeDefaultValuesOnDisable\":{}}}", .{
+        an.culling_mode,            an.update_mode,                               an.apply_root_motion,              an.linear_velocity_blending,        an.stabilize_feet,
+        an.has_transform_hierarchy, an.allow_constant_clip_sampling_optimization, an.keep_animator_state_on_disable, an.write_default_values_on_disable,
+    });
+    var list = aw.toArrayList();
+    const meta = try list.toOwnedSlice(arena);
+    var name_buf: [96]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "animator_{d}.json", .{path_id});
+    try extractFile(subdir, name, meta);
+    try stdout.print("extracted {s} (animator component)\n", .{name});
+    extracted.* += 1;
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = 95, .name = "", .subdir = subdir });
+}
+
+/// Writes a PPtr as {"path_id": N, "name": "..."} with the target object's
+/// m_Name resolved through the file's objects.
+fn writeNamedRef(
+    w: *Io.Writer,
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    own_basename: []const u8,
+    injected: ?*const InjectedTrees,
+    ref: ?unityz.value.PPtr,
+) !void {
+    if (ref) |r| {
+        try w.print("{{\"path_id\":{d}", .{r.path_id});
+        if (readObjectValue(arena, sf, r.path_id, own_basename, injected)) |rv| {
+            const n = unityz.classes.stringField(rv, "m_Name") orelse "";
+            if (n.len != 0) {
+                try w.writeAll(",\"name\":");
+                try writeJsonString(w, n);
+            }
+        }
+        try w.writeByte('}');
+    } else {
+        try w.writeAll("null");
+    }
 }
 
 /// MonoScript export: the script registry entry (assembly, namespace,

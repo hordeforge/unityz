@@ -2431,3 +2431,14 @@ that decodes objects. Verified on the real 7DTD bundle: find --trees
 returns the twitch_balloon materials/texture/mesh/clips/GameObjects
 (186 GameObjects match "a"), and skin --trees analyzes the typeless
 shaders (e.g. Legacy Shaders/Specular: skins false). 378/378 tests.
+
+2026-09-01 (animator component export): Animator (class 95) objects
+export an `animator_<id>.json` with the component's controller and
+avatar references (names resolved through the file's objects via
+readObjectValue, injected trees for typeless files) plus the playback
+flags (culling/update mode, apply root motion, linear velocity
+blending, stabilize feet, transform hierarchy, sampling optimization,
+keep-state/write-defaults on disable). With this, every class with
+content in the real 7DTD bundle has an extract export. Verified: all 4
+animators export (e.g. controller -> PlayOnSpawn, avatar ->
+twitch_balloonAvatar). 379/379 tests.

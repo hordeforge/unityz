@@ -1373,6 +1373,41 @@ pub const AnimatorOverrideController = struct {
     }
 };
 
+/// Unity Animator (class 95): the component binding an Avatar and an
+/// AnimatorController to a GameObject, with the playback flags. UnityPy has
+/// no export for it.
+pub const Animator = struct {
+    game_object: ?value.PPtr = null,
+    avatar: ?value.PPtr = null,
+    controller: ?value.PPtr = null,
+    culling_mode: i64 = 0,
+    update_mode: i64 = 0,
+    apply_root_motion: bool = false,
+    linear_velocity_blending: bool = false,
+    stabilize_feet: bool = false,
+    has_transform_hierarchy: bool = false,
+    allow_constant_clip_sampling_optimization: bool = false,
+    keep_animator_state_on_disable: bool = false,
+    write_default_values_on_disable: bool = false,
+
+    pub fn fromValue(v: value.Value) Animator {
+        return .{
+            .game_object = pptrField(v, "m_GameObject"),
+            .avatar = pptrField(v, "m_Avatar"),
+            .controller = pptrField(v, "m_Controller"),
+            .culling_mode = intField(v, "m_CullingMode") orelse 0,
+            .update_mode = intField(v, "m_UpdateMode") orelse 0,
+            .apply_root_motion = boolField(v, "m_ApplyRootMotion") orelse false,
+            .linear_velocity_blending = boolField(v, "m_LinearVelocityBlending") orelse false,
+            .stabilize_feet = boolField(v, "m_StabilizeFeet") orelse false,
+            .has_transform_hierarchy = boolField(v, "m_HasTransformHierarchy") orelse false,
+            .allow_constant_clip_sampling_optimization = boolField(v, "m_AllowConstantClipSamplingOptimization") orelse false,
+            .keep_animator_state_on_disable = boolField(v, "m_KeepAnimatorStateOnDisable") orelse false,
+            .write_default_values_on_disable = boolField(v, "m_WriteDefaultValuesOnDisable") orelse false,
+        };
+    }
+};
+
 pub const GameObject = struct {
     name: []const u8 = "",
     layer: i64 = 0,
@@ -2860,4 +2895,21 @@ test "monoScript fromValue reads the registry fields" {
     try std.testing.expectEqualStrings("Assembly-CSharp", ms.assembly);
     try std.testing.expectEqual(@as(i32, 1), ms.script.?.file_id);
     try std.testing.expectEqual(@as(i64, 10), ms.script.?.path_id);
+}
+
+test "animator fromValue reads the component refs and flags" {
+    const v = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_GameObject", .value = .{ .pptr = .{ .file_id = 0, .path_id = 786 } } },
+        .{ .name = "m_Avatar", .value = .{ .pptr = .{ .file_id = 0, .path_id = 581 } } },
+        .{ .name = "m_Controller", .value = .{ .pptr = .{ .file_id = 0, .path_id = 582 } } },
+        .{ .name = "m_UpdateMode", .value = .{ .int = 0 } },
+        .{ .name = "m_ApplyRootMotion", .value = .{ .bool = false } },
+        .{ .name = "m_StabilizeFeet", .value = .{ .bool = true } },
+    } };
+    const an = Animator.fromValue(v);
+    try std.testing.expectEqual(@as(i64, 786), an.game_object.?.path_id);
+    try std.testing.expectEqual(@as(i64, 581), an.avatar.?.path_id);
+    try std.testing.expectEqual(@as(i64, 582), an.controller.?.path_id);
+    try std.testing.expect(!an.apply_root_motion);
+    try std.testing.expect(an.stabilize_feet);
 }

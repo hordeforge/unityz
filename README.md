@@ -404,6 +404,11 @@ payload reference - the "what scripts does this game have" answer
 (7DTD: 6501 scripts across Assembly-CSharp, EOS, InControl, ...).
 UnityPy has no MonoScript export.
 
+Animators (class 95) export an `animator_<id>.json` with the component's
+controller and avatar (names resolved through the file's objects) plus
+the playback flags (update/culling mode, apply root motion, stabilize
+feet, ...). UnityPy has no export for it.
+
 Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
