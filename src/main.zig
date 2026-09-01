@@ -4437,6 +4437,58 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
         }
     }
+    // Raw container nodes (sidecar .resS/.resource payloads) are not
+    // objects, so the fingerprint pass above never sees them; an edit that
+    // patches a raw node (the node-path patch form) must still show up in
+    // the diff. Compare the non-serialized nodes of both files by path and
+    // content hash, folding them into the same changed/only counts.
+    var raw_a: std.ArrayList(Fp) = .empty;
+    var raw_b: std.ArrayList(Fp) = .empty;
+    try collectRawNodes(arena, bytes, &raw_a);
+    try collectRawNodes(arena, other_bytes, &raw_b);
+    for (raw_a.items) |fa| {
+        var matched = false;
+        for (raw_b.items) |fb| {
+            if (!std.mem.eql(u8, fa.node.?, fb.node.?)) continue;
+            matched = true;
+            if (fb.hash != fa.hash or fb.size != fa.size) {
+                changed += 1;
+                try changed_objs.append(std.heap.page_allocator, fa);
+                if (!json and reported < 10) {
+                    try stdout.print("  changed: node {s}\n", .{fa.node.?});
+                    reported += 1;
+                }
+            } else {
+                unchanged += 1;
+            }
+            break;
+        }
+        if (!matched) {
+            only_a += 1;
+            try only_a_objs.append(std.heap.page_allocator, fa);
+            if (!json and reported < 10) {
+                try stdout.print("  only in {s}: node {s}\n", .{ path, fa.node.? });
+                reported += 1;
+            }
+        }
+    }
+    for (raw_b.items) |fb| {
+        var matched = false;
+        for (raw_a.items) |fa| {
+            if (std.mem.eql(u8, fa.node.?, fb.node.?)) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            only_b += 1;
+            try only_b_objs.append(std.heap.page_allocator, fb);
+            if (!json and reported < 10) {
+                try stdout.print("  only in {s}: node {s}\n", .{ rest[0], fb.node.? });
+                reported += 1;
+            }
+        }
+    }
     var pixel_stats: std.ArrayList(PixelStat) = .empty;
     var audio_stats: std.ArrayList(AudioStat) = .empty;
     // in --json mode the pixel/audio text diagnostics go to stderr so
@@ -4596,6 +4648,44 @@ fn collectFingerprints(arena: std.mem.Allocator, bytes: []const u8, class_filter
                     .hash = std.hash.Wyhash.hash(0, data),
                     .size = @intCast(data.len),
                     .node = node,
+                });
+            }
+        },
+        else => {},
+    }
+}
+
+/// Appends one fingerprint per non-serialized container node (a .resS /
+/// .resource sidecar): the node path as the key, the content hash as the
+/// fingerprint. `diff` uses these so a raw-node edit (the node-path patch
+/// form) is reported instead of silently passing as "unchanged".
+fn collectRawNodes(arena: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(Fp)) !void {
+    switch (unityz.container.sniff(bytes).container) {
+        .bundle => {
+            const b = try unityz.bundle.parse(arena, bytes);
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container == .serialized) continue;
+                try out.append(arena, .{
+                    .path_id = 0,
+                    .class_id = -1,
+                    .hash = std.hash.Wyhash.hash(0, n.data),
+                    .size = @intCast(n.data.len),
+                    .node = n.path,
+                    .name = n.path,
+                });
+            }
+        },
+        .webfile => {
+            const wf = try unityz.webfile.parse(arena, bytes);
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container == .serialized) continue;
+                try out.append(arena, .{
+                    .path_id = 0,
+                    .class_id = -1,
+                    .hash = std.hash.Wyhash.hash(0, e.data),
+                    .size = @intCast(e.data.len),
+                    .node = e.path,
+                    .name = e.path,
                 });
             }
         },
