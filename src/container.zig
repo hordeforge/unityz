@@ -58,11 +58,10 @@ const max_metadata_size: u32 = 64 * 1024 * 1024;
 
 /// Identifies the container framing of `data` from its leading bytes.
 ///
-/// A recognized container is not a parseable one: legacy `UnityWeb`/
-/// `UnityRaw` bundles sniff as `.bundle` but `bundle.parse` rejects them,
-/// and a `serialized_version` outside `serialized.supportedVersion` is
-/// never reported (such files come back `.unknown`). Callers must still
-/// handle the per-format parser's errors.
+/// A recognized container is not always a parseable one: a
+/// `serialized_version` outside `serialized.supportedVersion` is never
+/// reported (such files come back `.unknown`). Callers must still handle
+/// the per-format parser's errors.
 ///
 /// Gzip magic is reported as `.webfile`, since `webfile.parse` is the
 /// only entry point that decompresses; the plaintext inside is
