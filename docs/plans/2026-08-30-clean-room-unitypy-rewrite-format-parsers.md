@@ -2001,3 +2001,22 @@ SerializedFile, version 4, endian little), verify (clean), and stats
 with legacy recursive type trees, which has no fixture or real sample
 to verify against. README + plan updated (the "skips version 4"
 claims removed).
+
+2026-09-01 (webfile rebuild keeps gzip wrapping): the webfile
+rebuilder always emitted a plain uncompressed WebFile, so editing a
+gzip-wrapped web bundle (the classic Unity web-player .unity3d, which
+our parser transparently decompresses - UnityPy does not) silently
+flattened it. rebuild now re-gzips the output when the source was
+gzip-wrapped (wf.owned set by the parser), using std's flate
+Compress with the gzip container (initCapacity-backed writer: flate
+asserts on an output buffer of <= 8 bytes). The plain path is
+untouched.
+
+Verified end to end on a synthesized gzip webfile wrapping
+the scene bundle's serialized node: info/verify parse it, an edit
+--patch --verify round-trips clean, the output keeps the gzip magic
+(45574 vs 230683 bytes plain) and re-parses; the plain webfile edit
+stays plain and UnityPy-readable (UnityPy rejects gzip webfiles
+entirely - a pre-existing gap on its side). Unit test: gzip-wrapped
+rebuild keeps the magic, compresses, and parses back with the edited
+entry; 320/320 tests.
