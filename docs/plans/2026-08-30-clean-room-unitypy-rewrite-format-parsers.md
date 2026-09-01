@@ -2404,3 +2404,12 @@ readObjectValue (injected trees for typeless files). Verified on the
 real 7DTD 3PWeaponController: all 7 pairs resolve their clip names
 (e.g. tacticalAssaultRifleReload -> tacticalAssaultRifleReload3P).
 UnityPy has no export for this class. 377/377 tests.
+
+2026-09-01 (mono script registry export): MonoScript (class 115)
+objects export a `script_<id>_<class>.json` per registry entry:
+assembly, namespace, class, and the m_Script payload reference (the
+MonoScript struct gained the script PPtr). This is the "what scripts
+does this game have" answer - verified on the real 7DTD registry:
+6501 scripts across Assembly-CSharp (3291), EOS (986), InControl (490),
+Unity.Microsoft.GDK (309), Assembly-CSharp-firstpass (157), and more.
+UnityPy has no MonoScript export. 378/378 tests.

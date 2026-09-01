@@ -395,6 +395,12 @@ clip override pairs, both clip names resolved through the file's
 objects (e.g. `tacticalAssaultRifleReload` -> `tacticalAssaultRifleReload3P`).
 UnityPy has no export for this class.
 
+MonoScripts (class 115) export a `script_<id>_<class>.json` per entry
+of the script registry: assembly, namespace, class, and the script
+payload reference - the "what scripts does this game have" answer
+(7DTD: 6501 scripts across Assembly-CSharp, EOS, InControl, ...).
+UnityPy has no MonoScript export.
+
 Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
