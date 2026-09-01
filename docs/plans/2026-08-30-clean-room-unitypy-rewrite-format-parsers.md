@@ -2068,3 +2068,10 @@ compressed formats (DXT1/3/5, BC4/5/7/6H, ETC1/ETC2 variants incl.
 3DS, and the four crunched formats through unitycrunch) at power-of-
 two sizes 1..64: every decode succeeds with exactly w*h*4 RGBA8 bytes
 or errors cleanly - never crashes. 342/342 tests.
+
+2026-09-01 (shader blob decoder mutation fuzz): the class-48 blob
+decoder gets the hostile-input treatment: 2000 seeded iterations
+mutating, truncating, and extending a valid synthetic blob - both the
+plain form and the LZ4-compressed form real shaders store - through
+verifyBlob: every pass verifies cleanly or fails with an error, never
+crashes. 343/343 tests.

@@ -1424,3 +1424,37 @@ pub fn verifyBlob(arena: std.mem.Allocator, v: value.Value) !bool {
     }
     return true;
 }
+
+test "shader blob decoder survives mutated payloads" {
+    // Hostile shader blobs (corrupt LZ4 data, garbage record tables) must
+    // never crash the decoder: mutations and truncations of a valid blob -
+    // both the plain and the LZ4-compressed form - must verify cleanly or
+    // fail with an error.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const plain = try buildSyntheticBlob(a, true);
+    const compressed = try lz4.compress(a, plain);
+
+    var prng = std.Random.DefaultPrng.init(0x5af0);
+    const rnd = prng.random();
+    var buf: [4096]u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 2000) : (iter += 1) {
+        const source: []const u8 = if (iter % 2 == 0) plain else compressed;
+        const mode = rnd.int(u8) % 3;
+        const blen = switch (mode) {
+            0 => rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len))), // truncate
+            1 => source.len, // mutate
+            else => @min(source.len + rnd.intRangeAtMost(u32, 1, 32), buf.len), // extend
+        };
+        @memcpy(buf[0..source.len], source);
+        if (mode == 1 and source.len > 0) {
+            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len - 1)));
+            buf[m] ^= @intCast(rnd.int(u8) | 1);
+        }
+        const shader = buildShaderValue(buf[0..blen]);
+        _ = verifyBlob(a, shader) catch continue;
+    }
+}
