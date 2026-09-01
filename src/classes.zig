@@ -1957,6 +1957,8 @@ pub const MonoScript = struct {
     class_name: []const u8 = "",
     namespace: []const u8 = "",
     assembly: []const u8 = "",
+    /// The script payload reference (m_Script): file id + path id.
+    script: ?value.PPtr = null,
 
     pub fn fromValue(v: value.Value) MonoScript {
         return .{
@@ -1964,6 +1966,7 @@ pub const MonoScript = struct {
             .class_name = stringField(v, "m_ClassName") orelse "",
             .namespace = stringField(v, "m_Namespace") orelse "",
             .assembly = stringField(v, "m_AssemblyName") orelse "",
+            .script = pptrField(v, "m_Script"),
         };
     }
 
@@ -2841,4 +2844,20 @@ test "animatorOverrideController fromValue reads the override pairs" {
     try std.testing.expectEqual(@as(usize, 1), oc.overrides.len);
     try std.testing.expectEqual(@as(i64, 77), oc.overrides[0].original.?.path_id);
     try std.testing.expectEqual(@as(i64, 67), oc.overrides[0].replacement.?.path_id);
+}
+
+test "monoScript fromValue reads the registry fields" {
+    const v = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "Item_Base" } },
+        .{ .name = "m_ClassName", .value = .{ .string = "Item_Base" } },
+        .{ .name = "m_Namespace", .value = .{ .string = "ItemClass" } },
+        .{ .name = "m_AssemblyName", .value = .{ .string = "Assembly-CSharp" } },
+        .{ .name = "m_Script", .value = .{ .pptr = .{ .file_id = 1, .path_id = 10 } } },
+    } };
+    const ms = MonoScript.fromValue(v);
+    try std.testing.expectEqualStrings("Item_Base", ms.name);
+    try std.testing.expectEqualStrings("ItemClass", ms.namespace);
+    try std.testing.expectEqualStrings("Assembly-CSharp", ms.assembly);
+    try std.testing.expectEqual(@as(i32, 1), ms.script.?.file_id);
+    try std.testing.expectEqual(@as(i64, 10), ms.script.?.path_id);
 }

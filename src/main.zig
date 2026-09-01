@@ -1555,6 +1555,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const oc = unityz.classes.AnimatorOverrideController.fromValue(v);
                 try writeOverrideFiles(arena, subdir, o.path_id, oc, &sf, basename(path), injected, manifest, &extracted, stdout);
             },
+            115 => { // MonoScript -> script registry JSON
+                const ms = unityz.classes.MonoScript.fromValue(v);
+                try writeScriptFiles(arena, subdir, o.path_id, ms, manifest, &extracted, stdout);
+            },
             43 => { // Mesh -> Wavefront OBJ
                 const mesh = unityz.classes.Mesh.fromValue(v);
                 const obj = writeMeshObj(arena, &sf, v, &mesh) catch |err| {
@@ -2252,6 +2256,47 @@ fn writeOverrideFiles(
     try stdout.print("extracted {s} ({d} override pairs)\n", .{ name, oc.overrides.len });
     extracted.* += 1;
     try manifest.append(arena, .{ .path_id = path_id, .class_id = 221, .name = oc.name, .subdir = subdir });
+}
+
+/// MonoScript export: the script registry entry (assembly, namespace,
+/// class) plus the script payload reference. UnityPy has no MonoScript
+/// export.
+fn writeScriptFiles(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    ms: unityz.classes.MonoScript,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: *Io.Writer,
+) !void {
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
+    try writeJsonString(w, std.mem.trimEnd(u8, ms.name, "\x00"));
+    try w.writeAll(",\"class\":");
+    try writeJsonString(w, std.mem.trimEnd(u8, ms.class_name, "\x00"));
+    try w.writeAll(",\"namespace\":");
+    try writeJsonString(w, std.mem.trimEnd(u8, ms.namespace, "\x00"));
+    try w.writeAll(",\"assembly\":");
+    try writeJsonString(w, std.mem.trimEnd(u8, ms.assembly, "\x00"));
+    if (ms.script) |sp| {
+        try w.print(",\"script\":{{\"file_id\":{d},\"path_id\":{d}}}", .{ sp.file_id, sp.path_id });
+    }
+    try w.writeByte('}');
+    var list = aw.toArrayList();
+    const meta = try list.toOwnedSlice(arena);
+    const base_name = std.mem.trimEnd(u8, ms.class_name, "\x00");
+    var name_buf: [192]u8 = undefined;
+    const name = sanitizeComponent(if (base_name.len != 0)
+        try std.fmt.bufPrint(&name_buf, "script_{d}_{s}.json", .{ path_id, base_name })
+    else
+        try std.fmt.bufPrint(&name_buf, "script_{d}.json", .{path_id}));
+    try extractFile(subdir, name, meta);
+    try stdout.print("extracted {s} ({s})\n", .{ name, std.mem.trimEnd(u8, ms.namespace, "\x00") });
+    extracted.* += 1;
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = 115, .name = ms.name, .subdir = subdir });
 }
 
 /// Writes an AnimationClip PPtr as {"path_id": N, "name": "..."} with the
