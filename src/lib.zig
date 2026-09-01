@@ -84,6 +84,7 @@ pub const object_writer = @import("object_writer.zig");
 
 /// SerializedFile rewrite (edited objects written back).
 pub const serialized_writer = @import("serialized_writer.zig");
+pub const dotnet = @import("dotnet.zig");
 
 /// File extensions of Unity asset files this project intends to support.
 /// Note that some serialized files (e.g. `globalgamemanagers`, `level0`)

@@ -66,6 +66,11 @@ does not offer:
 - `hierarchy` - the GameObject/Transform tree of a scene (root transforms
   first, names, component classes, local positions, with bones of any
   SkinnedMeshRenderer marked; `--json` for nested objects)
+- `managed` - read a Mono build's managed assemblies (`Data/Managed`) and
+  list every MonoBehaviour script class with its serialized field layout:
+  the layout Unity's serializer uses for those objects, read straight from
+  the .NET metadata with no runtime (UnityPy needs an external CLR;
+  `--json` for machine-readable)
 
 `diff` gains `--pixels`: every matched Texture2D and Sprite is decoded
 from both files (sprites rendered through their crop rect, packed
@@ -92,21 +97,35 @@ bundles/webfiles each node's objects land in its own `objects/<node>/`
 subdirectory so identical path ids never collide), and
 auto-creates `--outdir <dir>`.
 
+`extract --summary` is a dry run: it decodes everything and prints a
+per-class count/byte report (JSON with `--json`) without writing a single
+file. MonoScript objects consolidate into one `scripts.json` (name, class,
+namespace, assembly, properties hash, and the script payload reference)
+instead of one file per script (7DTD alone ships 6,500).
+
+Shader objects export a readable ShaderLab reconstruction
+(`shader_<id>_<name>.shader`: properties with defaults, fallback, custom
+editor, keywords, subshader tags/LOD, pass names, and a per-stage count of
+the compiled GPU programs; the original HLSL is compiled away).
+
 Mono builds strip the class type trees from serialized files, leaving
-typeless objects undecodable. `--trees <file.json>` supplies them: a
-JSON table in the shape `TypeTreeGeneratorAPI.get_nodes_as_json()`
-emits (per-class flat node lists plus `__class_ids__` for built-in
-classes, `__monoscripts__` for script resolution, and
-`__script_trees__` for the MonoBehaviour script trees, keyed by
-namespace-qualified name so two assemblies sharing a plain class name
-do not collide). MonoBehaviours resolve their script via `m_Script`
-against the mono-script table; other classes resolve by class name.
-`extract`, `show`, and `verify` decode with the injected trees, and
-`verify` round-trips them byte-exactly (the Raft 2021.3.45f2 data
-files: 38,212/38,213 objects clean; the two exceptions use custom
-serialization). A missing or malformed trees file prints a diagnostic
-and continues without the trees. Running against a typeless file
-without `--trees` prints how many objects were skipped and why.
+typeless objects undecodable. `--trees <file.json>` supplies them:
+`extract`, `show`, `verify`, `find`, and `edit` all decode with the
+injected trees, and `verify` round-trips them byte-exactly (the Raft
+2021.3.45f2 data files: 38,212/38,213 objects clean; the two exceptions
+use custom serialization).
+
+The JSON table has the shape `TypeTreeGeneratorAPI.get_nodes_as_json()`
+emits: per-class flat node lists plus `__class_ids__` (built-in class
+names), `__monoscripts__` (script resolution), and `__script_trees__`
+(the MonoBehaviour script trees, keyed by namespace-qualified name so
+two assemblies sharing a plain class name do not collide).
+MonoBehaviours resolve their script via `m_Script` against the
+mono-script table; other classes resolve by class name.
+
+A missing or malformed trees file prints a diagnostic and continues
+without the trees; running against a typeless file without `--trees`
+prints how many objects were skipped and why.
 `hierarchy`, `find`, `skin`, and `edit` accept the same `--trees`
 flag, so scene trees, name searches, shader skinning analysis, and
 field edits all work for Mono games too (a typeless file's object can
@@ -221,9 +240,9 @@ a script needs is plain text and a non-zero exit code on failure.
   for Unity's asset formats, and
 - a **CLI** (`src/main.zig`, `unityz`) with `info`, `extract`, `edit`,
   `verify`, `stats`, `find`, `show`, `hash`, `diff`, `skin`, `shader`,
-  and `hierarchy` subcommands for inspecting, pulling out, modifying,
-  checking, and comparing assets. `unityz --help` is the authoritative
-  flag reference.
+  `hierarchy`, and `managed` subcommands for inspecting, pulling out,
+  modifying, checking, and comparing assets. `unityz --help` is the
+  authoritative flag reference.
 
 Targeted formats: SerializedFile (`.assets`), asset bundles (`.unity3d` /
 `.bundle`), and `.resources` / `.resS` sidecar files.

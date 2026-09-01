@@ -135,6 +135,7 @@ pub fn build(b: *std.Build) void {
         "src/vorbis.zig",
         "src/object_writer.zig",
         "src/serialized_writer.zig",
+        "src/dotnet.zig",
     }) |module_path| {
         const module = b.createModule(.{
             .root_source_file = b.path(module_path),
