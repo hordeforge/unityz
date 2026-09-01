@@ -242,17 +242,17 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
     var r = streams.Reader.init(data);
 
     const signature = try r.readStringToNull();
-    if (!std.mem.eql(u8, signature, unityfs_signature)) {
-        if (std.mem.eql(u8, signature, unityweb_signature) or std.mem.eql(u8, signature, unityraw_signature))
-            return parseLegacy(allocator, data, signature);
-        return error.BadSignature;
-    }
-
     // UnityFS container fields are big-endian (the serialized files inside
     // carry their own endianness byte).
     r.endian = .big;
-
     const version = try r.readInt(u32);
+    const legacy = std.mem.eql(u8, signature, unityweb_signature) or std.mem.eql(u8, signature, unityraw_signature);
+    if (legacy and version < 6) return parseLegacy(allocator, data, signature);
+    if (!legacy and !std.mem.eql(u8, signature, unityfs_signature)) return error.BadSignature;
+    // A version-6 legacy bundle uses the UnityFS-style layout with one
+    // extra byte after the flags (per UnityPy's read_fs); the rest of the
+    // parse below is shared.
+    const legacy_v6 = legacy;
     if (version < 6) return error.UnsupportedVersion;
 
     var unity_version: []const u8 = "";
@@ -267,6 +267,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
     const compressed_block_size = try r.readInt(u32);
     const uncompressed_block_size = try r.readInt(u32);
     const flags = try r.readInt(u32);
+    if (legacy_v6) _ = try r.readByte();
 
     // Format version 7+ pads the header to a 16-byte boundary.
     if (version >= 7) try alignTo(&r, 16);
@@ -911,6 +912,58 @@ test "parse a legacy UnityRaw bundle" {
     try std.testing.expectEqualStrings(payload, b.nodes[0].data);
 }
 
+test "parse a version-6 legacy UnityWeb bundle (UnityFS-style layout)" {
+    const a = std.testing.allocator;
+    const payload = "CAB-abcdefgh";
+    // v6 legacy bundles switch to the UnityFS-style layout: header fields
+    // (size, compressed, uncompressed, flags) plus one extra byte, then a
+    // blocks-info block (hash, block table, node table) followed by the
+    // node data. Per UnityPy's read_fs.
+    var w = streams.Writer.init(a);
+    defer w.deinit();
+    w.endian = .big;
+    try w.writeStringToNull(unityweb_signature);
+    try w.writeInt(u32, 6);
+    try w.writeStringToNull("5.x.x");
+    try w.writeStringToNull("5.6.7f1");
+    try w.writeInt(i64, 0); // size placeholder
+    try w.writeInt(u32, 0); // compressed (blocks-info size)
+    try w.writeInt(u32, 0); // uncompressed
+    try w.writeInt(u32, 0x40); // dataflags: combined
+    try w.writeByte(0); // extra byte
+
+    var info = streams.Writer.init(a);
+    defer info.deinit();
+    info.endian = .big;
+    try info.writeBytes(&[_]u8{0} ** 16); // hash
+    try info.writeInt(u32, 1); // block count
+    try info.writeInt(u32, @intCast(payload.len)); // block uncompressed
+    try info.writeInt(u32, @intCast(payload.len)); // block compressed
+    try info.writeInt(u16, 0); // block flags
+    try info.writeInt(u32, 1); // node count
+    try info.writeInt(i64, 0); // offset
+    try info.writeInt(i64, @intCast(payload.len)); // size
+    try info.writeInt(u32, 0); // flags
+    try info.writeStringToNull("CAB-abc");
+    const info_len = info.getWritten().len;
+
+    const total = w.getWritten().len + info_len + payload.len;
+    // patch size/compressed/uncompressed
+    const size_off = 9 + 4 + 6 + 8; // sig + version + "5.x.x" + "5.6.7f1"
+    std.mem.writeInt(i64, w.buf.items[size_off..][0..8], @intCast(total), .big);
+    std.mem.writeInt(u32, w.buf.items[size_off + 8 ..][0..4], @intCast(info_len), .big);
+    std.mem.writeInt(u32, w.buf.items[size_off + 12 ..][0..4], @intCast(info_len), .big);
+    try w.writeBytes(info.getWritten());
+    try w.writeBytes(payload);
+
+    var b = try parse(a, w.getWritten());
+    defer b.deinit(a);
+    try std.testing.expectEqual(@as(u32, 6), b.version);
+    try std.testing.expectEqual(@as(usize, 1), b.nodes.len);
+    try std.testing.expectEqualStrings("CAB-abc", b.nodes[0].path);
+    try std.testing.expectEqualStrings(payload, b.nodes[0].data);
+}
+
 test "parse a legacy UnityWeb bundle (LZMA directory block)" {
     const a = std.testing.allocator;
     // The directory block is LZMA-compressed (python FORMAT_RAW LZMA1,
@@ -960,10 +1013,10 @@ test "parse a legacy UnityWeb bundle (LZMA directory block)" {
 
 test "parse rejects unsupported legacy versions" {
     const a = std.testing.allocator;
-    // version 0 is out of the supported v2-5 range
+    // version 0 is out of the supported range
     try std.testing.expectError(error.UnsupportedVersion, parse(a, "UnityWeb\x00\x00\x00\x00\x00"));
-    // v6 legacy bundles switch to the UnityFS-style layout: unsupported here
-    try std.testing.expectError(error.UnsupportedVersion, parse(a, "UnityRaw\x00\x06\x00\x00\x00"));
+    // v1 is out of the v2-5 legacy range (big-endian version field)
+    try std.testing.expectError(error.UnsupportedVersion, parse(a, "UnityRaw\x00\x00\x00\x00\x01"));
 }
 
 test "parse rejects truncated file" {

@@ -2184,3 +2184,14 @@ shader/diff incl. legacy diff; --json modes): 43/43 pass. The full
 surface - containers (UnityFS, legacy UnityWeb/UnityRaw, WebFile,
 gzip webfiles, serialized v2-22), edit/verify/diff features, and all
 extract paths - is verified clean at the end of the #47-#79 run.
+
+2026-09-01 (legacy v6 bundles): the last legacy variant closes -
+version-6 UnityWeb/UnityRaw bundles use the UnityFS-style layout (per
+UnityPy's read_fs): the shared header fields plus one extra byte after
+the flags, then the blocks-info block. bundle.parse now routes legacy
+v6 through the UnityFS path (the only difference is that byte), so the
+whole container surface is covered. Cross-validated on a synthetic
+UnityWeb v6 wrapping the real scene serialized node: both tools read
+all 73 objects, verify clean. Unit tests cover the v6 parse; the
+rejection test now covers v0/v1 (v6 is no longer rejected). 358/358
+tests.
