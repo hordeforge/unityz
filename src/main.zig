@@ -3092,7 +3092,11 @@ fn roundHalfEven(x: f64) f64 {
     return r;
 }
 
-fn writeObjFloat(w: *unityz.streams.Writer, v: f64) !void {
+fn writeObjFloat(w: *unityz.streams.Writer, v: f64) error{ NonFinite, OutOfMemory }!void {
+    // Non-finite values (Inf/NaN bits in corrupt mesh data) would panic in
+    // @intFromFloat below; report the mesh unsupported instead, which the
+    // caller already handles as a conversion failure.
+    if (!std.math.isFinite(v)) return error.NonFinite;
     if (v == 0) {
         // UnityPy prints the negated zero as "-0"; match it.
         const sign: []const u8 = if (std.math.signbit(v)) "-0" else "0";

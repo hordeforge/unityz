@@ -782,6 +782,11 @@ fn bc6hSignExtend(value: u32, num_bits: u8) u32 {
 
 fn bc6hHalfToU8(h: u16) u8 {
     const f: f32 = @floatCast(@as(f16, @bitCast(h)));
+    // Endpoint bit patterns can decode to NaN/Inf half-floats; take the
+    // same non-finite branches as floatToByte/astcF32ToU8 instead of
+    // panicking in @intFromFloat.
+    if (!(f > 0)) return 0;
+    if (f >= 1) return 255;
     return @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(f * 255.0))), 0, 255));
 }
 
