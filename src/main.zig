@@ -30,7 +30,9 @@ const usage =
     \\                  png); --outdir <dir> to write into, created if
     \\                  missing; --trees <file.json> supplies the class
     \\                  trees Mono builds omit, making typeless files
-    \\                  decodable)
+    \\                  decodable; --summary dry-run per-class report
+    \\                  without writing anything; MonoScripts consolidate
+    \\                  into one scripts.json)
     \\  edit <path>     Apply edits to a Unity asset file
     \\                 (bundles: finds and edits the embedded node, then
     \\                  rebuilds the bundle)
@@ -80,12 +82,21 @@ const usage =
     \\                 (root transforms first, names, component classes,
     \\                  local positions, bones of any SkinnedMeshRenderer
     \\                  marked (bone); --json for nested objects)
+    \\  managed <dir>  Read a game's managed assemblies (the Data/Managed
+    \\                 folder of a Mono build) and list every MonoBehaviour
+    \\                 script class with its serialized field layout — the
+    \\                 layout Unity's serializer uses for those objects,
+    \\                 which no other extractor reads without loading a
+    \\                 whole .NET runtime (--json for machine-readable;
+    \\                 also accepts a single .dll path)
     \\
     \\Edit usage: unityz edit <file> <path_id> <field> <json-value> [<field> <json-value> ...]
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
     \\  <path_id> may be node:path-id to target a specific container entry
     \\  (add --out <file> to write elsewhere instead of in place;
     \\   --verify round-trip-checks the result and refuses to write on failure;
+    \\   --trees <file.json> supplies the class trees typeless Mono files
+    \\   omit, making them editable in both forms;
     \\   a base64 string value patches a byte-array field, e.g.
     \\   edit f.unity3d CAB-..:44 m_IndexBuffer '"AwD/AA=="' replaces raw
     \\   bytes; inside a replaced subtree the same rule applies, so an
@@ -165,7 +176,17 @@ pub fn main(init: std.process.Init) !void {
     };
     // `diff` consumes directories itself (tree comparison); every other
     // command batch-expands a directory argument over its files.
-    if (stat.kind == .directory and command == .diff) {
+    if (stat.kind == .directory and (command == .diff or command == .managed)) {
+        if (command == .managed) {
+            cmdManaged(path, rest, &.{}, stdout) catch |err| {
+                if (err == error.WriteFailed) std.process.exit(141);
+                try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
+                try stderr.flush();
+                std.process.exit(1);
+            };
+            finalFlush(stdout);
+            return;
+        }
         cmdDiff(path, rest, &.{}, stdout) catch |err| {
             if (err == error.WriteFailed) std.process.exit(141);
             try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
@@ -228,7 +249,7 @@ pub fn main(init: std.process.Init) !void {
     if (verify_failed_flag) std.process.exit(1);
 }
 
-const Command = enum { info, extract, edit, verify, stats, find, fsb, show, diff, hash, skin, shader, hierarchy };
+const Command = enum { info, extract, edit, verify, stats, find, fsb, show, diff, hash, skin, shader, hierarchy, managed };
 
 fn parseCommand(arg: []const u8) ?Command {
     inline for (std.meta.fields(Command)) |field| {
@@ -269,6 +290,7 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
         .hash => return cmdHash(path, rest, bytes, stdout),
         .skin => return cmdSkin(path, rest, bytes, stdout),
         .hierarchy => return cmdHierarchy(path, rest, bytes, stdout),
+        .managed => return cmdManaged(path, rest, bytes, stdout),
     }
 }
 
@@ -382,6 +404,20 @@ fn parseInjectedTrees(arena: std.mem.Allocator, path: []const u8, stdout: *Io.Wr
             return null;
         },
     };
+    const out = try buildInjectedTrees(arena, fields, stdout);
+    if (out.trees.count() == 0 and out.script_trees.count() == 0) {
+        try stdout.print("unityz: trees file has no class trees\n", .{});
+        return null;
+    }
+    const tp = try arena.create(InjectedTrees);
+    tp.* = out;
+    return tp;
+}
+
+/// Turns the `--trees` JSON fields into an InjectedTrees table: built-in
+/// class trees by name, MonoBehaviour script trees (`__script_trees__`), and
+/// the class-name / mono-script lookup maps. Shared with the test suite.
+fn buildInjectedTrees(arena: std.mem.Allocator, fields: []const unityz.value.Field, stdout: *Io.Writer) !InjectedTrees {
     var out: InjectedTrees = .{};
     for (fields) |f| {
         if (std.mem.eql(u8, f.name, "__meta__")) continue;
@@ -441,13 +477,7 @@ fn parseInjectedTrees(arena: std.mem.Allocator, path: []const u8, stdout: *Io.Wr
             }
         }
     }
-    if (out.trees.count() == 0 and out.script_trees.count() == 0) {
-        try stdout.print("unityz: trees file has no class trees\n", .{});
-        return null;
-    }
-    const tp = try arena.create(InjectedTrees);
-    tp.* = out;
-    return tp;
+    return out;
 }
 
 /// Parses one flat wire-style node list (`{m_Type,m_Name,m_Level,m_MetaFlag}
@@ -548,6 +578,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
     var raw = false;
     var recursive = false;
     var json_mode = false;
+    var summary_mode = false;
     var class_filter: ?i32 = null;
     var path_filter: ?Selector = null;
     var name_filter: ?[]const u8 = null;
@@ -562,6 +593,8 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             recursive = true;
         } else if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
+        } else if (std.mem.eql(u8, arg, "--summary")) {
+            summary_mode = true;
         } else if (std.mem.eql(u8, arg, "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
                 try stdout.print("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
@@ -598,6 +631,10 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
         try stdout.print("unityz: --raw and --json are mutually exclusive\n", .{});
         return;
     }
+    if (raw and summary_mode) {
+        try stdout.print("unityz: --raw and --summary are mutually exclusive\n", .{});
+        return;
+    }
     if (extract_outdir) |d| {
         const io = io_global.io;
         ensureDirPath(io, d) catch |err| {
@@ -612,6 +649,9 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             defer arena_state.deinit();
             const arena = arena_state.allocator();
             var manifest: std.ArrayList(ManifestEntry) = .empty;
+            var summary: ExtractSummary = .{};
+            var scripts: std.ArrayList(ScriptEntry) = .empty;
+            const summary_ptr: ?*ExtractSummary = if (summary_mode) &summary else null;
             var sidecars: std.ArrayList(Sidecar) = .empty;
             const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
@@ -633,19 +673,29 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 // one component so a crafted path cannot steer the write
                 // outside the extract directory.
                 const base_name = sanitizeComponent(try arena.dupe(u8, basename(e.path)));
-                try writeFileToCwd(base_name, e.data);
-                try stdout.print("extracted {s} ({d} bytes)\n", .{ base_name, e.data.len });
-                if (recursive and unityz.container.sniff(e.data).container == .serialized) {
-                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, injected, stdout);
+                if (!summary_mode) {
+                    try writeFileToCwd(base_name, e.data);
+                    try stdout.print("extracted {s} ({d} bytes)\n", .{ base_name, e.data.len });
+                }
+                if ((recursive or summary_mode) and unityz.container.sniff(e.data).container == .serialized) {
+                    try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, injected, summary_ptr, &scripts, stdout);
                 }
             }
-            if (json_mode) try writeManifest(arena, manifest.items, stdout);
+            if (summary_mode) {
+                try printExtractSummary(arena, &summary, json_mode, stdout);
+            } else {
+                if (scripts.items.len != 0) try writeScriptsJson(arena, scripts.items, stdout);
+                if (json_mode) try writeManifest(arena, manifest.items, stdout);
+            }
         },
         .bundle => {
             var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena_state.deinit();
             const arena = arena_state.allocator();
             var manifest: std.ArrayList(ManifestEntry) = .empty;
+            var summary: ExtractSummary = .{};
+            var scripts: std.ArrayList(ScriptEntry) = .empty;
+            const summary_ptr: ?*ExtractSummary = if (summary_mode) &summary else null;
             var sidecars: std.ArrayList(Sidecar) = .empty;
             const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
@@ -667,13 +717,20 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 // one component so a crafted path cannot steer the write
                 // outside the extract directory.
                 const base_name = sanitizeComponent(try arena.dupe(u8, basename(n.path)));
-                try writeFileToCwd(base_name, n.data);
-                try stdout.print("extracted {s} ({d} bytes)\n", .{ base_name, n.data.len });
-                if (recursive and unityz.container.sniff(n.data).container == .serialized) {
-                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, injected, stdout);
+                if (!summary_mode) {
+                    try writeFileToCwd(base_name, n.data);
+                    try stdout.print("extracted {s} ({d} bytes)\n", .{ base_name, n.data.len });
+                }
+                if ((recursive or summary_mode) and unityz.container.sniff(n.data).container == .serialized) {
+                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, injected, summary_ptr, &scripts, stdout);
                 }
             }
-            if (json_mode) try writeManifest(arena, manifest.items, stdout);
+            if (summary_mode) {
+                try printExtractSummary(arena, &summary, json_mode, stdout);
+            } else {
+                if (scripts.items.len != 0) try writeScriptsJson(arena, scripts.items, stdout);
+                if (json_mode) try writeManifest(arena, manifest.items, stdout);
+            }
         },
         .serialized => {
             if (path_filter) |pf| {
@@ -686,12 +743,20 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             defer arena_state.deinit();
             const arena = arena_state.allocator();
             var manifest: std.ArrayList(ManifestEntry) = .empty;
+            var summary: ExtractSummary = .{};
+            var scripts: std.ArrayList(ScriptEntry) = .empty;
+            const summary_ptr: ?*ExtractSummary = if (summary_mode) &summary else null;
             const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
             // Streamed textures/audio point at sibling `.resS` files; load
             // them so those references resolve for a bare serialized file.
             const sidecars = try diskSidecars(arena, path);
-            try extractSerialized(arena, path, bytes, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, null, sidecars, &manifest, format, name_filter, injected, stdout);
-            if (json_mode) try writeManifest(arena, manifest.items, stdout);
+            try extractSerialized(arena, path, bytes, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, null, sidecars, &manifest, format, name_filter, injected, summary_ptr, &scripts, stdout);
+            if (summary_mode) {
+                try printExtractSummary(arena, &summary, json_mode, stdout);
+            } else {
+                if (scripts.items.len != 0) try writeScriptsJson(arena, scripts.items, stdout);
+                if (json_mode) try writeManifest(arena, manifest.items, stdout);
+            }
         },
         else => {
             try stdout.print("unityz: {s}: nothing to extract from this file type\n", .{path});
@@ -707,6 +772,154 @@ const Sidecar = struct { path: []const u8, data: []const u8 };
 /// the object came from (objects are written into a per-node subdirectory
 /// so identical path ids in different nodes do not collide).
 const ManifestEntry = struct { path_id: i64, class_id: i32, name: []const u8, subdir: ?[]const u8 = null };
+
+/// One consolidated MonoScript registry entry (`scripts.json`): the script
+/// metadata plus the payload reference. Replaces one file per script, which
+/// a large game (7DTD alone ships 6,500) turns into thousands of tiny JSON
+/// files.
+const ScriptEntry = struct {
+    path_id: i64,
+    name: []const u8,
+    execution_order: i64,
+    properties_hash: []const u8, // 16 bytes
+    class_name: []const u8,
+    namespace: []const u8,
+    assembly: []const u8,
+    script: ?unityz.value.PPtr,
+    node: ?[]const u8,
+};
+
+/// Per-class tally for `extract --summary`, a dry run: what would be
+/// extracted per class, without writing anything.
+const SummaryClassStat = struct { count: usize = 0, bytes: usize = 0 };
+const ExtractSummary = struct {
+    classes: std.AutoHashMapUnmanaged(i32, SummaryClassStat) = .empty,
+    skipped: usize = 0,
+    typeless: usize = 0,
+};
+
+/// Writes the consolidated script registry as one `scripts.json` array.
+fn writeScriptsJson(arena: std.mem.Allocator, entries: []const ScriptEntry, stdout: *Io.Writer) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    const w = &aw.writer;
+    try w.writeAll("[");
+    for (entries, 0..) |e, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("{{\"path_id\":{d},\"name\":", .{e.path_id});
+        try writeJsonString(w, std.mem.trimEnd(u8, e.name, "\x00"));
+        try w.print(",\"execution_order\":{d},\"properties_hash\":\"", .{e.execution_order});
+        for (e.properties_hash) |b| try w.print("{x:0>2}", .{b});
+        try w.writeAll("\",\"class\":");
+        try writeJsonString(w, std.mem.trimEnd(u8, e.class_name, "\x00"));
+        try w.writeAll(",\"namespace\":");
+        try writeJsonString(w, std.mem.trimEnd(u8, e.namespace, "\x00"));
+        try w.writeAll(",\"assembly\":");
+        try writeJsonString(w, std.mem.trimEnd(u8, e.assembly, "\x00"));
+        if (e.script) |sp| {
+            try w.print(",\"script\":{{\"file_id\":{d},\"path_id\":{d}}}", .{ sp.file_id, sp.path_id });
+        }
+        if (e.node) |n| {
+            try w.writeAll(",\"node\":");
+            try writeJsonString(w, n);
+        }
+        try w.writeByte('}');
+    }
+    try w.writeAll("]\n");
+    const out = aw.toArrayList();
+    try writeFileToCwd("scripts.json", out.items);
+    try stdout.print("extracted scripts.json ({d} script(s))\n", .{entries.len});
+}
+
+/// Appends one consolidated script registry entry from a decoded MonoScript
+/// value. The properties hash (Hash128, `bytes[0..15]` children in the value
+/// tree) is flattened to raw bytes; `writeScriptsJson` hex-encodes it.
+fn appendScriptEntry(arena: std.mem.Allocator, scripts: *std.ArrayList(ScriptEntry), v: unityz.value.Value, path_id: i64, subdir: ?[]const u8) !void {
+    const ms = unityz.classes.MonoScript.fromValue(v);
+    var hash_bytes: [16]u8 = [_]u8{0} ** 16;
+    var hash_len: usize = 0;
+    if (unityz.classes.fieldOf(v, "m_PropertiesHash")) |hv| {
+        if (hv == .obj) {
+            var i: usize = 0;
+            while (i < 16 and i < hv.obj.len) : (i += 1) {
+                hash_bytes[i] = @intCast((hv.obj[i].value.asInt() orelse 0) & 0xff);
+            }
+            hash_len = i;
+        }
+    }
+    try scripts.append(arena, .{
+        .path_id = path_id,
+        .name = ms.name,
+        .execution_order = unityz.classes.intField(v, "m_ExecutionOrder") orelse 0,
+        .properties_hash = try arena.dupe(u8, hash_bytes[0..hash_len]),
+        .class_name = ms.class_name,
+        .namespace = ms.namespace,
+        .assembly = ms.assembly,
+        .script = ms.script,
+        .node = subdir,
+    });
+}
+
+/// Adds one decodable object to a `--summary` dry-run tally.
+fn tallySummary(arena: std.mem.Allocator, s: *ExtractSummary, class_id: i32, bytes: []const u8) !void {
+    const gop = try s.classes.getOrPut(arena, class_id);
+    if (!gop.found_existing) gop.value_ptr.* = .{};
+    gop.value_ptr.count += 1;
+    gop.value_ptr.bytes += bytes.len;
+}
+
+/// Prints an `extract --summary` dry-run report: one aligned line per class
+/// (objects + bytes, largest first), then totals. With `--json` the same
+/// data is emitted machine-readable instead.
+fn printExtractSummary(arena: std.mem.Allocator, s: *const ExtractSummary, json: bool, stdout: *Io.Writer) !void {
+    if (json) {
+        try stdout.writeAll("{\"objects\":");
+        var total: usize = 0;
+        var bytes_total: usize = 0;
+        var it = s.classes.iterator();
+        while (it.next()) |e| {
+            total += e.value_ptr.count;
+            bytes_total += e.value_ptr.bytes;
+        }
+        try stdout.print("{d},\"bytes\":{d},\"classes\":{{", .{ total, bytes_total });
+        var first = true;
+        var it2 = s.classes.iterator();
+        while (it2.next()) |e| {
+            if (!first) try stdout.writeByte(',');
+            first = false;
+            try stdout.print("\"{d}\":{{\"count\":{d},\"bytes\":{d}}}", .{ e.key_ptr.*, e.value_ptr.count, e.value_ptr.bytes });
+        }
+        try stdout.print("}}}}\n", .{});
+        return;
+    }
+    const Entry = struct { class_id: i32, count: usize, bytes: usize };
+    var list: std.ArrayList(Entry) = .empty;
+    var total: usize = 0;
+    var bytes_total: usize = 0;
+    var it = s.classes.iterator();
+    while (it.next()) |e| {
+        total += e.value_ptr.count;
+        bytes_total += e.value_ptr.bytes;
+        try list.append(arena, .{ .class_id = e.key_ptr.*, .count = e.value_ptr.count, .bytes = e.value_ptr.bytes });
+    }
+    std.sort.insertion(Entry, list.items, {}, struct {
+        fn lessThan(_: void, a: Entry, b: Entry) bool {
+            if (a.bytes != b.bytes) return a.bytes > b.bytes;
+            return a.class_id < b.class_id;
+        }
+    }.lessThan);
+    try stdout.print("summary: {d} object(s), {d} byte(s)\n", .{ total, bytes_total });
+    for (list.items) |e| {
+        const name = unityz.classes.className(e.class_id) orelse "Unknown";
+        try stdout.print("  {d}  {s} (class {d})  {d} byte(s)\n", .{ e.count, name, e.class_id, e.bytes });
+    }
+    if (s.typeless != 0) {
+        try stdout.print("  {d} object(s) skipped: no type trees (pass --trees <file.json>)\n", .{s.typeless});
+    }
+    if (s.skipped != 0) {
+        try stdout.print("  {d} object(s) skipped: decode failed\n", .{s.skipped});
+    }
+}
 
 /// Writes `manifest.json` next to the exported value trees, listing every
 /// object: path id, class, the file it was written to, and its m_Name.
@@ -1217,7 +1430,7 @@ fn computeShaderJson(arena: std.mem.Allocator, path_id: i64, cs: unityz.classes.
     return try list.toOwnedSlice(arena);
 }
 
-fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, name_filter: ?[]const u8, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
+fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, name_filter: ?[]const u8, injected: ?*const InjectedTrees, summary: ?*ExtractSummary, scripts: *std.ArrayList(ScriptEntry), stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("unityz: {s}: serialized file parse failed: {s}\n", .{ path, @errorName(err) });
         return;
@@ -1261,22 +1474,32 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 if (o.class_id == 128) {
                     const f = unityz.classes.Font.fromRaw(data, sf.endian, sf.unity_version) catch |err| {
                         try stdout.print("  object {d} (class 128 Font): decode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                        if (summary) |s| s.skipped += 1;
                         skipped += 1;
                         continue;
                     };
                     if (name_filter) |nf| {
                         if (std.ascii.indexOfIgnoreCase(f.name, nf) == null) continue;
                     }
+                    if (summary) |s| {
+                        try tallySummary(arena, s, 128, data);
+                        continue;
+                    }
                     try writeFontFiles(arena, subdir, o.path_id, o.class_id, f, manifest, &extracted, stdout);
                     continue;
                 }
                 const cs = unityz.classes.ComputeShader.fromRaw(data, sf.endian, sf.unity_version) catch |err| {
                     try stdout.print("  object {d} (class 72 ComputeShader): decode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                    if (summary) |s| s.skipped += 1;
                     skipped += 1;
                     continue;
                 };
                 if (name_filter) |nf| {
                     if (std.ascii.indexOfIgnoreCase(cs.name, nf) == null) continue;
+                }
+                if (summary) |s| {
+                    try tallySummary(arena, s, 72, data);
+                    continue;
                 }
                 try writeComputeShaderFiles(arena, subdir, o.path_id, cs, manifest, &extracted, stdout);
                 continue;
@@ -1287,10 +1510,12 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 if (injectedTreeFor(arena, inj, &sf, basename(path), o.class_id, data)) |it| {
                     tree = it.*;
                 } else {
+                    if (summary) |s| s.typeless += 1;
                     typeless_skipped += 1;
                     continue;
                 }
             } else {
+                if (summary) |s| s.typeless += 1;
                 typeless_skipped += 1;
                 continue;
             }
@@ -1300,6 +1525,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
         r.endian = sf.endian;
         const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch |err| {
             try stdout.print("  object {d} (class {d}): decode failed: {s}\n", .{ o.path_id, o.class_id, @errorName(err) });
+            if (summary) |s| s.skipped += 1;
             skipped += 1;
             continue;
         };
@@ -1309,7 +1535,25 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
             if (std.ascii.indexOfIgnoreCase(nm, nf) == null) continue;
         }
 
+        if (summary) |s| {
+            try tallySummary(arena, s, o.class_id, data);
+            continue;
+        }
+
         if (json_mode) {
+            if (o.class_id == 115) {
+                // MonoScripts consolidate into one scripts.json instead of
+                // one file per script (a large game ships thousands).
+                try appendScriptEntry(arena, scripts, v, o.path_id, subdir);
+                try manifest.append(arena, .{
+                    .path_id = o.path_id,
+                    .class_id = 115,
+                    .name = unityz.classes.stringField(v, "m_Name") orelse "",
+                    .subdir = subdir,
+                });
+                extracted += 1;
+                continue;
+            }
             // JSON mode: export the object's value tree, not a decoded asset
             var buf: std.ArrayList(u8) = .empty;
             var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
@@ -1559,9 +1803,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const an = unityz.classes.Animator.fromValue(v);
                 try writeAnimatorComponentFiles(arena, subdir, o.path_id, an, &sf, basename(path), injected, manifest, &extracted, stdout);
             },
-            115 => { // MonoScript -> script registry JSON
+            115 => { // MonoScript -> consolidated scripts.json registry
                 const ms = unityz.classes.MonoScript.fromValue(v);
-                try writeScriptFiles(arena, subdir, o.path_id, ms, manifest, &extracted, stdout);
+                try appendScriptEntry(arena, scripts, v, o.path_id, subdir);
+                extracted += 1;
+                try manifest.append(arena, .{ .path_id = o.path_id, .class_id = 115, .name = ms.name, .subdir = subdir });
             },
             43 => { // Mesh -> Wavefront OBJ
                 const mesh = unityz.classes.Mesh.fromValue(v);
@@ -1704,11 +1950,22 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     extracted += 1;
                 }
             },
-            48 => { // Shader -> readable text + structured JSON
+            48 => { // Shader -> readable ShaderLab + structured JSON
                 const shd = try writeShaderText(arena, v);
                 if (shd.len == 0) continue;
-                var name_buf: [160]u8 = undefined;
-                const name = try std.fmt.bufPrint(&name_buf, "shader_{d}.txt", .{o.path_id});
+                // the top-level m_Name is often empty for built-ins; the
+                // parsed form carries the real one (as in writeShaderText)
+                const top_name = std.mem.trimEnd(u8, fieldStr(v, "m_Name"), "\x00");
+                var pf_name: []const u8 = top_name;
+                if (pf_name.len == 0) {
+                    if (unityz.classes.fieldOf(v, "m_ParsedForm")) |pf| {
+                        pf_name = std.mem.trimEnd(u8, fieldStr(pf, "m_Name"), "\x00");
+                    }
+                }
+                var name_buf: [192]u8 = undefined;
+                const base = if (pf_name.len != 0) try std.fmt.bufPrint(&name_buf, "{s}", .{pf_name}) else "";
+                var fname_buf: [256]u8 = undefined;
+                const name = sanitizeComponent(try std.fmt.bufPrint(&fname_buf, "shader_{d}_{s}.shader", .{ o.path_id, if (base.len != 0) base else "unnamed" }));
                 try extractFile(subdir, name, shd);
                 try stdout.print("extracted {s} ({d} bytes)\n", .{ name, shd.len });
                 extracted += 1;
@@ -1871,9 +2128,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
             else => {},
         }
     }
-    try stdout.print("{d} assets extracted, {d} skipped\n", .{ extracted, skipped });
-    if (typeless_skipped != 0) {
-        try stdout.print("  {d} object(s) skipped: this file has no type trees (Mono build); pass --trees <file.json> or --raw to decode them\n", .{typeless_skipped});
+    if (summary == null) {
+        try stdout.print("{d} assets extracted, {d} skipped\n", .{ extracted, skipped });
+        if (typeless_skipped != 0) {
+            try stdout.print("  {d} object(s) skipped: this file has no type trees (Mono build); pass --trees <file.json> or --raw to decode them\n", .{typeless_skipped});
+        }
     }
 }
 
@@ -2326,47 +2585,6 @@ fn writeNamedRef(
     } else {
         try w.writeAll("null");
     }
-}
-
-/// MonoScript export: the script registry entry (assembly, namespace,
-/// class) plus the script payload reference. UnityPy has no MonoScript
-/// export.
-fn writeScriptFiles(
-    arena: std.mem.Allocator,
-    subdir: ?[]const u8,
-    path_id: i64,
-    ms: unityz.classes.MonoScript,
-    manifest: *std.ArrayList(ManifestEntry),
-    extracted: *usize,
-    stdout: *Io.Writer,
-) !void {
-    var out = std.ArrayList(u8).empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
-    const w = &aw.writer;
-    try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
-    try writeJsonString(w, std.mem.trimEnd(u8, ms.name, "\x00"));
-    try w.writeAll(",\"class\":");
-    try writeJsonString(w, std.mem.trimEnd(u8, ms.class_name, "\x00"));
-    try w.writeAll(",\"namespace\":");
-    try writeJsonString(w, std.mem.trimEnd(u8, ms.namespace, "\x00"));
-    try w.writeAll(",\"assembly\":");
-    try writeJsonString(w, std.mem.trimEnd(u8, ms.assembly, "\x00"));
-    if (ms.script) |sp| {
-        try w.print(",\"script\":{{\"file_id\":{d},\"path_id\":{d}}}", .{ sp.file_id, sp.path_id });
-    }
-    try w.writeByte('}');
-    var list = aw.toArrayList();
-    const meta = try list.toOwnedSlice(arena);
-    const base_name = std.mem.trimEnd(u8, ms.class_name, "\x00");
-    var name_buf: [192]u8 = undefined;
-    const name = sanitizeComponent(if (base_name.len != 0)
-        try std.fmt.bufPrint(&name_buf, "script_{d}_{s}.json", .{ path_id, base_name })
-    else
-        try std.fmt.bufPrint(&name_buf, "script_{d}.json", .{path_id}));
-    try extractFile(subdir, name, meta);
-    try stdout.print("extracted {s} ({s})\n", .{ name, std.mem.trimEnd(u8, ms.namespace, "\x00") });
-    extracted.* += 1;
-    try manifest.append(arena, .{ .path_id = path_id, .class_id = 115, .name = ms.name, .subdir = subdir });
 }
 
 /// Writes an AnimationClip PPtr as {"path_id": N, "name": "..."} with the
@@ -3119,38 +3337,202 @@ fn materialJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
     return try arena.dupe(u8, out.items);
 }
 
-/// Readable text summary of a Shader (name, properties, pass names).
+/// ShaderLab reconstruction of a Shader object: the parsed form's name,
+/// properties, fallback, custom editor, subshader tags/LOD, and pass names,
+/// plus a per-stage count of the compiled GPU programs (the original HLSL is
+/// compiled away; UnityPy's shader export dumps raw bytes instead).
 fn writeShaderText(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u8 {
     // arena-owned buffer; see writeMeshObj for why it is never deinit'd
     var w: unityz.streams.Writer = .init(arena);
-    try w.print("name: {s}\n", .{fieldStr(v, "m_Name")});
-    if (unityz.classes.fieldOf(v, "m_ParsedForm")) |pf| {
-        if (unityz.classes.fieldOf(pf, "m_PropInfo")) |pi| {
-            if (unityz.classes.fieldOf(pi, "m_Props")) |props| {
-                if (props == .array) {
-                    for (props.array) |prop| {
-                        try w.print("property: {s} (type {d})\n", .{ fieldStr(prop, "m_Name"), unityz.classes.intField(prop, "m_Type") orelse 0 });
-                    }
-                }
+    const pf = unityz.classes.fieldOf(v, "m_ParsedForm") orelse return arena.dupe(u8, w.getWritten());
+    const top_name = fieldStr(v, "m_Name");
+    const real_name = if (top_name.len != 0) top_name else fieldStr(pf, "m_Name");
+    try w.print("Shader \"{s}\"\n{{\n", .{real_name});
+
+    // Properties: name, display name, type, and the serialized default.
+    if (unityz.classes.fieldOf(pf, "m_PropInfo")) |pi| {
+        if (unityz.classes.fieldOf(pi, "m_Props")) |props| {
+            if (props == .array and props.array.len != 0) {
+                try w.writeBytes("    Properties\n    {\n");
+                for (props.array) |prop| try writeShaderProperty(&w, prop);
+                try w.writeBytes("    }\n");
             }
         }
-        if (unityz.classes.fieldOf(pf, "m_SubShaders")) |subs| {
-            if (subs == .array) {
-                for (subs.array) |sub| {
-                    if (unityz.classes.fieldOf(sub, "m_Passes")) |passes| {
-                        if (passes == .array) {
-                            for (passes.array) |pass| {
-                                const state = unityz.classes.fieldOf(pass, "m_State");
-                                const pname = if (state) |s| fieldStr(s, "m_Name") else "";
-                                try w.print("pass: {s} (type {d})\n", .{ pname, unityz.classes.intField(pass, "m_Type") orelse 0 });
-                            }
+    }
+
+    if (fieldStr(pf, "m_FallbackName").len != 0) {
+        try w.print("    Fallback \"{s}\"\n", .{fieldStr(pf, "m_FallbackName")});
+    }
+    if (fieldStr(pf, "m_CustomEditorName").len != 0) {
+        try w.print("    CustomEditor \"{s}\"\n", .{fieldStr(pf, "m_CustomEditorName")});
+    }
+    if (unityz.classes.fieldOf(pf, "m_KeywordNames")) |kw| {
+        if (kw == .array and kw.array.len != 0) {
+            try w.writeBytes("    // keywords:");
+            for (kw.array) |k| {
+                if (k != .string) continue;
+                try w.print(" {s}", .{k.string});
+            }
+            try w.writeByte('\n');
+        }
+    }
+
+    if (unityz.classes.fieldOf(pf, "m_SubShaders")) |subs| {
+        if (subs == .array) {
+            for (subs.array) |sub| {
+                try w.writeBytes("\n    SubShader\n    {\n");
+                try writeShaderTags(&w, sub, "        ");
+                if (unityz.classes.intField(sub, "m_LOD")) |lod| {
+                    if (lod != 0) try w.print("        LOD {d}\n", .{lod});
+                }
+                if (unityz.classes.fieldOf(sub, "m_Passes")) |passes| {
+                    if (passes == .array) {
+                        for (passes.array) |pass| {
+                            try w.writeBytes("\n        Pass\n        {\n");
+                            const state = unityz.classes.fieldOf(pass, "m_State");
+                            const pname = if (state) |s| fieldStr(s, "m_Name") else "";
+                            if (pname.len != 0) try w.print("            Name \"{s}\"\n", .{pname});
+                            try writeShaderTags(&w, pass, "            ");
+                            try writeShaderPrograms(&w, pass);
+                            const ptype = unityz.classes.intField(pass, "m_Type") orelse 0;
+                            if (ptype != 0) try w.print("            // pass type {d}\n", .{ptype});
+                            try w.writeBytes("        }\n");
                         }
+                    }
+                }
+                try w.writeBytes("    }\n");
+            }
+        }
+    }
+    try w.writeBytes("}\n");
+    return arena.dupe(u8, w.getWritten());
+}
+
+/// Unity serialized property types (0=Color, 1=Vector, 2=Float, 3=Range,
+/// 4=2D, 5=3D, 6=Cube, 7=2DArray, 8=CubeArray).
+fn shaderPropTypeName(t: i64) []const u8 {
+    return switch (t) {
+        0 => "Color",
+        1 => "Vector",
+        2 => "Float",
+        3 => "Range",
+        4 => "2D",
+        5 => "3D",
+        6 => "Cube",
+        7 => "2DArray",
+        8 => "CubeArray",
+        else => "Float",
+    };
+}
+
+/// One `_Name ("Display", Type) = default` line.
+fn writeShaderProperty(w: *unityz.streams.Writer, prop: unityz.value.Value) !void {
+    const name = fieldStr(prop, "m_Name");
+    const desc = fieldStr(prop, "m_Description");
+    const t = unityz.classes.intField(prop, "m_Type") orelse 0;
+    try w.print("        {s} (\"{s}\", {s}) = ", .{ name, desc, shaderPropTypeName(t) });
+    if (t == 0 or t == 1) {
+        // Color / Vector: the four m_DefValue[i] floats, read individually
+        // because the fields may be sparse.
+        try w.writeByte('(');
+        var j: usize = 0;
+        while (j < 4) : (j += 1) {
+            if (j != 0) try w.writeByte(',');
+            var key_buf: [16]u8 = undefined;
+            const key = try std.fmt.bufPrint(&key_buf, "m_DefValue[{d}]", .{j});
+            const dv = unityz.classes.fieldOf(prop, key);
+            try printShaderDefault(w, dv);
+        }
+        try w.writeByte(')');
+    } else if (t >= 4 and t <= 8) {
+        // texture: default name + dimension
+        var def_name: []const u8 = "";
+        var dim: i64 = 1;
+        if (unityz.classes.fieldOf(prop, "m_DefTexture")) |dt| {
+            def_name = fieldStr(dt, "m_DefaultName");
+            dim = unityz.classes.intField(dt, "m_TexDim") orelse 1;
+        }
+        try w.print("\"{s}\" {{}} // dim {d}", .{ def_name, dim });
+    } else {
+        try printShaderDefault(w, unityz.classes.fieldOf(prop, "m_DefValue[0]"));
+    }
+    // attribute annotations, e.g. Toggle / Header / NoScaleOffset (an array
+    // of plain strings, e.g. "Toggle(_FOO_ON)")
+    if (unityz.classes.fieldOf(prop, "m_Attributes")) |attrs| {
+        if (attrs == .array and attrs.array.len != 0) {
+            for (attrs.array) |attr| {
+                const aname = switch (attr) {
+                    .string => |s| s,
+                    else => fieldStr(attr, "m_Name"),
+                };
+                if (aname.len != 0) try w.print(" [{s}]", .{aname});
+            }
+        }
+    }
+    try w.writeByte('\n');
+}
+
+fn printShaderDefault(w: *unityz.streams.Writer, dv: ?unityz.value.Value) !void {
+    if (dv) |d| {
+        if (d.asFloat()) |f| {
+            try w.print("{d}", .{f});
+            return;
+        }
+        if (d == .int) try w.print("{d}", .{d.int});
+    }
+    try w.writeByte('0');
+}
+
+/// Writes `Tags { "k" = "v" }` when the value carries a `tags` array of
+/// [key, value] pairs (the serialized form), indented.
+fn writeShaderTags(w: *unityz.streams.Writer, owner: unityz.value.Value, indent: []const u8) !void {
+    if (unityz.classes.fieldOf(owner, "m_Tags")) |tags| {
+        if (unityz.classes.fieldOf(tags, "tags")) |pairs| {
+            if (pairs == .array and pairs.array.len != 0) {
+                try w.print("{s}Tags {{ ", .{indent});
+                for (pairs.array, 0..) |pair, i| {
+                    if (i != 0) try w.writeBytes(" ");
+                    if (pair == .array and pair.array.len >= 2) {
+                        try w.print("\"{s}\" = \"{s}\"", .{ switch (pair.array[0]) { .string => |s| s, else => "" }, switch (pair.array[1]) { .string => |s| s, else => "" } });
+                    }
+                }
+                try w.writeBytes(" }\n");
+            }
+        }
+    }
+}
+
+/// Per-pass compiled program table as comments: each stage that ships
+/// sub-programs gets one line with the variant count (the decoded blobs are
+/// available via `show`/`shader`).
+fn writeShaderPrograms(w: *unityz.streams.Writer, pass: unityz.value.Value) !void {
+    const stages = [_]struct { key: []const u8, label: []const u8 }{
+        .{ .key = "progVertex", .label = "vertex" },
+        .{ .key = "progFragment", .label = "fragment" },
+        .{ .key = "progGeometry", .label = "geometry" },
+        .{ .key = "progHull", .label = "hull" },
+        .{ .key = "progDomain", .label = "domain" },
+    };
+    var any = false;
+    for (stages) |st| {
+        if (unityz.classes.fieldOf(pass, st.key)) |prog| {
+            if (unityz.classes.fieldOf(prog, "m_PlayerSubPrograms")) |subs| {
+                if (subs == .array) {
+                    var count: usize = 0;
+                    for (subs.array) |platform| {
+                        if (platform == .array) count += platform.array.len;
+                    }
+                    if (count != 0) {
+                        if (!any) {
+                            try w.writeBytes("            // compiled programs:\n");
+                            any = true;
+                        }
+                        try w.print("            //   {s}: {d} variant(s)\n", .{ st.label, count });
                     }
                 }
             }
         }
     }
-    return arena.dupe(u8, w.getWritten());
 }
 
 /// Structured Shader export: name, keywords, and the parsed-form
@@ -6408,8 +6790,9 @@ fn editSerializedObject(arena: std.mem.Allocator, bytes: []const u8, path_id: i6
 /// Applies a JSON patch file: `{"<path_id>": {"<field>": <value>, ...}, ...}`.
 /// Every target object is read, edited, and serialized, then the file is
 /// rewritten once with all replacements. Field paths may be dotted and
-/// indexed like the single-object edit.
-fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8, verify: bool, bytes: []const u8, stdout: *Io.Writer) !void {
+/// indexed like the single-object edit. Typeless Mono files decode through
+/// the injected tree table (`--trees`), like the single-object form.
+fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8, verify: bool, bytes: []const u8, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -6440,7 +6823,7 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                     return;
                 }
             }
-            rewritten = try editSerializedPatches(arena, bytes, entries);
+            rewritten = try editSerializedPatches(arena, bytes, entries, basename(path), injected);
             edited_count = entries.len;
         },
         .bundle => {
@@ -6490,7 +6873,7 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                         if (node_sf.findObject(sel.path_id) != null) try node_entries.append(arena, entry);
                     }
                     if (node_entries.items.len == 0) continue;
-                    const edited_node = try editSerializedPatches(arena, n.data, node_entries.items);
+                    const edited_node = try editSerializedPatches(arena, n.data, node_entries.items, basename(n.path), injected);
                     try replacements.append(arena, .{ .path = n.path, .data = edited_node });
                     edited_count += node_entries.items.len;
                     continue;
@@ -6560,7 +6943,7 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                         if (entry_sf.findObject(sel.path_id) != null) try entry_entries.append(arena, entry);
                     }
                     if (entry_entries.items.len == 0) continue;
-                    const edited_entry = try editSerializedPatches(arena, e.data, entry_entries.items);
+                    const edited_entry = try editSerializedPatches(arena, e.data, entry_entries.items, basename(e.path), injected);
                     try replacements.append(arena, .{ .path = e.path, .data = edited_entry });
                     edited_count += entry_entries.items.len;
                     continue;
@@ -6737,7 +7120,7 @@ fn applyNodeBytes(arena: std.mem.Allocator, node_data: []const u8, entry: unityz
 /// Applies a list of patch entries (path-id -> fields) to one serialized
 /// file and returns the rewritten bytes. All objects are read, edited, and
 /// serialized, then the file is rewritten once.
-fn editSerializedPatches(arena: std.mem.Allocator, bytes: []const u8, entries: []const unityz.value.Field) ![]u8 {
+fn editSerializedPatches(arena: std.mem.Allocator, bytes: []const u8, entries: []const unityz.value.Field, own_name: []const u8, injected: ?*const InjectedTrees) ![]u8 {
     const sf = try unityz.serialized.parse(arena, bytes);
     var replacements: std.ArrayList(unityz.serialized_writer.Replacement) = .empty;
     for (entries) |entry| {
@@ -6750,11 +7133,18 @@ fn editSerializedPatches(arena: std.mem.Allocator, bytes: []const u8, entries: [
         const o = sf.findObject(path_id) orelse return error.ObjectNotFound;
         const type_index = o.type_index orelse return error.MissingTypeIndex;
         if (type_index >= sf.types.len) return error.MissingTypeIndex;
-        const root = &sf.types[type_index].type_tree.roots[0];
-        if (root.children.len == 0 and root.byte_size < 0) return error.MissingTypeIndex;
+        var tree = sf.types[type_index].type_tree;
+        if (tree.roots.len == 0) {
+            // Typeless Mono file: decode from the injected table.
+            if (injected) |inj| {
+                const d0 = sf.objectData(o) orelse return error.OutOfMemory;
+                tree = (injectedTreeFor(arena, inj, &sf, own_name, o.class_id, d0) orelse return error.MissingTypeIndex).*;
+            } else return error.MissingTypeIndex;
+        }
         const data = sf.objectData(o) orelse return error.OutOfMemory;
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
+        const root = &tree.roots[0];
         var edited = try unityz.object_reader.readObject(arena, &r, root);
         for (fields) |f| {
             const segs = try parseFieldPath(f.name);
@@ -6805,13 +7195,14 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             try pairs.append(arena, rest[i]);
         }
     }
+    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
     if (patch_path) |pp| {
         const io = io_global.io;
         const patch_text = std.Io.Dir.cwd().readFileAlloc(io, pp, arena, .unlimited) catch |err| {
             try stdout.print("unityz: {s}: {s}\n", .{ pp, @errorName(err) });
             return;
         };
-        return cmdEditPatch(path, out_path, patch_text, verify, bytes, stdout);
+        return cmdEditPatch(path, out_path, patch_text, verify, bytes, injected, stdout);
     }
     if (pairs.items.len < 2 or pairs.items.len % 2 != 0) {
         try stdout.print("unityz: edit needs: <path_id> <field> <json-value> [<field> <json-value> ...]\n", .{});
@@ -6821,7 +7212,6 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         try stdout.print("unityz: invalid path id '{s}'\n", .{rest[0]});
         return;
     };
-    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
 
     switch (unityz.container.sniff(bytes).container) {
         .bundle => return cmdEditBundle(path, out_path, sel, pairs.items, verify, bytes, injected, stdout),
@@ -7338,8 +7728,141 @@ const GoInfo = struct {
     components: std.ArrayList(i32) = .empty,
 };
 
-fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, json: bool, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
-    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
+/// `managed <dir>` — read a Mono build's managed assemblies and list the
+/// MonoBehaviour script classes with their serialized field layouts. This is
+/// the layout Unity's serializer uses for class-114 objects, which UnityPy
+/// can only reach by loading a full .NET runtime; here it is plain metadata
+/// parsing. Accepts a directory (scans *.dll) or a single assembly path.
+fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+    var json = false;
+    for (rest) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+        } else {
+            try stdout.print("unityz: unknown managed option '{s}'\n", .{arg});
+            return;
+        }
+    }
+
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Collect (name, bytes) pairs: the single file, or every *.dll in the dir.
+    const Files = struct { names: std.ArrayList([]const u8) = .empty, datas: std.ArrayList([]const u8) = .empty };
+    var files: Files = .{};
+    const io = io_global.io;
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| {
+        try stdout.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
+        return;
+    };
+    if (stat.kind == .directory) {
+        var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| {
+            try stdout.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
+            return;
+        };
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            // the iterator reuses its name buffer on the next call; dupe
+            // before anything else touches the iterator
+            const ename = try arena.dupe(u8, entry.name);
+            if (!std.mem.endsWith(u8, ename, ".dll")) continue;
+            const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ path, ename });
+            const data = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch continue;
+            try files.names.append(arena, ename);
+            try files.datas.append(arena, data);
+        }
+    } else {
+        try files.names.append(arena, try arena.dupe(u8, basename(path)));
+        try files.datas.append(arena, bytes);
+    }
+    if (files.names.items.len == 0) {
+        try stdout.print("unityz: {s}: no assemblies found\n", .{path});
+        return;
+    }
+
+    if (json) try stdout.writeByte('[');
+    var first_asm = true;
+    var total_classes: usize = 0;
+    for (files.names.items, 0..) |fname, fi| {
+        const assembly = unityz.dotnet.parseAssembly(arena, fname, files.datas.items[fi]) catch |err| {
+            if (json) {
+                if (!first_asm) try stdout.writeByte(',');
+                try stdout.print("{{\"file\":\"{s}\",\"error\":\"{s}\"}}", .{ fname, @errorName(err) });
+                first_asm = false;
+            } else {
+                try stdout.print("{s}: {s}\n", .{ fname, @errorName(err) });
+            }
+            continue;
+        };
+        // collect MonoBehaviour subclasses
+        var scripts: std.ArrayList(unityz.dotnet.TypeDef) = .empty;
+        for (assembly.type_defs) |td| {
+            if (unityz.dotnet.isMonoBehaviour(arena, td, assembly.type_defs)) try scripts.append(arena, td);
+        }
+        if (scripts.items.len == 0) {
+            if (json) {
+                if (!first_asm) try stdout.writeByte(',');
+                try stdout.print("{{\"file\":\"{s}\",\"scripts\":[]}}", .{fname});
+                first_asm = false;
+            } else {
+                try stdout.print("{s}: {d} MonoBehaviour class(es)\n", .{ fname, 0 });
+            }
+            continue;
+        }
+        total_classes += scripts.items.len;
+        if (json) {
+            if (!first_asm) try stdout.writeByte(',');
+            try stdout.print("{{\"file\":\"{s}\",\"scripts\":[", .{fname});
+            for (scripts.items, 0..) |td, si| {
+                if (si != 0) try stdout.writeByte(',');
+                try stdout.print("{{\"class\":\"{s}\",\"namespace\":\"{s}\",\"base\":\"{s}\",\"fields\":[", .{
+                    td.name,
+                    td.namespace,
+                    td.base_name orelse "",
+                });
+                for (td.fields, 0..) |f, k| {
+                    if (k != 0) try stdout.writeByte(',');
+                    try stdout.print("{{\"name\":\"{s}\",\"type\":\"{s}\"", .{ f.name, managedFieldType(f) });
+                    if (f.isPublic()) try stdout.writeAll(",\"flags\":\"public\"");
+                    if (f.isStatic()) try stdout.writeAll(",\"flags\":\"static\"");
+                    try stdout.writeByte('}');
+                }
+                try stdout.writeAll("]}");
+            }
+            try stdout.writeAll("]}");
+            first_asm = false;
+        } else {
+            try stdout.print("{s}: {d} MonoBehaviour class(es)\n", .{ fname, scripts.items.len });
+            for (scripts.items) |td| {
+                try stdout.print("  {s}\n", .{td.fullName(arena)});
+                for (td.fields) |f| {
+                    try stdout.print("    {s} {s}", .{ managedFieldType(f), f.name });
+                    if (f.isPublic()) try stdout.writeAll(" [public]");
+                    if (f.isStatic()) try stdout.writeAll(" [static]");
+                    try stdout.writeByte('\n');
+                }
+            }
+        }
+    }
+    if (json) {
+        try stdout.writeByte(']');
+        try stdout.writeByte('\n');
+    } else {
+        try stdout.print("{d} MonoBehaviour class(es) total\n", .{total_classes});
+    }
+}
+
+/// The display name of a managed field's type: the resolved class name for
+/// class/valuetype/array signatures, the CLR primitive name otherwise.
+fn managedFieldType(f: unityz.dotnet.Field) []const u8 {
+    if (f.type_name.len != 0) return f.type_name;
+    return unityz.dotnet.elementTypeName(f.elem_type);
+}
+
+fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, json: bool, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
     };
@@ -7845,4 +8368,259 @@ test "checkStreamRef flags broken streaming references" {
     const fails = try scanStreamingRefs(a, tree, "CAB-abc", 42, 1000, &sidecars, &scan_report, undefined, true);
     try std.testing.expectEqual(@as(usize, 1), fails);
     try std.testing.expectEqual(@as(usize, 1), scan_report.failed);
+}
+
+/// MonoScript flat type tree (preorder), the shape a `--trees` file carries
+/// for a built-in class: header + fields, no child list (derived by level).
+fn monoScriptFlatNodes(a: std.mem.Allocator) ![]unityz.typetree.Node {
+    var flat: std.ArrayList(unityz.typetree.Node) = .empty;
+    const n = struct {
+        fn add(list: *std.ArrayList(unityz.typetree.Node), al: std.mem.Allocator, level: u32, type_name: []const u8, name: []const u8, meta_flags: i32) !void {
+            try list.append(al, .{ .level = level, .type_name = type_name, .name = name, .meta_flags = meta_flags });
+        }
+    };
+    try n.add(&flat, a, 0, "MonoScript", "Base", 32768);
+    try n.add(&flat, a, 1, "string", "m_Name", 557057);
+    try n.add(&flat, a, 2, "Array", "Array", 540673);
+    try n.add(&flat, a, 3, "int", "size", 524289);
+    try n.add(&flat, a, 3, "char", "data", 524289);
+    try n.add(&flat, a, 1, "int", "m_ExecutionOrder", 16);
+    try n.add(&flat, a, 1, "Hash128", "m_PropertiesHash", 16);
+    var i: u32 = 0;
+    while (i < 16) : (i += 1) {
+        try n.add(&flat, a, 2, "UInt8", try std.fmt.allocPrint(a, "bytes[{d}]", .{i}), 16);
+    }
+    try n.add(&flat, a, 1, "string", "m_ClassName", 32784);
+    try n.add(&flat, a, 2, "Array", "Array", 16401);
+    try n.add(&flat, a, 3, "int", "size", 17);
+    try n.add(&flat, a, 3, "char", "data", 17);
+    try n.add(&flat, a, 1, "string", "m_Namespace", 32784);
+    try n.add(&flat, a, 2, "Array", "Array", 16401);
+    try n.add(&flat, a, 3, "int", "size", 17);
+    try n.add(&flat, a, 3, "char", "data", 17);
+    try n.add(&flat, a, 1, "string", "m_AssemblyName", 32784);
+    try n.add(&flat, a, 2, "Array", "Array", 16401);
+    try n.add(&flat, a, 3, "int", "size", 17);
+    try n.add(&flat, a, 3, "char", "data", 17);
+    return flat.toOwnedSlice(a);
+}
+
+/// Serialized bytes of one MonoScript object, laid out exactly as the
+/// object_reader reads it with the monoScriptFlatNodes tree (v22, little).
+fn monoScriptPayload(a: std.mem.Allocator) ![]u8 {
+    var w: unityz.streams.Writer = .init(a);
+    defer w.deinit();
+    try w.writeInt(i32, 4);
+    try w.writeBytes("Test");
+    try w.alignTo4();
+    try w.writeInt(i32, 0); // m_ExecutionOrder
+    try w.writeBytes(&[_]u8{0} ** 16); // m_PropertiesHash
+    try w.writeInt(i32, 7);
+    try w.writeBytes("MyClass");
+    try w.alignTo4();
+    try w.writeInt(i32, 0); // m_Namespace ""
+    try w.alignTo4();
+    try w.writeInt(i32, 15);
+    try w.writeBytes("Assembly-CSharp");
+    try w.alignTo4();
+    return a.dupe(u8, w.getWritten());
+}
+
+/// A minimal v22 serialized file with `enable_type_tree = 0` (a Mono build
+/// strips the trees): one MonoScript type, one object holding `payload`.
+fn typelessMonoFixture(a: std.mem.Allocator, payload: []const u8) ![]u8 {
+    var meta: unityz.streams.Writer = .init(a);
+    defer meta.deinit();
+    try meta.writeStringToNull("2020.1.0f1"); // unity_version
+    try meta.writeInt(i32, 3); // target_platform
+    try meta.writeByte(0); // enable_type_tree = false: no trees follow
+    try meta.writeInt(i32, 1); // one type
+    try meta.writeInt(i32, 115); // class_id MonoScript
+    try meta.writeByte(0); // is_stripped (v16+)
+    try meta.writeInt(i16, -1); // script_type_index (v17+)
+    try meta.writeBytes(&[_]u8{0} ** 16); // old_type_hash (v13+)
+    try meta.writeInt(i32, 1); // one object
+    try meta.alignTo4(); // object records are 4-aligned (v7+)
+    try meta.writeInt(i64, 1); // path_id
+    try meta.writeInt(i64, 0); // rel_start
+    try meta.writeInt(u32, @intCast(payload.len)); // size
+    try meta.writeInt(u32, 0); // type_index
+    try meta.writeInt(i32, 0); // script types (v11+)
+    try meta.writeInt(i32, 0); // externals
+    try meta.writeInt(i32, 0); // ref types (v20+)
+    try meta.writeStringToNull(""); // user info
+
+    var out: unityz.streams.Writer = .init(a);
+    defer out.deinit();
+    const meta_len: u32 = @intCast(meta.getWritten().len);
+    const data_offset: u64 = 48 + meta_len;
+    const file_size: u64 = data_offset + payload.len;
+    try out.writeIntWith(u32, 0, .big); // metadata_size placeholder
+    try out.writeIntWith(u32, 0, .big); // file_size placeholder
+    try out.writeIntWith(u32, 22, .big); // version
+    try out.writeIntWith(u32, 0, .big); // data_offset placeholder
+    try out.writeByte(0); // endianness: little
+    try out.writeBytes(&[_]u8{ 0xa1, 0xb2, 0xc3 }); // reserved
+    try out.writeIntWith(u32, meta_len, .big); // metadata_size
+    try out.writeIntWith(i64, @intCast(file_size), .big);
+    try out.writeIntWith(i64, @intCast(data_offset), .big);
+    try out.writeIntWith(i64, 7, .big); // unknown
+    try out.writeBytes(meta.getWritten());
+    try out.writeBytes(payload);
+    return a.dupe(u8, out.getWritten());
+}
+
+test "editSerializedPatches decodes a typeless file via injected trees" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const payload = try monoScriptPayload(a);
+    const sf_bytes = try typelessMonoFixture(a, payload);
+
+    // The injected table: class 115 -> the MonoScript tree. This is what
+    // `--trees file.json` provides for a Mono build; without it the patch
+    // must fail (the file itself carries no type trees).
+    var inj: InjectedTrees = .{};
+    try inj.class_ids.put(a, 115, "MonoScript");
+    const tree = try unityz.typetree.fromFlatNodes(a, try monoScriptFlatNodes(a));
+    const tp = try a.create(unityz.typetree.TypeTree);
+    tp.* = tree;
+    try inj.trees.put(a, "MonoScript", tp);
+
+    // Without the table the decode rejects the object (no crash).
+    try std.testing.expectError(error.MissingTypeIndex, editSerializedPatches(a, sf_bytes, &.{
+        .{ .name = "1", .value = .{ .obj = &.{.{ .name = "m_Name", .value = .{ .string = "Patched" } }} } },
+    }, "test.assets", null));
+
+    // With the injected tree the field is patched and the file rewritten.
+    const entries = [_]unityz.value.Field{
+        .{ .name = "1", .value = .{ .obj = &[_]unityz.value.Field{
+            .{ .name = "m_Name", .value = .{ .string = "Patched" } },
+        } } },
+    };
+    const rewritten = try editSerializedPatches(a, sf_bytes, &entries, "test.assets", &inj);
+
+    // Decode the rewritten object through the injected tree: the edit landed
+    // and the untouched fields survived byte-for-byte in shape.
+    const sf2 = try unityz.serialized.parse(a, rewritten);
+    const o = sf2.findObject(1).?;
+    const data = sf2.objectData(o).?;
+    const tree2 = (injectedTreeFor(a, &inj, &sf2, "test.assets", o.class_id, data)).?;
+    var r = unityz.streams.Reader.init(data);
+    r.endian = sf2.endian;
+    const v = try unityz.object_reader.readObject(a, &r, &tree2.roots[0]);
+    try std.testing.expectEqualStrings("Patched", testFieldOf(v, "m_Name").?.string);
+    try std.testing.expectEqual(@as(i64, 0), testFieldOf(v, "m_ExecutionOrder").?.int);
+    try std.testing.expectEqualStrings("MyClass", testFieldOf(v, "m_ClassName").?.string);
+}
+
+test "appendScriptEntry flattens MonoScript metadata for scripts.json" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // Hash128 decodes as bytes[0..15] int children; each byte i.
+    const hash_fields = try a.alloc(unityz.value.Field, 16);
+    for (hash_fields, 0..) |*f, i| {
+        f.* = .{ .name = try std.fmt.allocPrint(a, "bytes[{d}]", .{i}), .value = .{ .int = @intCast(i) } };
+    }
+    const fields = try a.alloc(unityz.value.Field, 6);
+    fields[0] = .{ .name = "m_Name", .value = .{ .string = "MyScript" } };
+    fields[1] = .{ .name = "m_ExecutionOrder", .value = .{ .int = 5 } };
+    fields[2] = .{ .name = "m_PropertiesHash", .value = .{ .obj = hash_fields } };
+    fields[3] = .{ .name = "m_ClassName", .value = .{ .string = "MyClass" } };
+    fields[4] = .{ .name = "m_Namespace", .value = .{ .string = "My.Ns" } };
+    fields[5] = .{ .name = "m_AssemblyName", .value = .{ .string = "Assembly-CSharp" } };
+    const v = unityz.value.Value{ .obj = fields };
+
+    var scripts: std.ArrayList(ScriptEntry) = .empty;
+    try appendScriptEntry(a, &scripts, v, 42, null);
+    try std.testing.expectEqual(@as(usize, 1), scripts.items.len);
+    try std.testing.expectEqual(@as(i64, 42), scripts.items[0].path_id);
+    try std.testing.expectEqualStrings("MyScript", std.mem.trimEnd(u8, scripts.items[0].name, "\x00"));
+    try std.testing.expectEqual(@as(i64, 5), scripts.items[0].execution_order);
+    try std.testing.expectEqualStrings("MyClass", std.mem.trimEnd(u8, scripts.items[0].class_name, "\x00"));
+    try std.testing.expectEqualStrings("My.Ns", std.mem.trimEnd(u8, scripts.items[0].namespace, "\x00"));
+    // bytes[i] = i, so the raw hash is 00..0f.
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f }, scripts.items[0].properties_hash);
+}
+
+test "writeShaderText emits a ShaderLab reconstruction" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // One color property with all four defaults.
+    const prop = try a.alloc(unityz.value.Field, 5);
+    prop[0] = .{ .name = "m_Name", .value = .{ .string = "_Color" } };
+    prop[1] = .{ .name = "m_Description", .value = .{ .string = "Main Color" } };
+    prop[2] = .{ .name = "m_Type", .value = .{ .int = 0 } };
+    prop[3] = .{ .name = "m_DefValue[0]", .value = .{ .int = 1 } };
+    prop[4] = .{ .name = "m_DefValue[3]", .value = .{ .int = 1 } };
+    const props = try a.alloc(unityz.value.Value, 1);
+    props[0] = .{ .obj = prop };
+    const prop_info_fields = try a.alloc(unityz.value.Field, 1);
+    prop_info_fields[0] = .{ .name = "m_Props", .value = .{ .array = props } };
+
+    // One pass: state name FORWARD, tags, and a vertex program with 5
+    // compiled variants across two platforms.
+    const tag_pair = try a.alloc(unityz.value.Value, 2);
+    tag_pair[0] = .{ .string = "RenderType" };
+    tag_pair[1] = .{ .string = "Opaque" };
+    const tag_pairs = try a.alloc(unityz.value.Value, 1);
+    tag_pairs[0] = .{ .array = tag_pair };
+    const tags_fields = try a.alloc(unityz.value.Field, 1);
+    tags_fields[0] = .{ .name = "tags", .value = .{ .array = tag_pairs } };
+
+    const state_fields = try a.alloc(unityz.value.Field, 1);
+    state_fields[0] = .{ .name = "m_Name", .value = .{ .string = "FORWARD" } };
+
+    const plat0 = try a.alloc(unityz.value.Value, 3);
+    plat0[0] = .{ .int = 0 };
+    plat0[1] = .{ .int = 0 };
+    plat0[2] = .{ .int = 0 };
+    const plat1 = try a.alloc(unityz.value.Value, 2);
+    plat1[0] = .{ .int = 0 };
+    plat1[1] = .{ .int = 0 };
+    const platforms = try a.alloc(unityz.value.Value, 2);
+    platforms[0] = .{ .array = plat0 };
+    platforms[1] = .{ .array = plat1 };
+    const prog_fields = try a.alloc(unityz.value.Field, 1);
+    prog_fields[0] = .{ .name = "m_PlayerSubPrograms", .value = .{ .array = platforms } };
+
+    const pass = try a.alloc(unityz.value.Field, 4);
+    pass[0] = .{ .name = "m_State", .value = .{ .obj = state_fields } };
+    pass[1] = .{ .name = "m_Tags", .value = .{ .obj = tags_fields } };
+    pass[2] = .{ .name = "progVertex", .value = .{ .obj = prog_fields } };
+    pass[3] = .{ .name = "progFragment", .value = .{ .obj = prog_fields } };
+    const passes = try a.alloc(unityz.value.Value, 1);
+    passes[0] = .{ .obj = pass };
+
+    const sub = try a.alloc(unityz.value.Field, 3);
+    sub[0] = .{ .name = "m_Tags", .value = .{ .obj = tags_fields } };
+    sub[1] = .{ .name = "m_LOD", .value = .{ .int = 200 } };
+    sub[2] = .{ .name = "m_Passes", .value = .{ .array = passes } };
+    const subs = try a.alloc(unityz.value.Value, 1);
+    subs[0] = .{ .obj = sub };
+
+    const pf = try a.alloc(unityz.value.Field, 4);
+    pf[0] = .{ .name = "m_Name", .value = .{ .string = "MyShader" } };
+    pf[1] = .{ .name = "m_FallbackName", .value = .{ .string = "Diffuse" } };
+    pf[2] = .{ .name = "m_PropInfo", .value = .{ .obj = prop_info_fields } };
+    pf[3] = .{ .name = "m_SubShaders", .value = .{ .array = subs } };
+
+    const root = try a.alloc(unityz.value.Field, 1);
+    root[0] = .{ .name = "m_ParsedForm", .value = .{ .obj = pf } };
+    const v = unityz.value.Value{ .obj = root };
+
+    const text = try writeShaderText(a, v);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Shader \"MyShader\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Properties") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "_Color (\"Main Color\", Color) = (1,0,0,1)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Tags { \"RenderType\" = \"Opaque\" }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "LOD 200") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Name \"FORWARD\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "//   vertex: 5 variant(s)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Fallback \"Diffuse\"") != null);
 }

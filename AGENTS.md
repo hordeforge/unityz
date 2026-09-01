@@ -13,7 +13,9 @@ accepting a reported fix at face value.
 Optional organization overlays live in
 [docs/agent-rules/README.md](docs/agent-rules/README.md). An overlay applies
 only when this repository explicitly names its applicable modules in this file
-or its own project instructions. Repository workflow rules are split by their
+or its own project instructions.
+
+Repository workflow rules are split by their
 strictness: the restrictive branch → PR → merge rule, the restrictive
 branch → PR rule without automatic merging, the permissive direct-push and
 CI-failure allowances, and a repository-specific overlay for local
@@ -125,15 +127,20 @@ Use a report in `docs/reports/` for an observed failure: an investigation while
 tracing a symptom, a bug report for a confirmed defect, and a postmortem for
 an incident with real impact - started during the incident to capture the
 timeline, handling, and communications live, and completed after it.
+
 Postmortems are blameless: what, how, and when - never who; individuals
 appear as roles or teams, and names, emails, and audit-log principals stay in
-the linked internal investigation. Create
+the linked internal investigation.
+
+Create
 them with `.local/scripts/project-kit.py new-doc <kind> <title>` (kinds `bug`,
 `investigation`, `postmortem`), which names them `YYYY-MM-DD-<short-topic>.md`
 in the matching subdirectory, and keep the inventory in
 `docs/reports/README.md` and the record's `## Status` section in sync - the
 generated index reads the status but the README inventory is maintained by
-hand. Timeline entries always carry an `hh:mm` UTC time (`docs-check` enforces
+hand.
+
+Timeline entries always carry an `hh:mm` UTC time (`docs-check` enforces
 this); use `.local/scripts/report-time` to convert locally-quoted times to
 UTC or to stamp "now" for events reported without one. See
 `docs/reports/README.md` for the full lifecycle.
@@ -227,6 +234,7 @@ instead of guessing a PRD/ADR/RFC number or a dated filename. Kinds: `prd`,
 `rfc` and `research` are numbered like `prd`/`adr`; search the record's
 directory before diagnosing a failure and add each new record to its
 inventory in `docs/<store>/README.md`.
+
 Run
 `.local/scripts/project-kit.py docs-check` before closing documentation-heavy work.
 It validates required PRD/ADR/RFC sections, local Markdown links, numbering, the
