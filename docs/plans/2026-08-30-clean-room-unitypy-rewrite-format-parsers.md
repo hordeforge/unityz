@@ -2337,3 +2337,13 @@ ParticleSystem export at all. Verified on the real 7DTD bundle: all 92
 particle systems export with values matching the decoded trees (e.g.
 duration 10, startSpeed 5, shape type 18/cone, 30 max particles).
 375/375 tests.
+
+2026-09-01 (bundle disk sidecars): bundles and webfiles now merge the
+on-disk sibling `.resS`/`.resource` files into their sidecar set, so
+streamed references that point OUTSIDE the container (e.g. an FSB5
+audio bank sitting next to data.unity3d) resolve during extract and
+verify. Bare serialized files already loaded disk sidecars; the
+container paths did not. Verified on real 7DTD data: the two AudioClips
+that stream from the external resources.resource export their FSB5
+banks and decoded WAVs (valid RIFF PCM16 44.1kHz mono), and bundle
+verify is fully clean. 375/375 tests.
