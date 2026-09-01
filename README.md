@@ -105,7 +105,8 @@ against the mono-script table; other classes resolve by class name.
 `verify` round-trips them byte-exactly (the Raft 2021.3.45f2 data
 files: 38,212/38,213 objects clean; the two exceptions use custom
 serialization). A missing or malformed trees file prints a diagnostic
-and continues without the trees.
+and continues without the trees. Running against a typeless file
+without `--trees` prints how many objects were skipped and why.
 
 For a bare serialized file, streamed references (`m_StreamData` /
 `m_Resource` pointing at a sibling `.resS`/`.resource`) resolve against

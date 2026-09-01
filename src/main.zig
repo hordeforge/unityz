@@ -1225,6 +1225,9 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
 
     var extracted: usize = 0;
     var skipped: usize = 0;
+    // Objects skipped because the file carries no type trees (Mono builds
+    // strip them) and no injected trees were supplied.
+    var typeless_skipped: usize = 0;
     var sprite_cache: SpriteCache = .{};
     // Every MonoBehaviour of the same component type points at one shared
     // MonoScript; without memoizing, that object was located and fully
@@ -1283,8 +1286,14 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
             if (injected) |inj| {
                 if (injectedTreeFor(arena, inj, &sf, basename(path), o.class_id, data)) |it| {
                     tree = it.*;
-                } else continue;
-            } else continue;
+                } else {
+                    typeless_skipped += 1;
+                    continue;
+                }
+            } else {
+                typeless_skipped += 1;
+                continue;
+            }
         }
 
         var r = unityz.streams.Reader.init(data);
@@ -1851,6 +1860,9 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
         }
     }
     try stdout.print("{d} assets extracted, {d} skipped\n", .{ extracted, skipped });
+    if (typeless_skipped != 0) {
+        try stdout.print("  {d} object(s) skipped: this file has no type trees (Mono build); pass --trees <file.json> or --raw to decode them\n", .{typeless_skipped});
+    }
 }
 
 fn basename(path: []const u8) []const u8 {
@@ -3586,6 +3598,7 @@ fn verifySerializedBytesSidecars(arena: std.mem.Allocator, bytes: []const u8, no
     };
     var checked: usize = 0;
     var failed: usize = 0;
+    var typeless_skipped: usize = 0;
     // An object's value tree and its re-serialized bytes are dead once the
     // byte comparison is done, but `arena` spans every object of every node
     // of the file, so taking them from it makes peak memory the sum of the
@@ -3611,8 +3624,14 @@ fn verifySerializedBytesSidecars(arena: std.mem.Allocator, bytes: []const u8, no
             if (injected) |inj| {
                 if (injectedTreeFor(obj_arena, inj, &sf, own_name, o.class_id, data)) |it| {
                     tree = it.*;
-                } else continue;
-            } else continue;
+                } else {
+                    typeless_skipped += 1;
+                    continue;
+                }
+            } else {
+                typeless_skipped += 1;
+                continue;
+            }
         }
         checked += 1;
         report.checked += 1;
@@ -3672,6 +3691,9 @@ fn verifySerializedBytesSidecars(arena: std.mem.Allocator, bytes: []const u8, no
         failed += try scanStreamingRefs(arena, v, node, o.path_id, bytes.len, sidecars, report, stdout, json);
     }
     if (!json) try stdout.print("  {d} object(s) checked, {d} failed\n", .{ checked, failed });
+    if (typeless_skipped != 0) {
+        try stdout.print("  {d} object(s) skipped: this file has no type trees (Mono build); pass --trees <file.json> to decode them\n", .{typeless_skipped});
+    }
 }
 
 /// Walks a value tree and checks every streaming reference
