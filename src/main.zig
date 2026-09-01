@@ -1623,7 +1623,34 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                         curve_count += 1;
                     }
                 }
-                try w.writeAll("]}\n");
+                try w.writeByte(']'); // close curves
+                // Humanoid muscle clips store their animation in the muscle
+                // clip, not the legacy curve arrays; surface the size, the
+                // event count, and the generic bindings with paths resolved
+                // through the file's AnimatorController TOS tables.
+                const muscle_size = unityz.classes.intField(v, "m_MuscleClipSize") orelse 0;
+                const events = if (unityz.classes.fieldOf(v, "m_Events")) |ev| (if (ev == .array) ev.array.len else 0) else 0;
+                try w.print(",\"muscleClipSize\":{d},\"events\":{d}", .{ muscle_size, events });
+                if (unityz.classes.fieldOf(v, "m_ClipBindingConstant")) |cbc| {
+                    if (unityz.classes.fieldOf(cbc, "genericBindings")) |gb| {
+                        if (gb == .array and gb.array.len != 0) {
+                            try w.writeAll(",\"bindings\":[");
+                            for (gb.array, 0..) |b, bi| {
+                                if (bi != 0) try w.writeByte(',');
+                                // The path is a hash of the rig's transform
+                                // path; it only resolves through the owning
+                                // avatar's TOS, which is usually not in the
+                                // bundle, so it is emitted raw.
+                                const bp = unityz.classes.intField(b, "path") orelse 0;
+                                const attr = unityz.classes.intField(b, "attribute") orelse 0;
+                                const tid = unityz.classes.intField(b, "typeID") orelse 0;
+                                try w.print("{{\"path\":{d},\"attribute\":\"{s}\",\"typeID\":{d}}}", .{ bp, bindingAttributeName(attr), tid });
+                            }
+                            try w.writeByte(']');
+                        }
+                    }
+                }
+                try w.writeAll("}\n");
                 const out = aw.toArrayList();
                 var clean_buf: [192]u8 = undefined;
                 const clean_name = if (clip_name.len != 0)
@@ -2711,6 +2738,26 @@ fn writeFaceLine(w: *unityz.streams.Writer, refs: []const u64, has_n: bool, has_
 }
 
 /// Readable text summary of a Material (name, shader, saved properties).
+/// Names a Unity binding attribute: the transform components map to the
+/// first twelve values, everything else stays numeric.
+fn bindingAttributeName(attr: i64) []const u8 {
+    return switch (attr) {
+        1 => "m_LocalPosition.x",
+        2 => "m_LocalPosition.y",
+        3 => "m_LocalPosition.z",
+        4 => "m_LocalRotation.x",
+        5 => "m_LocalRotation.y",
+        6 => "m_LocalRotation.z",
+        7 => "m_LocalScale.x",
+        8 => "m_LocalScale.y",
+        9 => "m_LocalScale.z",
+        10 => "m_LocalEulerAnglesHint.x",
+        11 => "m_LocalEulerAnglesHint.y",
+        12 => "m_LocalEulerAnglesHint.z",
+        else => "attribute",
+    };
+}
+
 fn writeMaterialText(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u8 {
     // arena-owned buffer; see writeMeshObj for why it is never deinit'd
     var w: unityz.streams.Writer = .init(arena);
