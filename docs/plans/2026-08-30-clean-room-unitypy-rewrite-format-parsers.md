@@ -2453,3 +2453,20 @@ edit a field, reserialize byte-exactly, round-trip verify. Verified on
 the real 7DTD bundle: editing texture 136's m_Width 1024 -> 64 with
 --trees --verify round-trips clean and the edited file re-reads the new
 value. 379/379 tests.
+2026-09-01 (capstone: full-surface verification): the complete
+unfiltered extract of the real 7DTD bundle (Unity 2022.3.62f2,
+fully typeless, via the generated trees) produces 8090 files with zero
+decode failures and zero skipped objects: 260 PNGs (textures, sprites,
+cubemap faces), 7130 JSONs (value trees, fonts' and compute shaders'
+descriptors, mixer graph, animator/override/script registries,
+particle summaries, clip curves/bindings, manifest), 7 OBJs, and 6
+audio files (FSB5 + decoded WAV). Spot checks: fonts are valid
+TTF/OTF, the 2048x2048 cubemap face decodes, mixer snapshots and
+animator controllers resolve names, WAVs are valid RIFF PCM16. Every
+class with content in the bundle exports, and every command (extract,
+verify, show, hierarchy, find, skin, edit) handles typeless Mono files.
+The remaining gaps are external: VideoClip/TerrainData/UnityArchive
+have no samples anywhere in the environment, and m_Script managed
+object graphs need .NET assemblies (beyond UnityPy parity, which cannot
+parse them either).
+
