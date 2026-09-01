@@ -284,7 +284,9 @@ const EndlessFFReader = struct {
 // Tests
 // ---------------------------------------------------------------------------
 
-fn buildFixture(a: std.mem.Allocator, files: []const struct { path: []const u8, data: []const u8 }) ![]u8 {
+const FileSpec = struct { path: []const u8, data: []const u8 };
+
+fn buildFixture(a: std.mem.Allocator, files: []const FileSpec) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
     try out.appendSlice(a, container.webfile_magic);
@@ -430,4 +432,47 @@ test "truncated gzip errors cleanly instead of panicking" {
     // cutting only the trailer leaves the payload intact, but the CRC/ISIZE
     // check rejects the incomplete stream all the same
     try std.testing.expectError(error.DecompressFailed, parse(a, gz[0..payload_end]));
+}
+
+test "gzip round-trip fuzz: compress, parse, entries survive" {
+    // The gzip path (compress -> parse) must be a lossless round-trip for
+    // varied payloads: noise, runs, repeated chunks, empty entries.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0x9a7a);
+    const rnd = prng.random();
+
+    var iter: usize = 0;
+    while (iter < 300) : (iter += 1) {
+        const mode = rnd.int(u8) % 3;
+        const len: usize = @intCast(rnd.intRangeAtMost(u32, 0, 30000));
+        var buf: [30000]u8 = undefined;
+        switch (mode) {
+            0 => rnd.bytes(buf[0..len]),
+            1 => @memset(buf[0..len], rnd.int(u8)),
+            else => {
+                const chunk = rnd.intRangeAtMost(u32, 1, 64);
+                var seed: [64]u8 = undefined;
+                rnd.bytes(seed[0..chunk]);
+                var p: usize = 0;
+                while (p < len) {
+                    const take = @min(len - p, @as(usize, chunk));
+                    @memcpy(buf[p .. p + take], seed[0..take]);
+                    p += take;
+                }
+            },
+        }
+        const files = [_]FileSpec{
+            .{ .path = "CAB-a", .data = buf[0..len] },
+            .{ .path = "CAB-b", .data = if (iter % 2 == 0) "" else "small" },
+        };
+        const plain = try buildFixture(a, &files);
+        const gz = try gzipCompress(a, plain);
+        var wf = try parse(a, gz);
+        defer wf.deinit(a);
+        try std.testing.expectEqual(@as(usize, 2), wf.entries.len);
+        try std.testing.expectEqualSlices(u8, buf[0..len], wf.entries[0].data);
+        try std.testing.expectEqualStrings(if (iter % 2 == 0) "" else "small", wf.entries[1].data);
+    }
 }

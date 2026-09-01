@@ -2036,3 +2036,11 @@ rebuilder keeps a block uncompressed when compression does not). Also
 fixed the rebuild doc comment, which still claimed "writes a single
 uncompressed block... avoids needing an LZ4/LZMA encoder" - stale
 since #53. 321/321 tests.
+
+2026-09-01 (webfile gzip round-trip fuzz): the gzip path added in
+step 135 gains a seeded fuzz: 300 iterations of compress -> parse
+round-trips with varied payloads (pure noise, single runs, repeated
+chunks, sizes 0-30KB, empty and tiny second entries), asserting every
+entry survives byte-exactly. Also gave the test-only buildFixture a
+named FileSpec type (anonymous struct params do not unify). 337/337
+tests.
