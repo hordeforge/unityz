@@ -107,9 +107,10 @@ files: 38,212/38,213 objects clean; the two exceptions use custom
 serialization). A missing or malformed trees file prints a diagnostic
 and continues without the trees. Running against a typeless file
 without `--trees` prints how many objects were skipped and why.
-`hierarchy`, `find`, and `skin` accept the same `--trees` flag, so
-scene trees, name searches, and shader skinning analysis all work for
-Mono games too.
+`hierarchy`, `find`, `skin`, and `edit` accept the same `--trees`
+flag, so scene trees, name searches, shader skinning analysis, and
+field edits all work for Mono games too (a typeless file's object can
+be edited and reserialized byte-exactly, then round-trip verified).
 
 For a bare serialized file, streamed references (`m_StreamData` /
 `m_Resource` pointing at a sibling `.resS`/`.resource`) resolve against

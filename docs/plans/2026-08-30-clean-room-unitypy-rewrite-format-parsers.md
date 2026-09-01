@@ -2442,3 +2442,14 @@ keep-state/write-defaults on disable). With this, every class with
 content in the real 7DTD bundle has an extract export. Verified: all 4
 animators export (e.g. controller -> PlayOnSpawn, avatar ->
 twitch_balloonAvatar). 379/379 tests.
+
+2026-09-01 (edit --trees): the edit command now accepts --trees and
+decodes typeless Mono files through the injected table (both the
+bundle/webfile paths via editSerializedObject and the bare serialized
+path fall back to injectedTreeFor), completing the typeless story for
+every command: extract, verify, show, hierarchy, find, skin, and edit.
+The full Mono-game modding loop now works - decode a typeless object,
+edit a field, reserialize byte-exactly, round-trip verify. Verified on
+the real 7DTD bundle: editing texture 136's m_Width 1024 -> 64 with
+--trees --verify round-trips clean and the edited file re-reads the new
+value. 379/379 tests.
