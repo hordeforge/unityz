@@ -1532,6 +1532,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const s = unityz.classes.AudioMixerSnapshot.fromValue(v);
                 try writeMixerSnapshotFiles(arena, subdir, o.path_id, s, manifest, &extracted, stdout);
             },
+            198 => { // ParticleSystem -> compact summary JSON
+                const ps = unityz.classes.ParticleSystem.fromValue(v);
+                try writeParticleFiles(arena, subdir, o.path_id, ps, manifest, &extracted, stdout);
+            },
             43 => { // Mesh -> Wavefront OBJ
                 const mesh = unityz.classes.Mesh.fromValue(v);
                 const obj = writeMeshObj(arena, &sf, v, &mesh) catch |err| {
@@ -2053,6 +2057,48 @@ fn writeMixerSnapshotFiles(
     try stdout.print("extracted {s} (mixer snapshot)\n", .{name});
     extracted.* += 1;
     try manifest.append(arena, .{ .path_id = path_id, .class_id = 245, .name = s.name, .subdir = subdir });
+}
+
+/// ParticleSystem summary export: the emitter's timeline, the main/emission/
+/// shape module values, and the enabled flags of every module. UnityPy has
+/// no ParticleSystem export at all.
+fn writeParticleFiles(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    ps: unityz.classes.ParticleSystem,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: *Io.Writer,
+) !void {
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"path_id\":{d},\"duration\":{d},\"looping\":{},\"prewarm\":{},\"playOnAwake\":{},\"simulationSpeed\":{d},\"scalingMode\":{d},\"stopAction\":{d},\"cullingMode\":{d}", .{ path_id, ps.duration, ps.looping, ps.prewarm, ps.play_on_awake, ps.simulation_speed, ps.scaling_mode, ps.stop_action, ps.culling_mode });
+    if (ps.game_object) |go| try w.print(",\"gameObject\":{d}", .{go.path_id});
+    try w.print(",\"main\":{{\"startLifetime\":{d},\"startSpeed\":{d},\"startSize\":{d},\"gravityModifier\":{d},\"maxParticles\":{d}}}", .{ ps.start_lifetime, ps.start_speed, ps.start_size, ps.gravity_modifier, ps.max_particles });
+    try w.print(",\"emission\":{{\"enabled\":{},\"rateOverTime\":{d},\"bursts\":{d}}}", .{ ps.emission_enabled, ps.rate_over_time, ps.burst_count });
+    try w.print(",\"shape\":{{\"enabled\":{},\"type\":{d},\"angle\":{d},\"radius\":{d}}}", .{ ps.shape_enabled, ps.shape_type, ps.shape_angle, ps.shape_radius });
+    const module_names = [_][]const u8{
+        "initial",       "emission", "shape",           "size",                   "rotation",     "color",
+        "uv",            "velocity", "inheritVelocity", "lifetimeByEmitterSpeed", "force",        "externalForces",
+        "clampVelocity", "noise",    "sizeBySpeed",     "rotationBySpeed",        "colorBySpeed", "collision",
+        "trigger",       "sub",      "lights",          "trail",
+    };
+    try w.writeAll(",\"modules\":{");
+    for (module_names, 0..) |mn, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("\"{s}\":{}", .{ mn, ps.module_flags[i] });
+    }
+    try w.writeAll("}}");
+    var list = aw.toArrayList();
+    const meta = try list.toOwnedSlice(arena);
+    var name_buf: [96]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "particle_{d}.json", .{path_id});
+    try extractFile(subdir, name, meta);
+    try stdout.print("extracted {s} (particle system summary)\n", .{name});
+    extracted.* += 1;
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = 198, .name = "", .subdir = subdir });
 }
 
 const MonoScriptCache = std.AutoHashMapUnmanaged(i64, unityz.classes.MonoScript);
