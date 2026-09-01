@@ -561,6 +561,287 @@ pub const AudioClip = struct {
     }
 };
 
+/// Unity ComputeShader (class 72): one or more platform variants, each
+/// holding the compiled kernel payloads. The per-kernel `code` blob is a
+/// `vector<UInt8>`: DXBC for the D3D11 variant, SPIR-V binary for Vulkan,
+/// and `#version`-prefixed GLSL source for OpenGL - so `extract` recovers
+/// human-readable compute shaders. UnityPy has no ComputeShader handling
+/// at all (AssetRipper does not handle class 72 either). The raw layout
+/// was verified against all 26 real Unity 2022.3.62f2 compute shaders in
+/// 7DTD (260 kernel blobs; the `code` byte vector is 4-aligned after
+/// reading, and the per-variant `resourcesResolved` bool is padded to 4
+/// inside the variants vector). The D3D11 code blobs carry a 16-byte
+/// Unity content hash between the "DXBC" magic and the standard DXBC
+/// container (version/size/chunk offsets follow at byte 20).
+pub const ComputeShader = struct {
+    name: []const u8 = "",
+    variants: []const Variant = &.{},
+
+    pub const Param = struct {
+        name: []const u8 = "",
+        type: i32 = 0,
+        offset: u32 = 0,
+        array_size: u32 = 0,
+        row_count: u32 = 0,
+        col_count: u32 = 0,
+    };
+
+    pub const ConstantBuffer = struct {
+        name: []const u8 = "",
+        byte_size: i32 = 0,
+        params: []const Param = &.{},
+    };
+
+    pub const Kernel = struct {
+        name: []const u8 = "",
+        /// First unique-variant's compiled payload; the other unique
+        /// variants are keyword permutations of the same kernel (their
+        /// count is `unique_variants`).
+        code: []const u8 = &.{},
+        thread_group_size: []const u32 = &.{},
+        unique_variants: usize = 0,
+        cb_count: usize = 0,
+        texture_count: usize = 0,
+        in_buffer_count: usize = 0,
+        out_buffer_count: usize = 0,
+    };
+
+    pub const Variant = struct {
+        target_renderer: i32 = 0,
+        target_level: i32 = 0,
+        kernels: []const Kernel = &.{},
+        constant_buffers: []const ConstantBuffer = &.{},
+        resources_resolved: bool = false,
+    };
+
+    pub fn fromValue(v: value.Value) ComputeShader {
+        var self = ComputeShader{ .name = stringField(v, "m_Name") orelse "" };
+        const variants = fieldOf(v, "variants") orelse return self;
+        if (variants != .array) return self;
+        var list: std.ArrayList(Variant) = .empty;
+        for (variants.array) |vitem| {
+            if (vitem != .obj) continue;
+            var var_: Variant = .{
+                .target_renderer = narrow(i32, intField(vitem, "targetRenderer") orelse 0),
+                .target_level = narrow(i32, intField(vitem, "targetLevel") orelse 0),
+                .resources_resolved = boolField(vitem, "resourcesResolved") orelse false,
+            };
+            if (fieldOf(vitem, "kernels")) |karr| {
+                if (karr == .array) {
+                    var kerns: std.ArrayList(Kernel) = .empty;
+                    for (karr.array) |kitem| {
+                        var k = Kernel{ .name = stringField(kitem, "name") orelse "" };
+                        if (fieldOf(kitem, "uniqueVariants")) |uarr| {
+                            if (uarr == .array) {
+                                k.unique_variants = uarr.array.len;
+                                if (uarr.array.len != 0) {
+                                    const first = uarr.array[0];
+                                    k.code = bytesField(first, "code") orelse &.{};
+                                    if (fieldOf(first, "threadGroupSize")) |tg| {
+                                        if (tg == .array) {
+                                            var tgs: std.ArrayList(u32) = .empty;
+                                            for (tg.array) |t| {
+                                                if (t.asInt()) |ti| tgs.append(std.heap.page_allocator, narrow(u32, ti)) catch {};
+                                            }
+                                            k.thread_group_size = tgs.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                                        }
+                                    }
+                                    for ([_][]const u8{ "cbs", "textures", "inBuffers", "outBuffers" }, 0..) |fname, i| {
+                                        const n = switch (fieldOf(first, fname) orelse value.Value{ .int = 0 }) {
+                                            .array => |a| a.len,
+                                            else => 0,
+                                        };
+                                        switch (i) {
+                                            0 => k.cb_count = n,
+                                            1 => k.texture_count = n,
+                                            2 => k.in_buffer_count = n,
+                                            else => k.out_buffer_count = n,
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        kerns.append(std.heap.page_allocator, k) catch {};
+                    }
+                    var_.kernels = kerns.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                }
+            }
+            if (fieldOf(vitem, "constantBuffers")) |carr| {
+                if (carr == .array) {
+                    var cbs: std.ArrayList(ConstantBuffer) = .empty;
+                    for (carr.array) |citem| {
+                        var cb = ConstantBuffer{
+                            .name = stringField(citem, "name") orelse "",
+                            .byte_size = narrow(i32, intField(citem, "byteSize") orelse 0),
+                        };
+                        if (fieldOf(citem, "params")) |parr| {
+                            if (parr == .array) {
+                                var params: std.ArrayList(Param) = .empty;
+                                for (parr.array) |pitem| {
+                                    params.append(std.heap.page_allocator, .{
+                                        .name = stringField(pitem, "name") orelse "",
+                                        .type = narrow(i32, intField(pitem, "type") orelse 0),
+                                        .offset = narrow(u32, intField(pitem, "offset") orelse 0),
+                                        .array_size = narrow(u32, intField(pitem, "arraySize") orelse 0),
+                                        .row_count = narrow(u32, intField(pitem, "rowCount") orelse 0),
+                                        .col_count = narrow(u32, intField(pitem, "colCount") orelse 0),
+                                    }) catch {};
+                                }
+                                cb.params = params.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                            }
+                        }
+                        cbs.append(std.heap.page_allocator, cb) catch {};
+                    }
+                    var_.constant_buffers = cbs.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                }
+            }
+            list.append(std.heap.page_allocator, var_) catch {};
+        }
+        self.variants = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+        return self;
+    }
+
+    /// Raw serialized layout for the modern (2017+) ComputeShader: the
+    /// `variants` vector of platform variants, each with kernels, constant
+    /// buffers, and the resourcesResolved flag. Older layouts are rejected.
+    pub fn fromRaw(bytes: []const u8, endian: std.builtin.Endian, unity_version: []const u8) !ComputeShader {
+        if (!computeShaderLayoutIsModern(unity_version)) return error.UnsupportedVersion;
+        var r = streams.Reader.init(bytes);
+        r.endian = endian;
+        var self = ComputeShader{ .name = try r.readAlignedStringBorrow() };
+
+        const nvariants = try r.readInt(i32);
+        if (nvariants < 0) return error.Malformed;
+        var variants: std.ArrayList(Variant) = .empty;
+        errdefer variants.deinit(std.heap.page_allocator);
+        for (0..@as(usize, @intCast(nvariants))) |_| {
+            var v = Variant{
+                .target_renderer = try r.readInt(i32),
+                .target_level = try r.readInt(i32),
+            };
+            const nkernels = try r.readInt(i32);
+            if (nkernels < 0) return error.Malformed;
+            var kerns: std.ArrayList(Kernel) = .empty;
+            errdefer kerns.deinit(std.heap.page_allocator);
+            for (0..@as(usize, @intCast(nkernels))) |_| {
+                var k = Kernel{ .name = try r.readAlignedStringBorrow() };
+                const nuv = try r.readInt(i32);
+                if (nuv < 0) return error.Malformed;
+                k.unique_variants = @intCast(nuv);
+                for (0..@as(usize, @intCast(nuv))) |ui| {
+                    // cbVariantIndices: vector<unsigned int>
+                    const ncbv = try r.readInt(i32);
+                    if (ncbv < 0) return error.Malformed;
+                    try r.skip(@as(usize, @intCast(ncbv)) * 4);
+                    const cb_count = try readResourceVec(&r);
+                    const texture_count = try readResourceVec(&r);
+                    const nbs = try r.readInt(i32);
+                    if (nbs < 0) return error.Malformed;
+                    try r.skip(@as(usize, @intCast(nbs)) * 8);
+                    const in_buffer_count = try readResourceVec(&r);
+                    const out_buffer_count = try readResourceVec(&r);
+                    const code_size = try r.readInt(i32);
+                    if (code_size < 0) return error.Malformed;
+                    const code = try r.readSlice(@intCast(code_size));
+                    try r.alignTo4(); // byte-vector run padding
+                    // threadGroupSize: staticvector<unsigned int>
+                    const ntgs = try r.readInt(i32);
+                    if (ntgs < 0) return error.Malformed;
+                    const tgs = try r.readSlice(@as(usize, @intCast(ntgs)) * 4);
+                    try r.skip(8); // requirements (SInt64)
+                    if (ui == 0) {
+                        k.code = code;
+                        k.cb_count = @intCast(cb_count);
+                        k.texture_count = @intCast(texture_count);
+                        k.in_buffer_count = @intCast(in_buffer_count);
+                        k.out_buffer_count = @intCast(out_buffer_count);
+                        const n: usize = @intCast(ntgs);
+                        const tgs_out = std.heap.page_allocator.alloc(u32, n) catch return error.OutOfMemory;
+                        for (0..n) |i| {
+                            tgs_out[i] = std.mem.readInt(u32, tgs[i * 4 ..][0..4], .little);
+                        }
+                        k.thread_group_size = tgs_out;
+                    }
+                }
+                // variantIndices: vector<pair<string, unsigned int>>
+                const nvi = try r.readInt(i32);
+                if (nvi < 0) return error.Malformed;
+                for (0..@as(usize, @intCast(nvi))) |_| {
+                    _ = try r.readAlignedStringBorrow();
+                    try r.skip(4);
+                }
+                try skipStringVector(&r); // globalKeywords
+                try skipStringVector(&r); // localKeywords
+                try skipStringVector(&r); // dynamicKeywords
+                kerns.append(std.heap.page_allocator, k) catch return error.OutOfMemory;
+            }
+            v.kernels = kerns.toOwnedSlice(std.heap.page_allocator) catch return error.OutOfMemory;
+            const ncb = try r.readInt(i32);
+            if (ncb < 0) return error.Malformed;
+            var cbs: std.ArrayList(ConstantBuffer) = .empty;
+            errdefer cbs.deinit(std.heap.page_allocator);
+            for (0..@as(usize, @intCast(ncb))) |_| {
+                var cb = ConstantBuffer{
+                    .name = try r.readAlignedStringBorrow(),
+                    .byte_size = try r.readInt(i32),
+                };
+                const nparams = try r.readInt(i32);
+                if (nparams < 0) return error.Malformed;
+                var params: std.ArrayList(Param) = .empty;
+                errdefer params.deinit(std.heap.page_allocator);
+                for (0..@as(usize, @intCast(nparams))) |_| {
+                    params.append(std.heap.page_allocator, .{
+                        .name = try r.readAlignedStringBorrow(),
+                        .type = try r.readInt(i32),
+                        .offset = try r.readInt(u32),
+                        .array_size = try r.readInt(u32),
+                        .row_count = try r.readInt(u32),
+                        .col_count = try r.readInt(u32),
+                    }) catch return error.OutOfMemory;
+                }
+                cb.params = params.toOwnedSlice(std.heap.page_allocator) catch return error.OutOfMemory;
+                cbs.append(std.heap.page_allocator, cb) catch return error.OutOfMemory;
+            }
+            v.constant_buffers = cbs.toOwnedSlice(std.heap.page_allocator) catch return error.OutOfMemory;
+            v.resources_resolved = (try r.readByte()) != 0;
+            try r.alignTo4(); // bool padded to 4 inside the variants vector
+            variants.append(std.heap.page_allocator, v) catch return error.OutOfMemory;
+        }
+        self.variants = variants.toOwnedSlice(std.heap.page_allocator) catch return error.OutOfMemory;
+        return self;
+    }
+};
+
+/// One ComputeShaderResource (cbs/textures/inBuffers/outBuffers element):
+/// name, generatedName, bindPoint, samplerBindPoint, texDimension.
+fn readResourceVec(r: *streams.Reader) !usize {
+    const n = try r.readInt(i32);
+    if (n < 0) return error.Malformed;
+    for (0..@as(usize, @intCast(n))) |_| {
+        _ = try r.readAlignedStringBorrow();
+        _ = try r.readAlignedStringBorrow();
+        try r.skip(12);
+    }
+    return @intCast(n);
+}
+
+/// Skips a vector of strings (the per-kernel keyword lists).
+fn skipStringVector(r: *streams.Reader) !void {
+    const n = try r.readInt(i32);
+    if (n < 0) return error.Malformed;
+    for (0..@as(usize, @intCast(n))) |_| {
+        _ = try r.readAlignedStringBorrow();
+    }
+}
+
+/// ComputeShader gained its variants/kernels layout with Unity 2017;
+/// earlier versions use an older shape we do not attempt.
+fn computeShaderLayoutIsModern(unity_version: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, unity_version, '.');
+    const major = std.fmt.parseInt(u32, parts.next() orelse return true, 10) catch return true;
+    return major >= 2017;
+}
+
 /// Unity Font (class 128): glyph metrics plus the embedded TrueType/OpenType
 /// data. In release binaries the font bytes always sit inline in the object
 /// (`m_FontData`, i32 size + bytes) — the tree's `NoTransfer` flag only moves
@@ -1915,4 +2196,147 @@ test "font fromRaw version gate and truncation" {
     std.mem.writeInt(i32, head[52..56], 0, .little); // m_ConvertCase
     std.mem.writeInt(i32, head[56..60], -1, .little); // m_CharacterRects count = -1
     try std.testing.expectError(error.Malformed, Font.fromRaw(&head, .little, "2022.3.62f2"));
+}
+
+test "computeShader fromValue reads the variant tree" {
+    const unique = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "code", .value = .{ .bytes = "DXBC" } },
+        .{ .name = "threadGroupSize", .value = .{ .array = &.{ .{ .uint = 16 }, .{ .uint = 16 }, .{ .uint = 1 } } } },
+        .{ .name = "cbs", .value = .{ .array = &.{} } },
+        .{ .name = "textures", .value = .{ .array = &.{.{ .obj = &.{} }} } },
+        .{ .name = "inBuffers", .value = .{ .array = &.{} } },
+        .{ .name = "outBuffers", .value = .{ .array = &.{} } },
+    } };
+    const kernel = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "name", .value = .{ .string = "CS" } },
+        .{ .name = "uniqueVariants", .value = .{ .array = &.{unique} } },
+    } };
+    const cb = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "name", .value = .{ .string = "Params" } },
+        .{ .name = "byteSize", .value = .{ .int = 16 } },
+        .{ .name = "params", .value = .{ .array = &.{.{ .obj = &[_]value.Field{
+            .{ .name = "name", .value = .{ .string = "_Params" } },
+            .{ .name = "type", .value = .{ .int = 0 } },
+            .{ .name = "offset", .value = .{ .uint = 0 } },
+            .{ .name = "arraySize", .value = .{ .uint = 0 } },
+            .{ .name = "rowCount", .value = .{ .uint = 1 } },
+            .{ .name = "colCount", .value = .{ .uint = 4 } },
+        } }} } },
+    } };
+    const variant = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "targetRenderer", .value = .{ .int = 2 } },
+        .{ .name = "targetLevel", .value = .{ .int = 0 } },
+        .{ .name = "kernels", .value = .{ .array = &.{kernel} } },
+        .{ .name = "constantBuffers", .value = .{ .array = &.{cb} } },
+        .{ .name = "resourcesResolved", .value = .{ .bool = true } },
+    } };
+    const v = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "Histogram" } },
+        .{ .name = "variants", .value = .{ .array = &.{variant} } },
+    } };
+    const cs = ComputeShader.fromValue(v);
+    try std.testing.expectEqualStrings("Histogram", cs.name);
+    try std.testing.expectEqual(@as(usize, 1), cs.variants.len);
+    try std.testing.expectEqual(@as(i32, 2), cs.variants[0].target_renderer);
+    try std.testing.expectEqualStrings("CS", cs.variants[0].kernels[0].name);
+    try std.testing.expectEqualStrings("DXBC", cs.variants[0].kernels[0].code);
+    try std.testing.expectEqual(@as(u32, 16), cs.variants[0].kernels[0].thread_group_size[1]);
+    try std.testing.expectEqual(@as(usize, 1), cs.variants[0].kernels[0].texture_count);
+    try std.testing.expectEqualStrings("Params", cs.variants[0].constant_buffers[0].name);
+    try std.testing.expectEqual(@as(u32, 4), cs.variants[0].constant_buffers[0].params[0].col_count);
+    try std.testing.expect(cs.variants[0].resources_resolved);
+}
+
+test "computeShader fromRaw parses the serialized 2017+ layout" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var tmp: [8]u8 = undefined;
+    const putInt = struct {
+        fn put(list: *std.ArrayList(u8), b: []u8, comptime T: type, v: T) !void {
+            std.mem.writeInt(T, b[0..@sizeOf(T)], v, .little);
+            try list.appendSlice(std.testing.allocator, b[0..@sizeOf(T)]);
+        }
+    }.put;
+    try putInt(&buf, &tmp, i32, 6); // m_Name "TestCS" (4 + 6 = 10, pad 2)
+    try buf.appendSlice(std.testing.allocator, "TestCS");
+    try buf.appendSlice(std.testing.allocator, &.{ 0, 0 });
+    try putInt(&buf, &tmp, i32, 1); // variants count
+    try putInt(&buf, &tmp, i32, 2); // targetRenderer
+    try putInt(&buf, &tmp, i32, 0); // targetLevel
+    try putInt(&buf, &tmp, i32, 1); // kernels count
+    try putInt(&buf, &tmp, i32, 2); // kernel name "CS" (4 + 2 = 6, pad 2)
+    try buf.appendSlice(std.testing.allocator, "CS");
+    try buf.appendSlice(std.testing.allocator, &.{ 0, 0 });
+    try putInt(&buf, &tmp, i32, 1); // uniqueVariants count
+    try putInt(&buf, &tmp, i32, 1); // cbVariantIndices count
+    try putInt(&buf, &tmp, u32, 0); // [0]
+    try putInt(&buf, &tmp, i32, 1); // cbs count
+    try putInt(&buf, &tmp, i32, 6); // cb name "Params"
+    try buf.appendSlice(std.testing.allocator, "Params");
+    try buf.appendSlice(std.testing.allocator, &.{ 0, 0 });
+    try putInt(&buf, &tmp, i32, 0); // generatedName
+    try putInt(&buf, &tmp, i32, 0); // bindPoint
+    try putInt(&buf, &tmp, i32, -1); // samplerBindPoint
+    try putInt(&buf, &tmp, i32, -1); // texDimension
+    try putInt(&buf, &tmp, i32, 1); // textures count
+    try putInt(&buf, &tmp, i32, 3); // texture name "src"
+    try buf.appendSlice(std.testing.allocator, "src");
+    try buf.appendSlice(std.testing.allocator, &.{0});
+    try putInt(&buf, &tmp, i32, 0); // generatedName
+    try putInt(&buf, &tmp, i32, 0); // bindPoint
+    try putInt(&buf, &tmp, i32, -1); // samplerBindPoint
+    try putInt(&buf, &tmp, i32, -1); // texDimension
+    try putInt(&buf, &tmp, i32, 0); // builtinSamplers
+    try putInt(&buf, &tmp, i32, 0); // inBuffers
+    try putInt(&buf, &tmp, i32, 0); // outBuffers
+    try putInt(&buf, &tmp, i32, 4); // code size
+    try buf.appendSlice(std.testing.allocator, "DXBC");
+    try putInt(&buf, &tmp, i32, 3); // threadGroupSize count
+    try putInt(&buf, &tmp, u32, 8); // x
+    try putInt(&buf, &tmp, u32, 8); // y
+    try putInt(&buf, &tmp, u32, 1); // z
+    try putInt(&buf, &tmp, i64, 0); // requirements
+    try putInt(&buf, &tmp, i32, 0); // variantIndices
+    try putInt(&buf, &tmp, i32, 0); // globalKeywords
+    try putInt(&buf, &tmp, i32, 0); // localKeywords
+    try putInt(&buf, &tmp, i32, 0); // dynamicKeywords
+    try putInt(&buf, &tmp, i32, 1); // constantBuffers count
+    try putInt(&buf, &tmp, i32, 3); // cb name "CB0"
+    try buf.appendSlice(std.testing.allocator, "CB0");
+    try buf.appendSlice(std.testing.allocator, &.{0});
+    try putInt(&buf, &tmp, i32, 16); // byteSize
+    try putInt(&buf, &tmp, i32, 1); // params count
+    try putInt(&buf, &tmp, i32, 1); // param name "v"
+    try buf.appendSlice(std.testing.allocator, "v");
+    try buf.appendSlice(std.testing.allocator, &.{ 0, 0, 0 });
+    try putInt(&buf, &tmp, i32, 0); // type
+    try putInt(&buf, &tmp, u32, 0); // offset
+    try putInt(&buf, &tmp, u32, 0); // arraySize
+    try putInt(&buf, &tmp, u32, 4); // rowCount
+    try putInt(&buf, &tmp, u32, 4); // colCount
+    try putInt(&buf, &tmp, u8, 1); // resourcesResolved
+    try buf.appendSlice(std.testing.allocator, &.{ 0, 0, 0 }); // struct pad
+
+    const cs = try ComputeShader.fromRaw(buf.items, .little, "2022.3.62f2");
+    try std.testing.expectEqualStrings("TestCS", cs.name);
+    try std.testing.expectEqual(@as(usize, 1), cs.variants.len);
+    try std.testing.expectEqual(@as(i32, 2), cs.variants[0].target_renderer);
+    try std.testing.expectEqualStrings("CS", cs.variants[0].kernels[0].name);
+    try std.testing.expectEqualStrings("DXBC", cs.variants[0].kernels[0].code);
+    try std.testing.expectEqual(@as(u32, 8), cs.variants[0].kernels[0].thread_group_size[1]);
+    try std.testing.expectEqual(@as(usize, 1), cs.variants[0].kernels[0].cb_count);
+    try std.testing.expectEqual(@as(usize, 1), cs.variants[0].kernels[0].texture_count);
+    try std.testing.expectEqualStrings("CB0", cs.variants[0].constant_buffers[0].name);
+    try std.testing.expectEqual(@as(i32, 16), cs.variants[0].constant_buffers[0].byte_size);
+    try std.testing.expectEqual(@as(u32, 4), cs.variants[0].constant_buffers[0].params[0].row_count);
+    try std.testing.expect(cs.variants[0].resources_resolved);
+}
+
+test "computeShader fromRaw version gate" {
+    try std.testing.expectError(error.UnsupportedVersion, ComputeShader.fromRaw(&.{}, .little, "5.6.7f1"));
+    try std.testing.expectError(error.UnsupportedVersion, ComputeShader.fromRaw(&.{}, .little, "2016.4.40f1"));
+    _ = ComputeShader.fromRaw(&.{}, .little, "2017.1.0f1") catch {};
+    _ = ComputeShader.fromRaw(&.{}, .little, "2022.3.62f2") catch {};
+    // a negative variant count is malformed
+    try std.testing.expectError(error.Malformed, ComputeShader.fromRaw("\x01\x00\x00\x00A\x00\x00\x00\x00\xff\xff\xff\xff", .little, "2022.3.62f2"));
 }

@@ -2233,3 +2233,32 @@ name list, kerning/rect counts, fallback pointers, and the embedded
 data size. LegacyRuntime (the engine's stub font, path_id 10102 in
 unity default resources) has size 0 and exports metrics only. 370/370
 tests.
+
+2026-09-01 (compute shader export): ComputeShader (class 72) objects
+export every kernel's compiled payload plus a descriptor JSON. The
+serialized layout was reverse-engineered from all 26 real 7DTD compute
+shaders (Unity 2022.3.62f2, 260 kernel blobs) and cross-checked against
+the AssetRipper TypeTreeDumps 2022.3.62f2 tree: m_Name, then a `variants`
+vector of platform variants (targetRenderer/targetLevel, kernels,
+constantBuffers, resourcesResolved), each kernel holding `uniqueVariants`
+with the resource bindings and the `code` payload.
+
+Two layout points the tree does not state were found empirically: the
+`code` byte vector is 4-aligned after reading (only GLSL lengths exposed
+it - the DXBC/SPIR-V lengths are multiples of 4), and the per-variant
+`resourcesResolved` bool is padded to 4 inside the variants vector. The
+D3D11 code blob is "DXBC" + a 16-byte Unity content hash + the standard
+DXBC container (version/size/chunk offsets at byte 20).
+
+Each platform variant is a different compiler target: (2,0) and (18,0)
+are DXBC, (17,11) is SPIR-V (Vulkan), (21,0) is `#version`-prefixed GLSL
+source - so extract recovers human-readable compute shaders. UnityPy has
+no ComputeShader handling at all and AssetRipper does not handle class
+72 either; the export writes one file per (kernel, variant) with an
+extension from the code magic (.dxbc/.spirv/.glsl) plus a descriptor
+JSON (thread-group sizes, unique-variant counts, resource-binding
+counts, constant-buffer layouts with params).
+
+Verified on the real 7DTD bundle: 260/260 exported code files
+byte-identical to the inline object data, DXBC/SPIR-V headers
+structurally valid. 373/373 tests.
