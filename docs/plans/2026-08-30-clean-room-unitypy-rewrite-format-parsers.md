@@ -2020,3 +2020,19 @@ stays plain and UnityPy-readable (UnityPy rejects gzip webfiles
 entirely - a pre-existing gap on its side). Unit test: gzip-wrapped
 rebuild keeps the magic, compresses, and parses back with the edited
 entry; 320/320 tests.
+
+2026-09-01 (LZMA source rebuild + stale comment): the LZMA
+decompress path had zero test coverage - the only block fixtures were
+uncompressed, LZ4, and LZHAM. Added a fixture built from a
+python-generated LZMA1 stream (FORMAT_RAW, lc3/lp0/pb2, 64K dict)
+prefixed with the UnityFS 5-byte props+dict header.
+
+The fixture is exercised two ways: the parser decodes it to the exact
+payload, and rebuilding the bundle converts the LZMA source to a
+single LZ4 block (the "LZMA/LZHAM sources convert losslessly"
+behavior from the #53 rebuild work, previously untested - with a
+replacement large enough that LZ4 actually shrinks, since the
+rebuilder keeps a block uncompressed when compression does not). Also
+fixed the rebuild doc comment, which still claimed "writes a single
+uncompressed block... avoids needing an LZ4/LZMA encoder" - stale
+since #53. 321/321 tests.

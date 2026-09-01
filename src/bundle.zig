@@ -308,8 +308,11 @@ pub const NodeReplacement = struct {
 };
 
 /// Rebuilds a UnityFS bundle with the given node payloads replaced.
-/// Writes a single uncompressed block (flags 0), which is valid UnityFS;
-/// avoids needing an LZ4/LZMA encoder. The header keeps the source
+/// Writes a single block that keeps the source's compression: when any
+/// source block was compressed, the output block is LZ4-encoded (the
+/// cheapest encoder; LZMA/LZHAM sources convert losslessly), otherwise
+/// it stays uncompressed - mirroring Unity's own writer, which skips
+/// compression when it does not shrink. The header keeps the source
 /// bundle's version and Unity version strings; the 16-byte data hash is
 /// written as zeros (parsers accept it). The caller owns the returned
 /// bytes.
@@ -582,6 +585,46 @@ test "parse an lz4-compressed unityfs bundle, info at end" {
     try std.testing.expectEqual(@as(u32, 0x82), b.flags);
     try std.testing.expectEqualStrings(payload, b.nodes[0].data);
     try std.testing.expectEqualStrings("2020.3.33f1", b.unity_version);
+}
+
+test "rebuild converts an LZMA source to LZ4" {
+    const a = std.testing.allocator;
+    // python: lzma.compress(payload, FORMAT_RAW, FILTER_LZMA1, lc3/lp0/pb2,
+    // dict 64K), prefixed with the UnityFS 5-byte props+dict header. The
+    // block's own flags carry the compression, so the header info stays
+    // uncompressed (header flags 0).
+    const payload = "abababababababababab" ** 10;
+    const lzma_block = [_]u8{
+        0x5d, 0x00, 0x00, 0x01, 0x00, // props (lc3/lp0/pb2) + dict size 64K
+        0x00, 0x30, 0x98, 0xaa, 0xd0,
+        0x18, 0x3d, 0xff, 0xff, 0xff,
+        0xfc, 0x20, 0x00, 0x00,
+    };
+    const bundle_bytes = try buildBundleFixture(a, .{
+        .info_at_end = false,
+        .compression = .none,
+        .payload = payload,
+        .payload_path = "CAB-abc",
+        .raw_block = &lzma_block,
+        .block_flags = 0x40 | @intFromEnum(CompressionType.lzma),
+    });
+    defer a.free(bundle_bytes);
+
+    var b = try parse(a, bundle_bytes);
+    defer b.deinit(a);
+    // the LZMA block decodes to the exact payload
+    try std.testing.expectEqualStrings(payload, b.nodes[0].data);
+
+    // rebuilding converts the LZMA source to a single LZ4 block (large
+    // enough replacement that compression actually shrinks)
+    const newdata = "NEWDATA" ** 50;
+    const rebuilt = try rebuild(a, &b, &.{.{ .path = "CAB-abc", .data = newdata }});
+    defer a.free(rebuilt);
+    var b2 = try parse(a, rebuilt);
+    defer b2.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), b2.blocks.len);
+    try std.testing.expect(blockCompressionType(b2.blocks[0].flags) == .lz4);
+    try std.testing.expectEqualStrings(newdata, b2.nodes[0].data);
 }
 
 test "rebuild keeps compression for a compressed source bundle" {
