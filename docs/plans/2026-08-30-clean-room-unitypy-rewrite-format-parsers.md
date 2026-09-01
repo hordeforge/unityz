@@ -2116,3 +2116,90 @@ designed contract: renderer 46 is a SkinnedMeshRenderer (class 137)
 referencing the non-skinning Shamway/Unlit shader - the shamway
 self-test creature exists to exercise exactly that flag. No
 regressions found.
+
+2026-09-01 (legacy UnityWeb/UnityRaw bundle support): the last
+documented container gap closes - Unity 2.x-5.x era web/standalone
+bundles (magic "UnityWeb\0"/"UnityRaw\0") now parse through
+bundle.parse, so every CLI command works on them with no command
+changes (sniff already routed them to .bundle). parseLegacy follows
+UnityPy's read_web_raw: version-player/engine strings, hash+crc (v4+),
+the level table, then a block at headerSize holding the file table +
+serialized files - plain for UnityRaw, LZMA for UnityWeb.
+
+Two real format facts surfaced by cross-validation against UnityPy:
+the legacy header (and directory block) is big-endian (my first pass
+assumed little), and UnityWeb's LZMA block carries the 13-byte header
+(props + dict LE + decompressed size u64 LE), not the 5-byte UnityFS
+form (lzmaDecompress tries both). Verified on synthetic bundles
+wrapping the real scene serialized node: both tools read all 73
+objects from the UnityRaw and the UnityWeb files, verify clean,
+extract works; unit tests cover both formats + the v0/v6 rejections.
+356/356 tests.
+
+2026-09-01 (legacy bundle parse fuzz): the bundle mutation fuzz now
+alternates between the LZ4 UnityFS fixture and a synthetic UnityRaw v5
+bundle, so the new parseLegacy path gets the same hostile-input
+treatment as the rest of the parser (3000 iterations, alternating
+sources). 356/356 tests.
+
+2026-09-01 (UnityPy parity sweep): extract both tools' outputs across
+the three texture-bearing samples (banner, atlas, xinzexi) and compare
+pixel-for-pixel: all 3 textures byte-identical, 8 of 9 sprites
+byte-identical. The one difference (xinzexi's tight-mesh sprite,
+2038x976) is 3016 of ~2M pixels (0.15%), every one at alpha=0 with
+unityz (0,0,0,0) vs UnityPy (44,44,69,0): polygon-edge rasterization
+rounding between unityz's paintTriangle and UnityPy's PIL
+copy_triangle, visible nowhere (fully transparent). Recorded as a
+known cosmetic parity note, not a defect.
+
+2026-09-01 (legacy bundle edit): testing edit on a legacy bundle
+exposed a real gap - rebuild copied the legacy version (5) into the
+UnityFS output header, where versions < 6 are invalid, so the edited
+file failed its own --verify (the safety net caught it; UnityPy was
+lenient). Rebuild now clamps the output version to the UnityFS minimum
+(6), so editing a legacy UnityWeb/UnityRaw bundle converts the
+container to valid UnityFS and round-trips cleanly: verified on the
+synthetic UnityRaw and UnityWeb bundles (edit --patch --verify clean,
+re-verify clean, UnityPy reads all 73 objects); unit test covers the
+conversion. 357/357 tests.
+
+2026-09-01 (legacy bundle full-command sweep): the remaining CLI
+commands verified on the synthetic UnityRaw bundle - stats, hash
+(+ --json), find, show, hierarchy all work; diff between the UnityRaw
+and UnityWeb files works, and diff against the edited copy correctly
+reports the rename (72 unchanged, 1 changed). The legacy container
+support is fully integrated across the command surface.
+
+2026-09-01 (legacy bundle extract + single-edit sweep): the last
+verification corners of the legacy support: all extract modes
+(tga/bmp/raw/json/raw-mode) work on the UnityRaw bundle, and the
+single-object edit form (edit <file> <node:path-id> <field> <value>
+--verify) round-trips clean with UnityPy reading all 73 objects from
+the edited file.
+
+2026-09-01 (post-#79 comprehensive sweep): the capstone regression
+pass across all 7 samples (5 real + 2 legacy bundles) and every
+command (info/verify/stats/hash/extract on each; find/show/hierarchy/
+shader/diff incl. legacy diff; --json modes): 43/43 pass. The full
+surface - containers (UnityFS, legacy UnityWeb/UnityRaw, WebFile,
+gzip webfiles, serialized v2-22), edit/verify/diff features, and all
+extract paths - is verified clean at the end of the #47-#79 run.
+
+2026-09-01 (legacy v6 bundles): the last legacy variant closes -
+version-6 UnityWeb/UnityRaw bundles use the UnityFS-style layout (per
+UnityPy's read_fs): the shared header fields plus one extra byte after
+the flags, then the blocks-info block. bundle.parse now routes legacy
+v6 through the UnityFS path (the only difference is that byte), so the
+whole container surface is covered. Cross-validated on a synthetic
+UnityWeb v6 wrapping the real scene serialized node: both tools read
+all 73 objects, verify clean. Unit tests cover the v6 parse; the
+rejection test now covers v0/v1 (v6 is no longer rejected). 358/358
+tests.
+
+2026-09-01 (legacy v6 edit verification): the v6 path closes out the
+legacy surface: edit --patch --verify on the synthetic UnityWeb v6
+round-trips clean (rebuild clamps to UnityFS v6), re-verify clean,
+UnityPy reads all 73 objects, and diff reports the rename (72
+unchanged, 1 changed). Every legacy version (v2-6) is now verified
+across parse, verify, edit (both forms), extract, diff, hash, stats,
+find, show, hierarchy.
