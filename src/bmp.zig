@@ -145,3 +145,30 @@ test "BMP encode rejects mismatched input" {
     try std.testing.expectError(error.SizeMismatch, encode(a, 2, 2, &[_]u8{0} ** 15));
     try std.testing.expectError(error.SizeMismatch, encode(a, 0, 0, &.{}));
 }
+
+test "encode round-trips random and edge-sized images" {
+    // The encoder must round-trip arbitrary RGBA buffers through the
+    // test-only decoder: random pixels at edge widths (1, 2, 3, 15, 16,
+    // 17, 255, 256, 257, 1024) and heights exercise stride/row handling.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0x1b);
+    const rnd = prng.random();
+
+    const widths = [_]u32{ 1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33, 255, 256, 257, 511, 512, 1024 };
+    const heights = [_]u32{ 1, 2, 3, 5, 16, 17, 64 };
+    for (widths) |w| {
+        for (heights) |h| {
+            const n = @as(usize, w) * h * 4;
+            const rgba = try a.alloc(u8, n);
+            rnd.bytes(rgba);
+            const enc = try encode(a, w, h, rgba);
+            const dec = try decodeTest(a, enc);
+            defer a.free(dec.rgba);
+            try std.testing.expectEqual(w, dec.width);
+            try std.testing.expectEqual(h, dec.height);
+            try std.testing.expectEqualSlices(u8, rgba, dec.rgba);
+        }
+    }
+}
