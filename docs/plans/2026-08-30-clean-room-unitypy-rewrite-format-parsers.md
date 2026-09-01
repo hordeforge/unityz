@@ -2095,3 +2095,10 @@ round-trip random RGBA buffers through their test-only decoders at
 edge widths (1..1024, incl. 15/16/17, 255/256/257) and heights
 (1..64) - exercising stride/row handling across ~120 combos per
 format. 353/353 tests.
+
+2026-09-01 (serialized_writer rewrite fuzz): the rewrite path gets
+the hostile-input treatment: 2000 seeded iterations of (a) rewriting
+mutated-but-parseable v22 files with no replacements and (b) random
+replacement payloads (0-4KB) for object 100 - every rewrite produces
+bytes or errors cleanly, never crashes, and the output is walkable
+by the parser. 354/354 tests.

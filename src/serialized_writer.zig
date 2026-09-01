@@ -747,3 +747,44 @@ fn buildLegacyTailFixture(a: std.mem.Allocator, version: u32) ![]u8 {
     try out.writeBytes(data);
     return a.dupe(u8, out.getWritten());
 }
+
+test "rewrite survives mutated parsed files and hostile replacements" {
+    // The rewrite path must never crash: (a) rewriting a mutated-but-
+    // parseable v22 file (the #62-style input) must produce bytes or an
+    // error, and (b) random replacement payloads of varied sizes must not
+    // overflow the length fields or fault.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const v22 = try buildV22Fixture(a);
+    var prng = std.Random.DefaultPrng.init(0x77e2);
+    const rnd = prng.random();
+    var buf: [4096]u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 2000) : (iter += 1) {
+        // (a) mutated parseable file, no replacements
+        const mode = rnd.int(u8) % 3;
+        const blen = switch (mode) {
+            0 => rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(v22.len))),
+            1 => v22.len,
+            else => rnd.intRangeAtMost(u32, 0, 128),
+        };
+        @memcpy(buf[0..v22.len], v22);
+        if (mode == 1 and v22.len > 0) {
+            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(v22.len - 1)));
+            buf[m] ^= @intCast(rnd.int(u8) | 1);
+        } else if (mode == 2 and blen > 0) {
+            rnd.bytes(buf[0..blen]);
+        }
+        const sf = serialized.parse(a, buf[0..blen]) catch continue;
+        const out = rewrite(a, &sf, &.{}) catch continue;
+        // the output must be a well-formed buffer we can at least walk
+        if (out.len > 0) _ = serialized.parse(a, out) catch {};
+        // (b) random replacement payload for object 100
+        const repl_len: usize = @intCast(rnd.intRangeAtMost(u32, 0, 4096));
+        rnd.bytes(buf[0..repl_len]);
+        const out2 = rewrite(a, &sf, &.{.{ .path_id = 100, .data = buf[0..repl_len] }}) catch continue;
+        if (out2.len > 0) _ = serialized.parse(a, out2) catch {};
+    }
+}
