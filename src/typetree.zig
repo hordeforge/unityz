@@ -515,3 +515,79 @@ fn writeBlobNode(w: *streams.Writer, version: i16, level: u8, type_off: u32, nam
     try w.writeInt(i32, index);
     try w.writeInt(i32, meta);
 }
+
+test "fromFlatNodes builds a nested tree in preorder" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const flat = [_]Node{
+        .{ .level = 0, .type_name = "MonoBehaviour", .name = "Base" },
+        .{ .level = 1, .type_name = "PPtr<GameObject>", .name = "m_GameObject" },
+        .{ .level = 2, .type_name = "int", .name = "m_FileID" },
+        .{ .level = 2, .type_name = "SInt64", .name = "m_PathID" },
+        .{ .level = 1, .type_name = "UInt8", .name = "m_Enabled" },
+        .{ .level = 1, .type_name = "string", .name = "m_Name" },
+        .{ .level = 1, .type_name = "Vector3", .name = "size" },
+        .{ .level = 2, .type_name = "float", .name = "x" },
+        .{ .level = 2, .type_name = "float", .name = "y" },
+        .{ .level = 2, .type_name = "float", .name = "z" },
+    };
+    const t = try fromFlatNodes(a, &flat);
+
+    try std.testing.expectEqual(@as(usize, 1), t.roots.len);
+    const root = &t.roots[0];
+    try std.testing.expectEqualStrings("MonoBehaviour", root.type_name);
+    try std.testing.expectEqual(@as(usize, 4), root.children.len);
+    // children keep preorder order, and nested children attach to their parent
+    try std.testing.expectEqualStrings("m_GameObject", root.children[0].name);
+    try std.testing.expectEqual(@as(usize, 2), root.children[0].children.len);
+    try std.testing.expectEqualStrings("m_FileID", root.children[0].children[0].name);
+    try std.testing.expectEqualStrings("m_PathID", root.children[0].children[1].name);
+    try std.testing.expectEqualStrings("m_Enabled", root.children[1].name);
+    try std.testing.expectEqualStrings("m_Name", root.children[2].name);
+    const size = &root.children[3];
+    try std.testing.expectEqualStrings("size", size.name);
+    try std.testing.expectEqual(@as(usize, 3), size.children.len);
+    try std.testing.expectEqualStrings("z", size.children[2].name);
+    // the input nodes are untouched (children arrays live on the copies)
+    try std.testing.expectEqual(@as(usize, 0), flat[0].children.len);
+}
+
+test "fromFlatNodes handles multiple roots and empty input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const flat = [_]Node{
+        .{ .level = 0, .type_name = "First", .name = "a" },
+        .{ .level = 1, .type_name = "int", .name = "x" },
+        .{ .level = 0, .type_name = "Second", .name = "b" },
+    };
+    const t = try fromFlatNodes(a, &flat);
+    try std.testing.expectEqual(@as(usize, 2), t.roots.len);
+    try std.testing.expectEqualStrings("First", t.roots[0].type_name);
+    try std.testing.expectEqual(@as(usize, 1), t.roots[0].children.len);
+    try std.testing.expectEqualStrings("Second", t.roots[1].type_name);
+    try std.testing.expectEqual(@as(usize, 0), t.roots[1].children.len);
+
+    const empty = try fromFlatNodes(a, &.{});
+    try std.testing.expectEqual(@as(usize, 0), empty.roots.len);
+}
+
+test "fromFlatNodes rejects corrupt level sequences" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // first node not at level 0
+    try std.testing.expectError(error.Corrupt, fromFlatNodes(a, &.{
+        .{ .level = 1, .type_name = "int", .name = "x" },
+    }));
+    // a level jump of more than one
+    try std.testing.expectError(error.Corrupt, fromFlatNodes(a, &.{
+        .{ .level = 0, .type_name = "Root", .name = "r" },
+        .{ .level = 2, .type_name = "int", .name = "x" },
+    }));
+    // beyond the depth bound
+    var deep: [1]Node = undefined;
+    deep[0] = .{ .level = max_depth + 1, .type_name = "x", .name = "x" };
+    try std.testing.expectError(error.Corrupt, fromFlatNodes(a, &deep));
+}
