@@ -2176,3 +2176,11 @@ verification corners of the legacy support: all extract modes
 single-object edit form (edit <file> <node:path-id> <field> <value>
 --verify) round-trips clean with UnityPy reading all 73 objects from
 the edited file.
+
+2026-09-01 (post-#79 comprehensive sweep): the capstone regression
+pass across all 7 samples (5 real + 2 legacy bundles) and every
+command (info/verify/stats/hash/extract on each; find/show/hierarchy/
+shader/diff incl. legacy diff; --json modes): 43/43 pass. The full
+surface - containers (UnityFS, legacy UnityWeb/UnityRaw, WebFile,
+gzip webfiles, serialized v2-22), edit/verify/diff features, and all
+extract paths - is verified clean at the end of the #47-#79 run.
