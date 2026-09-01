@@ -2141,3 +2141,13 @@ alternates between the LZ4 UnityFS fixture and a synthetic UnityRaw v5
 bundle, so the new parseLegacy path gets the same hostile-input
 treatment as the rest of the parser (3000 iterations, alternating
 sources). 356/356 tests.
+
+2026-09-01 (UnityPy parity sweep): extract both tools' outputs across
+the three texture-bearing samples (banner, atlas, xinzexi) and compare
+pixel-for-pixel: all 3 textures byte-identical, 8 of 9 sprites
+byte-identical. The one difference (xinzexi's tight-mesh sprite,
+2038x976) is 3016 of ~2M pixels (0.15%), every one at alpha=0 with
+unityz (0,0,0,0) vs UnityPy (44,44,69,0): polygon-edge rasterization
+rounding between unityz's paintTriangle and UnityPy's PIL
+copy_triangle, visible nowhere (fully transparent). Recorded as a
+known cosmetic parity note, not a defect.
