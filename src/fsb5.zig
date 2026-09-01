@@ -243,3 +243,46 @@ test "fsb5 DSPCOEFS chunk parse" {
         try std.testing.expectEqual(want, bank.samples[0].dsp_coefs[k]);
     }
 }
+
+test "fsb5 parser survives mutated and truncated banks" {
+    // Hostile bank data must never crash the metadata parser: mutations
+    // and truncations of the hand-built bank (header, sample table, chunk
+    // chain) must parse cleanly or fail with an error - never panic.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const blob = [_]u8{
+        0x46, 0x53, 0x42, 0x35, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00,
+        0x0d, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00,
+        0xa0, 0x0f, 0x00, 0x00, 0x10, 0x00, 0x00, 0x06, 0x64, 0x00, 0x00, 0x00, 0x84, 0x03, 0x00, 0x00,
+        0x04, 0x00, 0x00, 0x00, 0x6c, 0x6f, 0x6f, 0x70, 0x63, 0x6c, 0x69, 0x70, 0x00,
+    };
+
+    var prng = std.Random.DefaultPrng.init(0xf5b5);
+    const rnd = prng.random();
+    var buf: [512]u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 3000) : (iter += 1) {
+        const mode = rnd.int(u8) % 3;
+        const blen = switch (mode) {
+            0 => rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(blob.len))), // truncate
+            1 => blob.len, // mutate
+            else => rnd.intRangeAtMost(u32, 0, 128), // random
+        };
+        @memcpy(buf[0..blob.len], &blob);
+        if (mode == 1) {
+            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(blob.len - 1)));
+            buf[m] ^= @intCast(rnd.int(u8) | 1);
+        } else if (mode == 2 and blen > 0) {
+            rnd.bytes(buf[0..blen]);
+        }
+        const bank = try parse(a, buf[0..blen]);
+        if (bank) |bk| {
+            // a parsed bank's sample table must be reachable
+            for (bk.samples) |s| _ = s.name;
+        }
+    }
+}
