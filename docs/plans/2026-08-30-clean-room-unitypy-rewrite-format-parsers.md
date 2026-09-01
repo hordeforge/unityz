@@ -2116,3 +2116,20 @@ designed contract: renderer 46 is a SkinnedMeshRenderer (class 137)
 referencing the non-skinning Shamway/Unlit shader - the shamway
 self-test creature exists to exercise exactly that flag. No
 regressions found.
+
+2026-09-01 (legacy UnityWeb/UnityRaw bundle support): the last
+documented container gap closes - Unity 2.x-5.x era web/standalone
+bundles (magic "UnityWeb\0"/"UnityRaw\0") now parse through
+bundle.parse, so every CLI command works on them with no command
+changes (sniff already routed them to .bundle). parseLegacy follows
+UnityPy's read_web_raw: version-player/engine strings, hash+crc (v4+),
+the level table, then a block at headerSize holding the file table +
+serialized files - plain for UnityRaw, LZMA for UnityWeb. Two real
+format facts surfaced by cross-validation against UnityPy: the legacy
+header (and directory block) is big-endian (my first pass assumed
+little), and UnityWeb's LZMA block carries the 13-byte header (props +
+dict LE + decompressed size u64 LE), not the 5-byte UnityFS form
+(lzmaDecompress tries both). Verified on synthetic bundles wrapping
+the real scene serialized node: both tools read all 73 objects from
+the UnityRaw and the UnityWeb files, verify clean, extract works;
+unit tests cover both formats + the v0/v6 rejections. 356/356 tests.

@@ -6,7 +6,7 @@
 //! ```text
 //! header (all big-endian, like the rest of the container):
 //!   signature            null-terminated string ("UnityFS\0" or legacy
-//!                        "UnityWeb\0"/"UnityRaw\0" — legacy is unsupported)
+//!                        "UnityWeb\0"/"UnityRaw\0"; legacy v2-5 parsed)
 //!   version              u32
 //!   unity_version        null-terminated string  (version >= 7)
 //!   unity_revision       null-terminated string  (version >= 7)
@@ -151,6 +151,92 @@ fn alignTo(r: *streams.Reader, n: usize) ParseError!void {
     if (rem != 0) try r.skip(n - rem);
 }
 
+/// Parses a legacy `UnityWeb`/`UnityRaw` bundle (Unity 2.x-5.x era web /
+/// standalone bundles). The header is little-endian; the version-player
+/// and version-engine strings precede the level table, then a block at
+/// `headerSize` holds the file table and the serialized files - LZMA-
+/// compressed for UnityWeb, plain for UnityRaw. The layout mirrors
+/// UnityPy's `read_web_raw`; version-6 legacy bundles switch to the
+/// UnityFS-style layout and are not handled here.
+fn parseLegacy(allocator: std.mem.Allocator, data: []const u8, signature: []const u8) ParseError!Bundle {
+    if (data.len < 8) return error.ShortData;
+    var r = streams.Reader.init(data);
+    // Legacy bundle fields are big-endian, like the UnityFS header (and
+    // like UnityPy's reader default).
+    r.endian = .big;
+    // `parse` already consumed the signature; skip it here.
+    try r.skip(signature.len + 1);
+
+    const version = try r.readInt(u32);
+    if (version < 2 or version > 5) return error.UnsupportedVersion;
+    const unity_version = try r.readStringToNull();
+    const unity_revision = try r.readStringToNull();
+    if (version >= 4) {
+        _ = try r.readBytes(16); // content hash
+        _ = try r.readInt(u32); // crc
+    }
+    _ = try r.readInt(u32); // minimumStreamedBytes
+    const header_size = try r.readInt(u32);
+    _ = try r.readInt(u32); // numberOfLevelsToDownloadBeforeStreaming
+    const level_count = try r.readInt(i32);
+    if (level_count < 1 or level_count > 16) return error.Corrupt;
+    try r.skip(4 * 2 * @as(usize, @intCast(level_count - 1)));
+    const compressed_size = try r.readInt(u32);
+    const uncompressed_size = try r.readInt(u32);
+    if (version >= 2) _ = try r.readInt(u32); // completeFileSize
+    if (version >= 3) _ = try r.readInt(u32); // fileInfoHeaderSize
+    if (header_size > data.len or compressed_size > data.len - header_size) return error.Corrupt;
+
+    // the block at headerSize: the file table followed by the serialized
+    // files; UnityWeb stores it LZMA-compressed
+    const raw = data[header_size .. header_size + compressed_size];
+    var stream: []u8 = undefined;
+    if (std.mem.eql(u8, signature, unityweb_signature)) {
+        stream = lzmaDecompress(allocator, raw, uncompressed_size) catch return error.DecompressFailed;
+    } else {
+        if (raw.len != uncompressed_size) return error.Corrupt;
+        stream = try allocator.dupe(u8, raw);
+    }
+    errdefer allocator.free(stream);
+
+    var dr = streams.Reader.init(stream);
+    dr.endian = .big;
+    const node_count = try dr.readInt(i32);
+    if (node_count < 0 or node_count > max_entries) return error.Corrupt;
+    const nodes = try allocator.alloc(Node, @intCast(node_count));
+    errdefer allocator.free(nodes);
+    // `alloc` does not apply struct field defaults; data must be set here so
+    // a node whose range is rejected is handed out as an empty slice.
+    for (nodes) |*n| {
+        n.data = &.{};
+        n.offset = 0;
+        n.size = 0;
+        n.flags = 0;
+        n.path = try dr.readStringToNull();
+        n.offset = try dr.readInt(u32);
+        n.size = try dr.readInt(u32);
+    }
+    for (nodes) |*n| {
+        if (n.offset < 0 or n.size < 0) continue;
+        const off: usize = @intCast(n.offset);
+        const end = off + @as(usize, @intCast(n.size));
+        if (end <= stream.len) n.data = stream[off..end];
+    }
+
+    const header_info = allocator.alloc(u8, 0) catch return error.OutOfMemory;
+    return .{
+        .version = version,
+        .unity_version = unity_version,
+        .unity_revision = unity_revision,
+        .size = @intCast(data.len),
+        .flags = 0,
+        .blocks = &.{},
+        .nodes = nodes,
+        .header_info = header_info,
+        .stream = stream,
+    };
+}
+
 pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
     if (data.len < 8) return error.ShortData;
     var r = streams.Reader.init(data);
@@ -158,7 +244,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
     const signature = try r.readStringToNull();
     if (!std.mem.eql(u8, signature, unityfs_signature)) {
         if (std.mem.eql(u8, signature, unityweb_signature) or std.mem.eql(u8, signature, unityraw_signature))
-            return error.UnsupportedVersion; // legacy bundles are a later milestone
+            return parseLegacy(allocator, data, signature);
         return error.BadSignature;
     }
 
@@ -720,9 +806,110 @@ test "parse rejects bad signature" {
     try std.testing.expectError(error.BadSignature, parse(a, "NotAUnityFS\x00rest"));
 }
 
-test "parse rejects legacy bundles for now" {
+test "parse a legacy UnityRaw bundle" {
     const a = std.testing.allocator;
+    // v5 UnityRaw: little-endian header (signature, version, engine
+    // strings, hash+crc, level table, sizes), then a plain directory
+    // block with one node.
+    var w = streams.Writer.init(a);
+    defer w.deinit();
+    w.endian = .big;
+    try w.writeStringToNull(unityraw_signature);
+    try w.writeInt(u32, 5); // version
+    try w.writeStringToNull("5.x.x");
+    try w.writeStringToNull("5.6.7f1");
+    try w.writeBytes(&[_]u8{0} ** 16); // hash
+    try w.writeInt(u32, 0); // crc
+    try w.writeInt(u32, 0); // minimumStreamedBytes
+    const header_size_off = w.getWritten().len;
+    try w.writeInt(u32, 0); // headerSize (patched below)
+    try w.writeInt(u32, 1); // levels to download before streaming
+    try w.writeInt(i32, 1); // level count
+    try w.writeInt(u32, 0); // compressedSize (patched)
+    try w.writeInt(u32, 0); // uncompressedSize (patched)
+    try w.writeInt(u32, 0); // completeFileSize (patched)
+    try w.writeInt(u32, 0); // fileInfoHeaderSize
+
+    const payload = "CAB-abcdefgh";
+    var dir = streams.Writer.init(a);
+    defer dir.deinit();
+    dir.endian = .big;
+    try dir.writeInt(i32, 1); // node count
+    try dir.writeStringToNull("CAB-abc");
+    const dir_data_off = dir.getWritten().len + 8; // offset + size fields follow
+    try dir.writeInt(u32, @intCast(dir_data_off));
+    try dir.writeInt(u32, @intCast(payload.len));
+    try dir.writeBytes(payload);
+
+    const header_size = w.getWritten().len; // sizes already written; patched below
+    std.mem.writeInt(u32, w.buf.items[header_size_off..][0..4], @intCast(header_size), .big);
+    std.mem.writeInt(u32, w.buf.items[header_size_off + 12 ..][0..4], @intCast(dir.getWritten().len), .big); // compressed
+    std.mem.writeInt(u32, w.buf.items[header_size_off + 16 ..][0..4], @intCast(dir.getWritten().len), .big); // uncompressed
+    std.mem.writeInt(u32, w.buf.items[header_size_off + 20 ..][0..4], @intCast(header_size + dir.getWritten().len), .big); // complete file size
+    try w.writeBytes(dir.getWritten());
+
+    var b = try parse(a, w.getWritten());
+    defer b.deinit(a);
+    try std.testing.expectEqual(@as(u32, 5), b.version);
+    try std.testing.expectEqualStrings("5.x.x", b.unity_version);
+    try std.testing.expectEqual(@as(usize, 1), b.nodes.len);
+    try std.testing.expectEqualStrings("CAB-abc", b.nodes[0].path);
+    try std.testing.expectEqualStrings(payload, b.nodes[0].data);
+}
+
+test "parse a legacy UnityWeb bundle (LZMA directory block)" {
+    const a = std.testing.allocator;
+    // The directory block is LZMA-compressed (python FORMAT_RAW LZMA1,
+    // lc3/lp0/pb2, 64K dict, prefixed with the props+dict header), the
+    // same framing UnityFS lzma blocks use.
+    const lzma_block = [_]u8{
+        0x5d, 0x00, 0x00, 0x01, 0x00, // props + dict size (LE)
+        0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // decompressed size (u64 LE)
+        0x00, 0x00, 0x67, 0xfe, 0xa8, 0xe4, 0xd2, 0x5f,
+        0x58, 0xcb, 0x2a, 0x00, 0x18, 0xdb, 0x73, 0x1e,
+        0x4a, 0x6a, 0xb3, 0xdd, 0xe7, 0xee, 0x92, 0x52,
+        0x25, 0x0a, 0x4f, 0xcb, 0x1f, 0xff, 0x92, 0x95,
+        0x80, 0x00,
+    };
+    var w = streams.Writer.init(a);
+    defer w.deinit();
+    w.endian = .big;
+    try w.writeStringToNull(unityweb_signature);
+    try w.writeInt(u32, 5);
+    try w.writeStringToNull("5.x.x");
+    try w.writeStringToNull("5.6.7f1");
+    try w.writeBytes(&[_]u8{0} ** 16);
+    try w.writeInt(u32, 0);
+    try w.writeInt(u32, 0);
+    const header_size_off = w.getWritten().len;
+    try w.writeInt(u32, 0);
+    try w.writeInt(u32, 1);
+    try w.writeInt(i32, 1);
+    try w.writeInt(u32, 0);
+    try w.writeInt(u32, 0);
+    try w.writeInt(u32, 0);
+    try w.writeInt(u32, 0);
+    const header_size = w.getWritten().len;
+    std.mem.writeInt(u32, w.buf.items[header_size_off..][0..4], @intCast(header_size), .big);
+    std.mem.writeInt(u32, w.buf.items[header_size_off + 12 ..][0..4], @intCast(lzma_block.len), .big);
+    std.mem.writeInt(u32, w.buf.items[header_size_off + 16 ..][0..4], 32, .big); // uncompressed dir block
+    std.mem.writeInt(u32, w.buf.items[header_size_off + 20 ..][0..4], @intCast(header_size + lzma_block.len), .big);
+    try w.writeBytes(&lzma_block);
+
+    var b = try parse(a, w.getWritten());
+    defer b.deinit(a);
+    try std.testing.expectEqual(@as(u32, 5), b.version);
+    try std.testing.expectEqual(@as(usize, 1), b.nodes.len);
+    try std.testing.expectEqualStrings("CAB-abc", b.nodes[0].path);
+    try std.testing.expectEqualStrings("CAB-abcdefgh", b.nodes[0].data);
+}
+
+test "parse rejects unsupported legacy versions" {
+    const a = std.testing.allocator;
+    // version 0 is out of the supported v2-5 range
     try std.testing.expectError(error.UnsupportedVersion, parse(a, "UnityWeb\x00\x00\x00\x00\x00"));
+    // v6 legacy bundles switch to the UnityFS-style layout: unsupported here
+    try std.testing.expectError(error.UnsupportedVersion, parse(a, "UnityRaw\x00\x06\x00\x00\x00"));
 }
 
 test "parse rejects truncated file" {
