@@ -97,7 +97,29 @@ pub fn rebuild(allocator: std.mem.Allocator, wf: *const WebFile, replacements: [
         while (out.items.len < data_offsets.items[i]) try out.append(allocator, 0);
         try out.appendSlice(allocator, data);
     }
-    return out.toOwnedSlice(allocator);
+    const plain = try out.toOwnedSlice(allocator);
+    // A gzip-wrapped source stays gzip-wrapped: `owned` is only set when
+    // the parser had to decompress the input, so the rebuilt file keeps
+    // the source's compression instead of silently growing.
+    if (wf.owned == null) return plain;
+    errdefer allocator.free(plain);
+    const gz = try gzipCompress(allocator, plain);
+    allocator.free(plain);
+    return gz;
+}
+
+/// Compresses a whole buffer into a gzip stream (std flate, gzip
+/// container). The caller owns the returned bytes.
+fn gzipCompress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    // `initCapacity` gives the writer a real buffer up front: flate's
+    // Compress asserts on an output buffer of <= 8 bytes.
+    var aw = std.Io.Writer.Allocating.initCapacity(allocator, 64 * 1024) catch return error.OutOfMemory;
+    errdefer aw.deinit();
+    var input: [std.compress.flate.max_window_len]u8 = undefined;
+    var c = try std.compress.flate.Compress.init(&aw.writer, &input, .gzip, .default);
+    try c.writer.writeAll(data);
+    try c.finish();
+    return aw.toOwnedSlice();
 }
 
 pub const ParseError = error{
@@ -299,6 +321,40 @@ test "parse a real-format webfile" {
     try std.testing.expectEqualStrings("DATA1", wf.entries[0].data);
     try std.testing.expectEqualStrings("CAB-two", wf.entries[1].path);
     try std.testing.expectEqualStrings("DATA2LONGER", wf.entries[1].data);
+}
+
+test "rebuild keeps a gzip-wrapped source gzip-wrapped" {
+    const a = std.testing.allocator;
+    const big = "DATA1" ** 200;
+    const plain = try buildFixture(a, &.{
+        .{ .path = "CAB-one", .data = big },
+        .{ .path = "CAB-two", .data = "DATA2" },
+    });
+    defer a.free(plain);
+    const gz = try gzipCompress(a, plain);
+    defer a.free(gz);
+
+    var wf = try parse(a, gz);
+    defer wf.deinit(a);
+    try std.testing.expect(wf.owned != null); // parser had to decompress
+
+    // an edited rebuild stays a gzip stream and parses back identically
+    const rebuilt = try rebuild(a, &wf, &.{.{ .path = "CAB-one", .data = "EDITED" }});
+    defer a.free(rebuilt);
+    try std.testing.expect(rebuilt.len >= 2 and rebuilt[0] == 0x1f and rebuilt[1] == 0x8b);
+    try std.testing.expect(rebuilt.len < plain.len); // actually compressed
+    var wf2 = try parse(a, rebuilt);
+    defer wf2.deinit(a);
+    try std.testing.expectEqual(@as(usize, 2), wf2.entries.len);
+    try std.testing.expectEqualStrings("EDITED", wf2.entries[0].data);
+    try std.testing.expectEqualStrings("DATA2", wf2.entries[1].data);
+    // the untouched gzip rebuild round-trips byte-for-byte
+    const rebuilt2 = try rebuild(a, &wf, &.{});
+    defer a.free(rebuilt2);
+    var wf3 = try parse(a, rebuilt2);
+    defer wf3.deinit(a);
+    try std.testing.expectEqualStrings(big, wf3.entries[0].data);
+    try std.testing.expectEqualStrings("DATA2", wf3.entries[1].data);
 }
 
 test "rebuild replaces an entry and stays parseable" {
