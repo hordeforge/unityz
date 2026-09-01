@@ -2413,3 +2413,12 @@ does this game have" answer - verified on the real 7DTD registry:
 6501 scripts across Assembly-CSharp (3291), EOS (986), InControl (490),
 Unity.Microsoft.GDK (309), Assembly-CSharp-firstpass (157), and more.
 UnityPy has no MonoScript export. 378/378 tests.
+
+2026-09-01 (hierarchy --trees): the hierarchy command now accepts
+--trees and decodes typeless Mono files through the injected table (the
+decode loop falls back to injectedTreeFor when the file's trees are
+empty, mirroring extract/verify). Previously a Mono game's scenes
+printed empty hierarchies. Verified on the real 7DTD bundle: level0/1
+UI scenes and the resources.assets world decode fully (223 hierarchy
+entries; the twitch_balloon rig shows its String bone chain with bone
+markers and per-node positions/components). 378/378 tests.

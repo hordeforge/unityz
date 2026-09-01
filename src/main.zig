@@ -7156,9 +7156,15 @@ fn skipWs(text: []const u8, pos: *usize) void {
 /// view.
 fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     var json = false;
-    for (rest) |arg| {
+    var trees_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const arg = rest[i];
         if (std.mem.eql(u8, arg, "--json")) {
             json = true;
+        } else if (std.mem.eql(u8, arg, "--trees") and i + 1 < rest.len) {
+            trees_path = rest[i + 1];
+            i += 1;
         } else {
             try stdout.print("unityz: unknown hierarchy option '{s}'\n", .{arg});
             return;
@@ -7167,6 +7173,7 @@ fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, s
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
@@ -7175,7 +7182,7 @@ fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, s
             };
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                try printHierarchy(arena, n.data, n.path, json, stdout);
+                try printHierarchy(arena, n.data, n.path, json, injected, stdout);
             }
         },
         .webfile => {
@@ -7185,10 +7192,10 @@ fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, s
             };
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try printHierarchy(arena, e.data, e.path, json, stdout);
+                try printHierarchy(arena, e.data, e.path, json, injected, stdout);
             }
         },
-        .serialized => try printHierarchy(arena, bytes, null, json, stdout),
+        .serialized => try printHierarchy(arena, bytes, null, json, injected, stdout),
         else => try stdout.print("{s}: hierarchy requires a serialized file, bundle, or webfile\n", .{path}),
     }
 }
@@ -7210,7 +7217,7 @@ const GoInfo = struct {
     components: std.ArrayList(i32) = .empty,
 };
 
-fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, json: bool, stdout: *Io.Writer) !void {
+fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, json: bool, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
@@ -7234,8 +7241,15 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
         const data = sf.objectData(o) orelse continue;
         const ti = o.type_index orelse continue;
         if (ti >= sf.types.len) continue;
-        const tree = sf.types[ti].type_tree;
-        if (tree.roots.len == 0) continue;
+        var tree = sf.types[ti].type_tree;
+        if (tree.roots.len == 0) {
+            // Typeless Mono file: decode from the injected table.
+            if (injected) |inj| {
+                if (injectedTreeFor(arena, inj, &sf, basename(node orelse ""), o.class_id, data)) |it| {
+                    tree = it.*;
+                } else continue;
+            } else continue;
+        }
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
         const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;

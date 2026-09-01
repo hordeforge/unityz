@@ -107,6 +107,8 @@ files: 38,212/38,213 objects clean; the two exceptions use custom
 serialization). A missing or malformed trees file prints a diagnostic
 and continues without the trees. Running against a typeless file
 without `--trees` prints how many objects were skipped and why.
+`hierarchy` accepts the same `--trees` flag, so scene trees decode for
+Mono games too.
 
 For a bare serialized file, streamed references (`m_StreamData` /
 `m_Resource` pointing at a sibling `.resS`/`.resource`) resolve against
