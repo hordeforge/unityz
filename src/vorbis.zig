@@ -333,17 +333,36 @@ pub fn rebuildOgg(
     try stream.packetIn(allocator, setup.header, 0, false);
     if (try stream.pageOut(allocator, true)) |p| try out.appendSlice(allocator, p);
 
-    // audio packets: [u16 size][packet] until size 0/0xFFFF or end of data
+    // audio packets: [u16 size][packet] until size 0/0xFFFF, the sample's
+    // declared sample_count is reached, or the data ends. FMOD does not
+    // always write an EOS marker for the last samples of a bank - their
+    // data region runs to the end of the (possibly padded) data section,
+    // so trailing bytes would otherwise be read as packet sizes and
+    // corrupt the stream. The granule accounting mirrors the emit loop
+    // below; reaching sample_count is the normal end of the sample.
     var packets = std.ArrayList([]const u8).empty;
     defer packets.deinit(allocator);
     var pos: usize = 0;
+    var collect_granule: i64 = 0;
+    var collect_prev_block: u32 = 0;
     while (pos + 2 <= data.len) {
         const size: usize = std.mem.readInt(u16, data[pos..][0..2], .little);
         if (size == 0 or size == 0xFFFF) break; // EOS marker
         pos += 2;
         if (pos + size > data.len) return error.Corrupt;
-        try packets.append(allocator, data[pos .. pos + size]);
+        const packet = data[pos .. pos + size];
         pos += size;
+        try packets.append(allocator, packet);
+
+        const block_size = flags.blockSize(packet);
+        if (collect_prev_block == 0) {
+            collect_granule = 0;
+        } else {
+            collect_granule += @divTrunc(@as(i64, block_size) + collect_prev_block, 4);
+        }
+        if (collect_granule > sample.sample_count) collect_granule = sample.sample_count;
+        if (collect_granule == sample.sample_count) break;
+        collect_prev_block = block_size;
     }
 
     var granule_pos: i64 = 0;
