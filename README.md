@@ -111,7 +111,9 @@ For a bare serialized file, streamed references (`m_StreamData` /
 `m_Resource` pointing at a sibling `.resS`/`.resource`) resolve against
 the on-disk sidecar files next to it; `extract` and `verify` load them
 automatically, so streamed textures/audio export without bundling the
-file first.
+file first. Bundles and webfiles merge the same disk sidecars into
+their internal nodes, so a bundle whose sidecars live outside the
+container (e.g. an FSB5 bank next to `data.unity3d`) resolves them too.
 
 There is no off-the-shelf generator for this shape, so unityz ships one:
 `scripts/structsdump-to-trees.py` converts the public AssetRipper
