@@ -352,6 +352,12 @@ layouts. The typeless raw layout is self-describing, so Mono builds
 extract them with no type trees; neither UnityPy nor AssetRipper
 handles ComputeShader at all.
 
+Cubemaps (class 89) export their six faces (`_posx`/`_negx`/`_posy`/
+`_negy`/`_posz`/`_negz`) as PNGs; each serialized face is a full mip
+chain of `m_CompleteImageSize` bytes, so the first mip decodes with the
+same pipeline as Texture2D, including streamed faces resolved from the
+sibling `.resS` sidecar. UnityPy has no Cubemap export at all.
+
 Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).

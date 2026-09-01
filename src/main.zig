@@ -1472,6 +1472,54 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const cs = unityz.classes.ComputeShader.fromValue(v);
                 try writeComputeShaderFiles(arena, subdir, o.path_id, cs, manifest, &extracted, stdout);
             },
+            89 => { // Cubemap: six faces, each a full mip chain of the same size
+                const t = unityz.classes.Texture2D.fromValue(v);
+                if (t.width == 0 or t.height == 0) continue;
+                var pixels: []const u8 = t.image_data;
+                if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
+                    const start: usize = @intCast(sf.data_offset + t.stream.offset);
+                    const end = start + t.stream.size;
+                    if (end <= sf.source.len) pixels = sf.source[start..end];
+                }
+                if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
+                    // streamed from a sibling .resS/.resource sidecar
+                    pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
+                }
+                if (pixels.len == 0) continue;
+                const mip0_size = unityz.texture.expectedSize(t.format, t.width, t.height) orelse continue;
+                const face_size: usize = @intCast(t.complete_image_size);
+                const faces: usize = @intCast(t.image_count);
+                if (faces == 0 or face_size == 0) continue;
+                const base_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                var name_buf: [96]u8 = undefined;
+                const base = sanitizeComponent(if (base_name.len != 0)
+                    try std.fmt.bufPrint(&name_buf, "cubemap_{d}_{s}", .{ o.path_id, base_name })
+                else
+                    try std.fmt.bufPrint(&name_buf, "cubemap_{d}", .{o.path_id}));
+                // Serialized face order matches Unity's CubemapFace enum:
+                // 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z.
+                const face_names = [_][]const u8{ "posx", "negx", "posy", "negy", "posz", "negz" };
+                for (0..faces) |fi| {
+                    if (fi >= face_names.len) break;
+                    const start = fi * face_size;
+                    if (start + mip0_size > pixels.len) continue;
+                    var tex_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+                    defer tex_arena_state.deinit();
+                    const tex_arena = tex_arena_state.allocator();
+                    const rgba = unityz.texture.decode(tex_arena, t.format, t.width, t.height, pixels[start .. start + mip0_size]) catch |err| {
+                        try stdout.print("  cubemap {d}: face {s}: {s} ({s}) unsupported\n", .{ o.path_id, face_names[fi], unityz.texture.format.name(t.format), @errorName(err) });
+                        continue;
+                    };
+                    const flipped = unityz.texture.flipVertical(tex_arena, rgba, t.width, t.height) catch continue;
+                    const image = encodeImage(tex_arena, format, t.width, t.height, flipped) catch continue;
+                    var face_buf: [160]u8 = undefined;
+                    const face_name = sanitizeComponent(try std.fmt.bufPrint(&face_buf, "{s}_{s}.png", .{ base, face_names[fi] }));
+                    try extractFile(subdir, face_name, image);
+                    try stdout.print("extracted {s} ({s})\n", .{ face_name, unityz.texture.format.name(t.format) });
+                    extracted += 1;
+                }
+                try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = unityz.classes.stringField(v, "m_Name") orelse "", .subdir = subdir });
+            },
             43 => { // Mesh -> Wavefront OBJ
                 const mesh = unityz.classes.Mesh.fromValue(v);
                 const obj = writeMeshObj(arena, &sf, v, &mesh) catch |err| {
