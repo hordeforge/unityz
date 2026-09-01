@@ -1029,6 +1029,81 @@ fn fontLayoutIsModern(unity_version: []const u8) bool {
     return minor >= 5;
 }
 
+/// Unity AudioMixer family (classes 241/243/245): the controller owns the
+/// mixer's runtime state (m_MixerConstant index tables), the groups form the
+/// named hierarchy (`m_Children` PPtrs), and snapshots hold parameter values.
+/// UnityPy has no mixer export at all.
+pub const AudioMixerController = struct {
+    name: []const u8 = "",
+    master_group: ?value.PPtr = null,
+    start_snapshot: ?value.PPtr = null,
+    snapshots: []const value.PPtr = &.{},
+    update_mode: i64 = 0,
+
+    pub fn fromValue(v: value.Value) AudioMixerController {
+        var self = AudioMixerController{
+            .name = stringField(v, "m_Name") orelse "",
+            .master_group = pptrField(v, "m_MasterGroup"),
+            .start_snapshot = pptrField(v, "m_StartSnapshot"),
+            .update_mode = intField(v, "m_UpdateMode") orelse 0,
+        };
+        if (fieldOf(v, "m_Snapshots")) |f| {
+            if (f == .array) {
+                var list: std.ArrayList(value.PPtr) = .empty;
+                for (f.array) |item| {
+                    if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
+                        list.append(std.heap.page_allocator, p) catch {};
+                    }
+                }
+                self.snapshots = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+            }
+        }
+        return self;
+    }
+};
+
+pub const AudioMixerGroup = struct {
+    name: []const u8 = "",
+    children: []const value.PPtr = &.{},
+    audio_mixer: ?value.PPtr = null,
+
+    pub fn fromValue(v: value.Value) AudioMixerGroup {
+        var self = AudioMixerGroup{
+            .name = stringField(v, "m_Name") orelse "",
+            .audio_mixer = pptrField(v, "m_AudioMixer"),
+        };
+        if (fieldOf(v, "m_Children")) |f| {
+            if (f == .array) {
+                var list: std.ArrayList(value.PPtr) = .empty;
+                for (f.array) |item| {
+                    if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
+                        list.append(std.heap.page_allocator, p) catch {};
+                    }
+                }
+                self.children = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+            }
+        }
+        return self;
+    }
+};
+
+pub const AudioMixerSnapshot = struct {
+    name: []const u8 = "",
+    time: f64 = 0,
+    values: usize = 0,
+
+    pub fn fromValue(v: value.Value) AudioMixerSnapshot {
+        var self = AudioMixerSnapshot{
+            .name = stringField(v, "m_Name") orelse "",
+            .time = floatField(v, "m_Time") orelse 0,
+        };
+        if (fieldOf(v, "m_Values")) |f| {
+            if (f == .array) self.values = f.array.len;
+        }
+        return self;
+    }
+};
+
 pub const GameObject = struct {
     name: []const u8 = "",
     layer: i64 = 0,
@@ -2339,4 +2414,41 @@ test "computeShader fromRaw version gate" {
     _ = ComputeShader.fromRaw(&.{}, .little, "2022.3.62f2") catch {};
     // a negative variant count is malformed
     try std.testing.expectError(error.Malformed, ComputeShader.fromRaw("\x01\x00\x00\x00A\x00\x00\x00\x00\xff\xff\xff\xff", .little, "2022.3.62f2"));
+}
+
+test "audio mixer family fromValue reads the graph fields" {
+    const ctrl = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "MasterAudioMixer" } },
+        .{ .name = "m_MasterGroup", .value = .{ .pptr = .{ .file_id = 0, .path_id = 613 } } },
+        .{ .name = "m_StartSnapshot", .value = .{ .pptr = .{ .file_id = 0, .path_id = 661 } } },
+        .{ .name = "m_Snapshots", .value = .{ .array = &[_]value.Value{ .{ .pptr = .{ .file_id = 0, .path_id = 661 } }, .{ .pptr = .{ .file_id = 0, .path_id = 664 } } } } },
+        .{ .name = "m_UpdateMode", .value = .{ .int = 0 } },
+    } };
+    const ac = AudioMixerController.fromValue(ctrl);
+    try std.testing.expectEqualStrings("MasterAudioMixer", ac.name);
+    try std.testing.expectEqual(@as(i64, 613), ac.master_group.?.path_id);
+    try std.testing.expectEqual(@as(i64, 661), ac.start_snapshot.?.path_id);
+    try std.testing.expectEqual(@as(usize, 2), ac.snapshots.len);
+    try std.testing.expectEqual(@as(i64, 664), ac.snapshots[1].path_id);
+
+    const group = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "Master" } },
+        .{ .name = "m_Children", .value = .{ .array = &[_]value.Value{ .{ .pptr = .{ .file_id = 0, .path_id = 652 } }, .{ .pptr = .{ .file_id = 0, .path_id = 629 } } } } },
+        .{ .name = "m_AudioMixer", .value = .{ .pptr = .{ .file_id = 0, .path_id = 606 } } },
+    } };
+    const g = AudioMixerGroup.fromValue(group);
+    try std.testing.expectEqualStrings("Master", g.name);
+    try std.testing.expectEqual(@as(usize, 2), g.children.len);
+    try std.testing.expectEqual(@as(i64, 629), g.children[1].path_id);
+    try std.testing.expectEqual(@as(i64, 606), g.audio_mixer.?.path_id);
+
+    const snap = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "Default_Mix" } },
+        .{ .name = "m_Time", .value = .{ .float = 0.1 } },
+        .{ .name = "m_Values", .value = .{ .array = &[_]value.Value{ .{ .float = 0 }, .{ .float = 1 } } } },
+    } };
+    const s = AudioMixerSnapshot.fromValue(snap);
+    try std.testing.expectEqualStrings("Default_Mix", s.name);
+    try std.testing.expectEqual(@as(f64, 0.1), s.time);
+    try std.testing.expectEqual(@as(usize, 2), s.values);
 }

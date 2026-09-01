@@ -2302,3 +2302,21 @@ posx/negx/posy/negy/posz/negz.
 
 UnityPy has no Cubemap export at all. Verified: 18/18 face PNGs valid,
 stream slices byte-exact. 373/373 tests.
+
+2026-09-01 (audio mixer export): the AudioMixer family (classes 241/
+243/245) exports its graph. In modern Unity the mixer parameters live in
+the controller's m_MixerConstant index tables (groups, effects,
+snapshots, name buffers), while the group objects carry only the named
+hierarchy (m_Children PPtrs) and snapshots carry name/time. The export
+joins the two: the controller writes a mixer JSON with the resolved
+group tree (every group's name and its children, walked through the
+serialized file's objects with injected trees for typeless files), the
+named snapshot list, and the starting snapshot; groups and snapshots
+each write their own JSON. UnityPy has no mixer export at all.
+
+Verified on the real 7DTD mixer (MasterAudioMixer): the full named
+hierarchy resolves (61 group references, e.g. Master -> FX Master ->
+Sound Effects -> NO_FX -> DeathFX -> DeathStinger/DeathPlayer/
+DeathImpacts), six snapshots with names (Default_Mix, Player_Death,
+Player_Stunned, Player_Underwater, SFX_Silence, Player_Deafened), and
+53 group + 6 snapshot objects export individually. 374/374 tests.
