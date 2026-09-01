@@ -39,6 +39,7 @@ Run the CLI:
 ./zig-out/bin/unityz stats path/to/asset
 ./zig-out/bin/unityz find path/to/asset Player
 ./zig-out/bin/unityz show path/to/asset 100
+./zig-out/bin/unityz fsb path/to/bank.fsb --outdir out/
 ./zig-out/bin/unityz hash path/to/asset
 ./zig-out/bin/unityz diff asset_a asset_b
 ./zig-out/bin/unityz skin path/to/asset
@@ -94,11 +95,23 @@ auto-creates `--outdir <dir>`.
 Mono builds strip the class type trees from serialized files, leaving
 typeless objects undecodable. `--trees <file.json>` supplies them: a
 JSON table in the shape `TypeTreeGeneratorAPI.get_nodes_as_json()`
-emits (per-class flat node lists plus `__class_ids__` and
-`__monoscripts__` for MonoBehaviour resolution), and `extract`,
-`show`, and `verify` decode with the injected trees. A missing or
-malformed trees file prints a diagnostic and continues without the
-trees.
+emits (per-class flat node lists plus `__class_ids__` for built-in
+classes, `__monoscripts__` for script resolution, and
+`__script_trees__` for the MonoBehaviour script trees, keyed by
+namespace-qualified name so two assemblies sharing a plain class name
+do not collide). MonoBehaviours resolve their script via `m_Script`
+against the mono-script table; other classes resolve by class name.
+`extract`, `show`, and `verify` decode with the injected trees, and
+`verify` round-trips them byte-exactly (the Raft 2021.3.45f2 data
+files: 38,212/38,213 objects clean; the two exceptions use custom
+serialization). A missing or malformed trees file prints a diagnostic
+and continues without the trees.
+
+For a bare serialized file, streamed references (`m_StreamData` /
+`m_Resource` pointing at a sibling `.resS`/`.resource`) resolve against
+the on-disk sidecar files next to it; `extract` and `verify` load them
+automatically, so streamed textures/audio export without bundling the
+file first.
 
 Textures and sprites export as PNG by default or TGA / BMP / raw RGBA8
 with `--format tga|bmp|raw` (UnityPy only writes PNG). SpriteAtlas
@@ -293,7 +306,11 @@ AudioClips export their streamed audio (OGG/FSB banks, WAV-wrapped PCM,
 MP3) with an FSB5 metadata sidecar (sample rate, channels, loop points,
 duration, format - UnityPy never surfaces these). FSB5 banks in the
 codecs that decode in pure Zig (PCM8/16/24/32/FLOAT, GCADPCM, IMA ADPCM)
-also export as a playable WAV with no external tools.
+also export as a playable WAV with no external tools. A raw FSB5 bank
+(as carved out of an FMOD `.bank` file) is decoded the same way by the
+`fsb` command: `unityz fsb bank.fsb --outdir out/` writes one
+WAV/OGG per sample plus a `bank.json` metadata sidecar - the audio of
+any FMOD-driven Unity game, no external tools.
 
 Vorbis banks
 (the common case) are remuxed to a playable Ogg in pure Zig - the

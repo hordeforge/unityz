@@ -591,3 +591,72 @@ test "read rejects truncated data" {
     var r = streams.Reader.init(w.getWritten());
     try std.testing.expectError(error.OutOfBounds, readObject(a, &r, root));
 }
+
+test "injected-tree MonoBehaviour decode with patched header flags" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // Flat wire-style node list for GizmoBox (standard header + size) as the
+    // prep tool emits it: TypeTreeGeneratorAPI script tree with the header
+    // alignment flags patched in from the TPK MonoBehaviour tree (the
+    // generator emits zero flags; Unity aligns m_Script to 4 after m_Enabled).
+    const FlatNode = struct { ty: []const u8, name: []const u8, level: u32, meta: i32 };
+    const flat = [_]FlatNode{
+        .{ .ty = "GizmoBox", .name = "Base", .level = 0, .meta = 0 },
+        .{ .ty = "PPtr<GameObject>", .name = "m_GameObject", .level = 1, .meta = 65 },
+        .{ .ty = "int", .name = "m_FileID", .level = 2, .meta = 65 },
+        .{ .ty = "SInt64", .name = "m_PathID", .level = 2, .meta = 65 },
+        .{ .ty = "UInt8", .name = "m_Enabled", .level = 1, .meta = 16641 },
+        .{ .ty = "PPtr<MonoScript>", .name = "m_Script", .level = 1, .meta = 0 },
+        .{ .ty = "int", .name = "m_FileID", .level = 2, .meta = 8388609 },
+        .{ .ty = "SInt64", .name = "m_PathID", .level = 2, .meta = 8388609 },
+        .{ .ty = "string", .name = "m_Name", .level = 1, .meta = 557057 },
+        .{ .ty = "Array", .name = "Array", .level = 2, .meta = 540673 },
+        .{ .ty = "int", .name = "size", .level = 3, .meta = 524289 },
+        .{ .ty = "char", .name = "data", .level = 3, .meta = 524289 },
+        .{ .ty = "Vector3", .name = "size", .level = 1, .meta = 0 },
+        .{ .ty = "float", .name = "x", .level = 2, .meta = 0 },
+        .{ .ty = "float", .name = "y", .level = 2, .meta = 0 },
+        .{ .ty = "float", .name = "z", .level = 2, .meta = 0 },
+    };
+    const nodes = try a.alloc(typetree.Node, flat.len);
+    for (flat, 0..) |f, i| {
+        nodes[i] = .{ .level = f.level, .type_name = f.ty, .name = f.name, .meta_flags = f.meta };
+    }
+    const tree = try typetree.fromFlatNodes(a, nodes);
+
+    // Real bytes of sharedassets0.assets object 30969 (44 bytes). Unity pads
+    // m_Script to a 4-byte boundary after m_Enabled (3 zero bytes at 13-15).
+    const data = [_]u8{
+        0x00, 0x00, 0x00, 0x00, 0xdb, 0x1b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x26, 0x04, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9a, 0x99, 0x99, 0x3e,
+        0x9a, 0x99, 0x99, 0x3e, 0x9a, 0x99, 0x99, 0x3e,
+    };
+    var r = streams.Reader.init(&data);
+    const v = try readObject(a, &r, &tree.roots[0]);
+    try std.testing.expectEqual(@as(usize, 44), r.position());
+    const pptr_of = struct {
+        fn field(val: value.Value, name: []const u8) ?value.PPtr {
+            const fields = switch (val) {
+                .obj => |f| f,
+                else => return null,
+            };
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) {
+                    return switch (f.value) {
+                        .pptr => |p| p,
+                        else => null,
+                    };
+                }
+            }
+            return null;
+        }
+    }.field;
+    const game_object = pptr_of(v, "m_GameObject").?;
+    try std.testing.expectEqual(@as(i32, 0), game_object.file_id);
+    try std.testing.expectEqual(@as(i64, 7131), game_object.path_id);
+    const script = pptr_of(v, "m_Script").?;
+    try std.testing.expectEqual(@as(i32, 1), script.file_id);
+    try std.testing.expectEqual(@as(i64, 1062), script.path_id);
+}
