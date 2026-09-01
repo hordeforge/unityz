@@ -1520,6 +1520,18 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 }
                 try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = unityz.classes.stringField(v, "m_Name") orelse "", .subdir = subdir });
             },
+            241 => { // AudioMixerController -> mixer graph JSON
+                const ac = unityz.classes.AudioMixerController.fromValue(v);
+                try writeMixerFiles(arena, subdir, o.path_id, ac, &sf, basename(path), injected, manifest, &extracted, stdout);
+            },
+            243 => { // AudioMixerGroupController
+                const g = unityz.classes.AudioMixerGroup.fromValue(v);
+                try writeMixerGroupFiles(arena, subdir, o.path_id, g, manifest, &extracted, stdout);
+            },
+            245 => { // AudioMixerSnapshotController
+                const s = unityz.classes.AudioMixerSnapshot.fromValue(v);
+                try writeMixerSnapshotFiles(arena, subdir, o.path_id, s, manifest, &extracted, stdout);
+            },
             43 => { // Mesh -> Wavefront OBJ
                 const mesh = unityz.classes.Mesh.fromValue(v);
                 const obj = writeMeshObj(arena, &sf, v, &mesh) catch |err| {
@@ -1887,6 +1899,160 @@ fn readObjectValue(
         return unityz.object_reader.readObject(arena, &r2, &tree.roots[0]) catch null;
     }
     return null;
+}
+
+/// Recursively writes an AudioMixerGroup subtree: the object's name plus its
+/// resolved children. The depth cap stops a corrupt cycle from recursing
+/// forever; mixer hierarchies are trees in practice.
+fn writeMixerGroupJson(
+    w: *Io.Writer,
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    own_basename: []const u8,
+    injected: ?*const InjectedTrees,
+    path_id: i64,
+    depth: u32,
+) !void {
+    try w.print("{{\"path_id\":{d}", .{path_id});
+    if (readObjectValue(arena, sf, path_id, own_basename, injected)) |obj| {
+        const g = unityz.classes.AudioMixerGroup.fromValue(obj);
+        try w.print(",\"name\":\"{s}\"", .{g.name});
+        if (g.children.len != 0 and depth < 32) {
+            try w.writeAll(",\"children\":[");
+            for (g.children, 0..) |c, i| {
+                if (i != 0) try w.writeByte(',');
+                try writeMixerGroupJson(w, arena, sf, own_basename, injected, c.path_id, depth + 1);
+            }
+            try w.writeByte(']');
+        }
+    } else {
+        try w.writeAll(",\"name\":\"\"");
+    }
+    try w.writeByte('}');
+}
+
+/// AudioMixerController export: the mixer graph with resolved group names,
+/// the snapshot list, and the starting snapshot. UnityPy has no mixer
+/// export at all; the group hierarchy is resolved through the serialized
+/// file's objects (injected trees for typeless Mono files).
+fn writeMixerFiles(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    ac: unityz.classes.AudioMixerController,
+    sf: *const unityz.serialized.SerializedFile,
+    own_basename: []const u8,
+    injected: ?*const InjectedTrees,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: *Io.Writer,
+) !void {
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"path_id\":{d},\"name\":\"{s}\",\"masterGroup\":", .{ path_id, ac.name });
+    if (ac.master_group) |mg| {
+        try writeMixerGroupJson(w, arena, sf, own_basename, injected, mg.path_id, 0);
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\"snapshots\":[");
+    for (ac.snapshots, 0..) |s, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("{{\"path_id\":{d}", .{s.path_id});
+        if (readObjectValue(arena, sf, s.path_id, own_basename, injected)) |sv| {
+            const sn = unityz.classes.AudioMixerSnapshot.fromValue(sv);
+            try w.print(",\"name\":\"{s}\"", .{sn.name});
+        }
+        try w.writeByte('}');
+    }
+    try w.writeByte(']');
+    try w.writeAll(",\"startSnapshot\":");
+    if (ac.start_snapshot) |ss| {
+        try w.print("{{\"path_id\":{d}", .{ss.path_id});
+        if (readObjectValue(arena, sf, ss.path_id, own_basename, injected)) |sv| {
+            const sn = unityz.classes.AudioMixerSnapshot.fromValue(sv);
+            try w.print(",\"name\":\"{s}\"", .{sn.name});
+        }
+        try w.writeByte('}');
+    } else {
+        try w.writeAll("null");
+    }
+    try w.print(",\"updateMode\":{d}}}", .{ac.update_mode});
+    var list = aw.toArrayList();
+    const meta = try list.toOwnedSlice(arena);
+    const base_name = std.mem.trimEnd(u8, ac.name, "\x00");
+    var name_buf: [160]u8 = undefined;
+    const name = sanitizeComponent(if (base_name.len != 0)
+        try std.fmt.bufPrint(&name_buf, "mixer_{d}_{s}.json", .{ path_id, base_name })
+    else
+        try std.fmt.bufPrint(&name_buf, "mixer_{d}.json", .{path_id}));
+    try extractFile(subdir, name, meta);
+    try stdout.print("extracted {s} (mixer graph)\n", .{name});
+    extracted.* += 1;
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = 241, .name = ac.name, .subdir = subdir });
+}
+
+/// AudioMixerGroupController export: name plus the flat child path-id list.
+fn writeMixerGroupFiles(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    g: unityz.classes.AudioMixerGroup,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: *Io.Writer,
+) !void {
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"path_id\":{d},\"name\":\"{s}\",\"children\":[", .{ path_id, g.name });
+    for (g.children, 0..) |c, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("{d}", .{c.path_id});
+    }
+    try w.writeAll("]}");
+    var list = aw.toArrayList();
+    const meta = try list.toOwnedSlice(arena);
+    const base_name = std.mem.trimEnd(u8, g.name, "\x00");
+    var name_buf: [160]u8 = undefined;
+    const name = sanitizeComponent(if (base_name.len != 0)
+        try std.fmt.bufPrint(&name_buf, "mixer_group_{d}_{s}.json", .{ path_id, base_name })
+    else
+        try std.fmt.bufPrint(&name_buf, "mixer_group_{d}.json", .{path_id}));
+    try extractFile(subdir, name, meta);
+    try stdout.print("extracted {s} (mixer group)\n", .{name});
+    extracted.* += 1;
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = 243, .name = g.name, .subdir = subdir });
+}
+
+/// AudioMixerSnapshotController export: name, transition time, and the
+/// number of parameter values it sets.
+fn writeMixerSnapshotFiles(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    s: unityz.classes.AudioMixerSnapshot,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: *Io.Writer,
+) !void {
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"path_id\":{d},\"name\":\"{s}\",\"time\":{d},\"parameters\":{d}}}", .{ path_id, s.name, s.time, s.values });
+    var list = aw.toArrayList();
+    const meta = try list.toOwnedSlice(arena);
+    const base_name = std.mem.trimEnd(u8, s.name, "\x00");
+    var name_buf: [160]u8 = undefined;
+    const name = sanitizeComponent(if (base_name.len != 0)
+        try std.fmt.bufPrint(&name_buf, "mixer_snapshot_{d}_{s}.json", .{ path_id, base_name })
+    else
+        try std.fmt.bufPrint(&name_buf, "mixer_snapshot_{d}.json", .{path_id}));
+    try extractFile(subdir, name, meta);
+    try stdout.print("extracted {s} (mixer snapshot)\n", .{name});
+    extracted.* += 1;
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = 245, .name = s.name, .subdir = subdir });
 }
 
 const MonoScriptCache = std.AutoHashMapUnmanaged(i64, unityz.classes.MonoScript);

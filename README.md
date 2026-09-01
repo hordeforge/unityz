@@ -358,6 +358,13 @@ chain of `m_CompleteImageSize` bytes, so the first mip decodes with the
 same pipeline as Texture2D, including streamed faces resolved from the
 sibling `.resS` sidecar. UnityPy has no Cubemap export at all.
 
+AudioMixers (classes 241/243/245) export their graph: the controller
+writes a `mixer_<id>_<name>.json` with the resolved group hierarchy
+(every group's name and its children, walked through the object table),
+the named snapshot list, and the starting snapshot; groups and
+snapshots each export their own JSON too. UnityPy has no mixer export
+at all.
+
 Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).
