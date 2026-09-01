@@ -328,6 +328,14 @@ release binaries, so typeless files - Mono builds strip type trees -
 decode from the raw serialized layout with no sidecar lookup; UnityPy
 has no font export at all.
 
+ComputeShaders (class 72) export each kernel's compiled payload - DXBC
+(D3D11), SPIR-V (Vulkan), or the `#version`-prefixed GLSL source
+(OpenGL) - one file per platform variant, plus a descriptor JSON with
+thread-group sizes, resource-binding counts, and the constant-buffer
+layouts. The typeless raw layout is self-describing, so Mono builds
+extract them with no type trees; neither UnityPy nor AssetRipper
+handles ComputeShader at all.
+
 Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).

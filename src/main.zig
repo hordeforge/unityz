@@ -1113,6 +1113,108 @@ fn fontMetadataJson(arena: std.mem.Allocator, path_id: i64, class_id: i32, f: un
     return try list.toOwnedSlice(arena);
 }
 
+/// Extension for a ComputeShader kernel payload, from its magic: DXBC
+/// (D3D11/12), SPIR-V (Vulkan), or the `#version`-prefixed GLSL source.
+fn computeCodeExt(code: []const u8) []const u8 {
+    if (code.len >= 4 and std.mem.eql(u8, code[0..4], "DXBC")) return "dxbc";
+    if (code.len >= 4 and std.mem.eql(u8, code[0..4], "\x03\x02\x23\x07")) return "spirv";
+    if (code.len >= 8 and std.mem.startsWith(u8, code, "#version")) return "glsl";
+    return "bin";
+}
+
+/// Writes a ComputeShader's kernel payloads (one file per platform variant
+/// and kernel, extension from the code magic) plus a descriptor JSON. The
+/// per-kernel `code` blobs are DXBC / SPIR-V / GLSL source, so this also
+/// recovers human-readable compute shaders. UnityPy has no ComputeShader
+/// export at all.
+fn writeComputeShaderFiles(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    cs: unityz.classes.ComputeShader,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: *Io.Writer,
+) !void {
+    const base_name = std.mem.trimEnd(u8, cs.name, "\x00");
+    var cs_name_buf: [160]u8 = undefined;
+    const cs_base = if (base_name.len != 0)
+        try std.fmt.bufPrint(&cs_name_buf, "compute_{d}_{s}", .{ path_id, base_name })
+    else
+        try std.fmt.bufPrint(&cs_name_buf, "compute_{d}", .{path_id});
+
+    for (cs.variants, 0..) |v, vi| {
+        for (v.kernels) |k| {
+            if (k.code.len == 0) continue;
+            var name_buf: [192]u8 = undefined;
+            const name = sanitizeComponent(try std.fmt.bufPrint(&name_buf, "{s}_{s}_v{d}.{s}", .{ cs_base, k.name, vi, computeCodeExt(k.code) }));
+            try extractFile(subdir, name, k.code);
+            try stdout.print("extracted {s} ({d} bytes, {s})\n", .{ name, k.code.len, computeCodeExt(k.code) });
+            extracted.* += 1;
+        }
+    }
+    if (try computeShaderJson(arena, path_id, cs)) |meta| {
+        var meta_name_buf: [192]u8 = undefined;
+        const meta_name = try std.fmt.bufPrint(&meta_name_buf, "{s}.compute.json", .{cs_base});
+        try extractFile(subdir, sanitizeComponent(meta_name), meta);
+    }
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = 72, .name = cs.name, .subdir = subdir });
+}
+
+/// ComputeShader descriptor JSON: platform variants with per-kernel
+/// thread-group sizes, payload format/size, resource binding counts, and
+/// the constant-buffer layouts.
+fn computeShaderJson(arena: std.mem.Allocator, path_id: i64, cs: unityz.classes.ComputeShader) !?[]u8 {
+    var out = std.ArrayList(u8).empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    const w = &aw.writer;
+    try w.print("{{\"path_id\":{d},\"class\":72,\"name\":\"{s}\",\"variants\":[", .{ path_id, cs.name });
+    for (cs.variants, 0..) |v, vi| {
+        if (vi != 0) try w.writeByte(',');
+        try w.print("{{\"renderer\":{d},\"level\":{d},\"format\":\"{s}\",\"resourcesResolved\":{},\"kernels\":[", .{ v.target_renderer, v.target_level, if (v.kernels.len != 0 and v.kernels[0].code.len != 0) computeCodeExt(v.kernels[0].code) else "none", v.resources_resolved });
+        for (v.kernels, 0..) |k, ki| {
+            if (ki != 0) try w.writeByte(',');
+            try w.print("{{\"name\":\"{s}\",\"threadGroupSize\":[", .{k.name});
+            for (k.thread_group_size, 0..) |t, ti| {
+                if (ti != 0) try w.writeByte(',');
+                try w.print("{d}", .{t});
+            }
+            try w.print("],\"uniqueVariants\":{d},\"codeSize\":{d},\"codeFile\":\"{s}_{s}_v{d}.{s}\",\"cbs\":{d},\"textures\":{d},\"inBuffers\":{d},\"outBuffers\":{d}", .{
+                k.unique_variants,
+                k.code.len,
+                std.mem.trimEnd(u8, cs.name, "\x00"),
+                k.name,
+                vi,
+                computeCodeExt(k.code),
+                k.cb_count,
+                k.texture_count,
+                k.in_buffer_count,
+                k.out_buffer_count,
+            });
+            try w.writeByte('}');
+        }
+        try w.writeByte(']');
+        if (v.constant_buffers.len != 0) {
+            try w.writeAll(",\"constantBuffers\":[");
+            for (v.constant_buffers, 0..) |cb, ci| {
+                if (ci != 0) try w.writeByte(',');
+                try w.print("{{\"name\":\"{s}\",\"byteSize\":{d},\"params\":[", .{ cb.name, cb.byte_size });
+                for (cb.params, 0..) |p, pi| {
+                    if (pi != 0) try w.writeByte(',');
+                    try w.print("{{\"name\":\"{s}\",\"type\":{d},\"offset\":{d},\"arraySize\":{d},\"rowCount\":{d},\"colCount\":{d}}}", .{ p.name, p.type, p.offset, p.array_size, p.row_count, p.col_count });
+                }
+                try w.writeByte(']');
+                try w.writeByte('}');
+            }
+            try w.writeByte(']');
+        }
+        try w.writeByte('}');
+    }
+    try w.writeAll("]}");
+    var list = aw.toArrayList();
+    return try list.toOwnedSlice(arena);
+}
+
 fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, name_filter: ?[]const u8, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("unityz: {s}: serialized file parse failed: {s}\n", .{ path, @errorName(err) });
@@ -1147,20 +1249,31 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
         if (type_index >= sf.types.len) continue;
         var tree = sf.types[type_index].type_tree;
         if (tree.roots.len == 0) {
-            if (o.class_id == 128) {
-                // Fonts embed their TrueType/OpenType bytes inline in the
-                // object, so typeless files decode from the raw serialized
-                // layout with no tree (the tree's NoTransfer flag only
-                // moves the payload in editor/YAML layouts).
-                const f = unityz.classes.Font.fromRaw(data, sf.endian, sf.unity_version) catch |err| {
-                    try stdout.print("  object {d} (class 128 Font): decode failed: {s}\n", .{ o.path_id, @errorName(err) });
+            if (o.class_id == 128 or o.class_id == 72) {
+                // Fonts and ComputeShaders self-describe their serialized
+                // layout, so typeless files (Mono builds strip type trees)
+                // decode from the raw layout with no tree.
+                if (o.class_id == 128) {
+                    const f = unityz.classes.Font.fromRaw(data, sf.endian, sf.unity_version) catch |err| {
+                        try stdout.print("  object {d} (class 128 Font): decode failed: {s}\n", .{ o.path_id, @errorName(err) });
+                        skipped += 1;
+                        continue;
+                    };
+                    if (name_filter) |nf| {
+                        if (std.ascii.indexOfIgnoreCase(f.name, nf) == null) continue;
+                    }
+                    try writeFontFiles(arena, subdir, o.path_id, o.class_id, f, manifest, &extracted, stdout);
+                    continue;
+                }
+                const cs = unityz.classes.ComputeShader.fromRaw(data, sf.endian, sf.unity_version) catch |err| {
+                    try stdout.print("  object {d} (class 72 ComputeShader): decode failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
                 };
                 if (name_filter) |nf| {
-                    if (std.ascii.indexOfIgnoreCase(f.name, nf) == null) continue;
+                    if (std.ascii.indexOfIgnoreCase(cs.name, nf) == null) continue;
                 }
-                try writeFontFiles(arena, subdir, o.path_id, o.class_id, f, manifest, &extracted, stdout);
+                try writeComputeShaderFiles(arena, subdir, o.path_id, cs, manifest, &extracted, stdout);
                 continue;
             }
             // Mono builds ship no embedded trees; decode from the injected
@@ -1354,6 +1467,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
             128 => { // Font
                 const f = unityz.classes.Font.fromValue(v);
                 try writeFontFiles(arena, subdir, o.path_id, o.class_id, f, manifest, &extracted, stdout);
+            },
+            72 => { // ComputeShader
+                const cs = unityz.classes.ComputeShader.fromValue(v);
+                try writeComputeShaderFiles(arena, subdir, o.path_id, cs, manifest, &extracted, stdout);
             },
             43 => { // Mesh -> Wavefront OBJ
                 const mesh = unityz.classes.Mesh.fromValue(v);
