@@ -564,7 +564,7 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
         } else if (tag == 1) {
             if (row > 0 and row <= table_data.row_counts[tables.typeref]) {
                 var tr = rowReader(&table_data, tables.typeref, row);
-                        try tr.skip(codedSize(resolutionScopeMax(table_data.row_counts), 2));
+                try tr.skip(codedSize(resolutionScopeMax(table_data.row_counts), 2));
                 const tname = try readString(&tr, &heaps);
                 const tns = try readString(&tr, &heaps);
                 d.base_name = if (tns.len != 0)
@@ -608,7 +608,7 @@ pub fn isMonoBehaviour(arena: std.mem.Allocator, td: TypeDef, type_defs: []const
 // ---------------------------------------------------------------------------
 
 test "readCompressed decodes the 1/2/4-byte forms" {
-    var r = streams.Reader.init(&[_]u8{ 0x7f });
+    var r = streams.Reader.init(&[_]u8{0x7f});
     try std.testing.expectEqual(@as(u32, 0x7f), try readCompressed(&r));
     r = streams.Reader.init(&[_]u8{ 0x80, 0x01 });
     try std.testing.expectEqual(@as(u32, 0x01), try readCompressed(&r));
