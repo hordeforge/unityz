@@ -107,6 +107,10 @@ Shader objects export a readable ShaderLab reconstruction
 (`shader_<id>_<name>.shader`: properties with defaults, fallback, custom
 editor, keywords, subshader tags/LOD, pass names, and a per-stage count of
 the compiled GPU programs; the original HLSL is compiled away).
+VideoClip objects export their streamed video straight from the
+`.resource`/`.resS` sidecar (`video_<id>_<name>.mp4` plus a metadata JSON:
+source path, dimensions, frame rate/count, format, stream offset/size).
+Verified against Green Hell's 1080p60 and 4K cutscenes.
 
 Mono builds strip the class type trees from serialized files, leaving
 typeless objects undecodable. `--trees <file.json>` supplies them:
