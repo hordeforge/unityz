@@ -2060,3 +2060,11 @@ valid v22 and v4 files, with header length fields nudged - every
 parse succeeds or errors cleanly, never crashes, and any parsed
 object's data must borrow from the (possibly truncated) source
 bounds-checked via pointer arithmetic. 341/341 tests.
+
+2026-09-01 (texture decode mutation fuzz): the format decoders get
+the hostile-input treatment the parsers got: 4000 seeded iterations
+feeding mutated and random streams (0-64KB) to decode() across 17
+compressed formats (DXT1/3/5, BC4/5/7/6H, ETC1/ETC2 variants incl.
+3DS, and the four crunched formats through unitycrunch) at power-of-
+two sizes 1..64: every decode succeeds with exactly w*h*4 RGBA8 bytes
+or errors cleanly - never crashes. 342/342 tests.

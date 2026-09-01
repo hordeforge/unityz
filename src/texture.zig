@@ -4871,3 +4871,41 @@ test "crunched formats route to the crash-stable decompressor" {
         try std.testing.expectError(error.UnsupportedFormat, decode(a, fmt, 4, 4, ""));
     }
 }
+
+test "texture decode survives mutated and random compressed streams" {
+    // Hostile pixel data must never crash the decoders: for each
+    // compressed format, mutated and random streams of plausible sizes
+    // must either decode or error - never fault, and a successful decode
+    // always yields exactly w*h*4 RGBA8 bytes.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0x74e7);
+    const rnd = prng.random();
+
+    const formats = [_]i32{
+        format.dxt1,         format.dxt3,       format.dxt5,
+        format.bc4,          format.bc5,        format.bc7,
+        format.bc6h,         format.etc_rgb4,   format.etc2_rgb,
+        format.etc2_rgba1,   format.etc2_rgba8, format.etc_rgb4_3ds,
+        format.etc_rgba8_3ds, format.dxt1_crunched, format.dxt5_crunched,
+        format.etc_rgb4_crunched, format.etc2_rgba8_crunched,
+    };
+    var seed: [65536]u8 = undefined;
+    rnd.bytes(&seed);
+    var iter: usize = 0;
+    while (iter < 4000) : (iter += 1) {
+        const f = formats[rnd.intRangeAtMost(u8, 0, formats.len - 1)];
+        const w: u32 = @as(u32, 1) << rnd.intRangeAtMost(u5, 0, 6); // 1..64
+        const h: u32 = @as(u32, 1) << rnd.intRangeAtMost(u5, 0, 6);
+        const len = rnd.intRangeAtMost(u32, 0, @intCast(seed.len));
+        var buf: [65536]u8 = undefined;
+        @memcpy(buf[0..seed.len], &seed);
+        if (len > 0) {
+            const m = rnd.intRangeAtMost(u32, 0, @intCast(@min(len, seed.len) - 1));
+            buf[m] ^= @intCast(rnd.int(u8) | 1);
+        }
+        const out = decode(a, f, w, h, buf[0..len]) catch continue;
+        try std.testing.expectEqual(@as(usize, @intCast(w)) * h * 4, out.len);
+    }
+}
