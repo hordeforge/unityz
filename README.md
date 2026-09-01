@@ -365,6 +365,13 @@ the named snapshot list, and the starting snapshot; groups and
 snapshots each export their own JSON too. UnityPy has no mixer export
 at all.
 
+ParticleSystems (class 198) export a `particle_<id>.json` summary:
+the timeline (duration, looping, prewarm, simulation speed, scaling),
+the main/emission/shape module values (start lifetime/speed/size,
+gravity, max particles, emission rate, burst count, shape type/angle/
+radius), and the enabled flag of every module. UnityPy has no
+ParticleSystem export at all.
+
 Objects reserialize
 byte-exactly and can be edited in place
 across formats 2-22 (legacy rewrites included).

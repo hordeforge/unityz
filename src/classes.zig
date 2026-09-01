@@ -1104,6 +1104,102 @@ pub const AudioMixerSnapshot = struct {
     }
 };
 
+/// Unity ParticleSystem (class 198): the emitter's timeline plus its module
+/// configuration. A compact summary (main/emission/shape values and the
+/// enabled module flags) is what `extract` surfaces; UnityPy has no
+/// ParticleSystem export at all.
+pub const ParticleSystem = struct {
+    game_object: ?value.PPtr = null,
+    duration: f64 = 0,
+    looping: bool = false,
+    prewarm: bool = false,
+    play_on_awake: bool = false,
+    simulation_speed: f64 = 0,
+    scaling_mode: i64 = 0,
+    stop_action: i64 = 0,
+    culling_mode: i64 = 0,
+    // InitialModule summary
+    start_lifetime: f64 = 0,
+    start_speed: f64 = 0,
+    start_size: f64 = 0,
+    gravity_modifier: f64 = 0,
+    max_particles: i64 = 0,
+    // EmissionModule
+    emission_enabled: bool = false,
+    rate_over_time: f64 = 0,
+    burst_count: usize = 0,
+    // ShapeModule
+    shape_enabled: bool = false,
+    shape_type: i64 = 0,
+    shape_angle: f64 = 0,
+    shape_radius: f64 = 0,
+    // Enabled module flags, in Unity's module order.
+    module_flags: [22]bool = .{false} ** 22,
+
+    pub fn fromValue(v: value.Value) ParticleSystem {
+        var self = ParticleSystem{
+            .game_object = pptrField(v, "m_GameObject"),
+            .duration = floatField(v, "lengthInSec") orelse 0,
+            .looping = boolField(v, "looping") orelse false,
+            .prewarm = boolField(v, "prewarm") orelse false,
+            .play_on_awake = boolField(v, "playOnAwake") orelse false,
+            .simulation_speed = floatField(v, "simulationSpeed") orelse 0,
+            .scaling_mode = intField(v, "scalingMode") orelse 0,
+            .stop_action = intField(v, "stopAction") orelse 0,
+            .culling_mode = intField(v, "cullingMode") orelse 0,
+        };
+        if (fieldOf(v, "InitialModule")) |m| {
+            self.start_lifetime = curveScalar(m, "startLifetime");
+            self.start_speed = curveScalar(m, "startSpeed");
+            self.start_size = curveScalar(m, "startSize");
+            self.gravity_modifier = curveScalar(m, "gravityModifier");
+            self.max_particles = intField(m, "maxNumParticles") orelse 0;
+        }
+        if (fieldOf(v, "EmissionModule")) |m| {
+            self.emission_enabled = boolField(m, "enabled") orelse false;
+            self.rate_over_time = curveScalar(m, "rateOverTime");
+            if (fieldOf(m, "m_BurstCount")) |b| self.burst_count = narrow(usize, b.asInt() orelse 0);
+        }
+        if (fieldOf(v, "ShapeModule")) |m| {
+            self.shape_enabled = boolField(m, "enabled") orelse false;
+            self.shape_type = intField(m, "type") orelse 0;
+            self.shape_angle = floatField(m, "angle") orelse 0;
+            self.shape_radius = curveScalar(m, "radius");
+        }
+        const modules = [_][]const u8{
+            "InitialModule",                "EmissionModule",     "ShapeModule",
+            "SizeModule",                   "RotationModule",     "ColorModule",
+            "UVModule",                     "VelocityModule",     "InheritVelocityModule",
+            "LifetimeByEmitterSpeedModule", "ForceModule",        "ExternalForcesModule",
+            "ClampVelocityModule",          "NoiseModule",        "SizeBySpeedModule",
+            "RotationBySpeedModule",        "ColorBySpeedModule", "CollisionModule",
+            "TriggerModule",                "SubModule",          "LightsModule",
+            "TrailModule",
+        };
+        for (modules, 0..) |name, i| {
+            if (fieldOf(v, name)) |m| {
+                self.module_flags[i] = boolField(m, "enabled") orelse false;
+            }
+        }
+        return self;
+    }
+};
+
+/// The scalar of a MinMaxCurve value: `scalar` when the state is constant,
+/// otherwise the min/max bounds. Values come from the file, so a missing or
+/// malformed curve degrades to 0.
+fn curveScalar(v: value.Value, name: []const u8) f64 {
+    const f = fieldOf(v, name) orelse return 0;
+    const scalar = floatField(f, "scalar") orelse return 0;
+    if (scalar != 0) return scalar;
+    // Two-constant curves carry the range in minScalar/maxScalar; prefer the
+    // max so a positive range reads as its upper bound.
+    const min_scalar = floatField(f, "minScalar") orelse 0;
+    const max_scalar = floatField(f, "maxScalar") orelse 0;
+    if (max_scalar != 0) return max_scalar;
+    return min_scalar;
+}
+
 pub const GameObject = struct {
     name: []const u8 = "",
     layer: i64 = 0,
@@ -2451,4 +2547,52 @@ test "audio mixer family fromValue reads the graph fields" {
     try std.testing.expectEqualStrings("Default_Mix", s.name);
     try std.testing.expectEqual(@as(f64, 0.1), s.time);
     try std.testing.expectEqual(@as(usize, 2), s.values);
+}
+
+test "particleSystem fromValue reads the module summary" {
+    const v = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_GameObject", .value = .{ .pptr = .{ .file_id = 0, .path_id = 1416 } } },
+        .{ .name = "lengthInSec", .value = .{ .float = 5 } },
+        .{ .name = "looping", .value = .{ .bool = true } },
+        .{ .name = "simulationSpeed", .value = .{ .float = 1 } },
+        .{ .name = "scalingMode", .value = .{ .int = 1 } },
+        .{ .name = "InitialModule", .value = .{ .obj = &[_]value.Field{
+            .{ .name = "startLifetime", .value = .{ .obj = &[_]value.Field{.{ .name = "scalar", .value = .{ .float = 2.5 } }} } },
+            .{ .name = "startSpeed", .value = .{ .obj = &[_]value.Field{ .{ .name = "scalar", .value = .{ .float = 0 } }, .{ .name = "minScalar", .value = .{ .float = 3 } }, .{ .name = "maxScalar", .value = .{ .float = 6 } } } } },
+            .{ .name = "startSize", .value = .{ .obj = &[_]value.Field{.{ .name = "scalar", .value = .{ .float = 1 } }} } },
+            .{ .name = "gravityModifier", .value = .{ .obj = &[_]value.Field{.{ .name = "scalar", .value = .{ .float = 0.5 } }} } },
+            .{ .name = "maxNumParticles", .value = .{ .int = 1000 } },
+        } } },
+        .{ .name = "EmissionModule", .value = .{ .obj = &[_]value.Field{
+            .{ .name = "enabled", .value = .{ .bool = true } },
+            .{ .name = "rateOverTime", .value = .{ .obj = &[_]value.Field{.{ .name = "scalar", .value = .{ .float = 10 } }} } },
+            .{ .name = "m_BurstCount", .value = .{ .int = 2 } },
+        } } },
+        .{ .name = "ShapeModule", .value = .{ .obj = &[_]value.Field{
+            .{ .name = "enabled", .value = .{ .bool = true } },
+            .{ .name = "type", .value = .{ .int = 4 } },
+            .{ .name = "angle", .value = .{ .float = 25 } },
+            .{ .name = "radius", .value = .{ .obj = &[_]value.Field{.{ .name = "scalar", .value = .{ .float = 1 } }} } },
+        } } },
+        .{ .name = "NoiseModule", .value = .{ .obj = &[_]value.Field{.{ .name = "enabled", .value = .{ .bool = true } }} } },
+        .{ .name = "TrailModule", .value = .{ .obj = &[_]value.Field{.{ .name = "enabled", .value = .{ .bool = false } }} } },
+    } };
+    const ps = ParticleSystem.fromValue(v);
+    try std.testing.expectEqual(@as(i64, 1416), ps.game_object.?.path_id);
+    try std.testing.expectEqual(@as(f64, 5), ps.duration);
+    try std.testing.expect(ps.looping);
+    try std.testing.expectEqual(@as(i64, 1), ps.scaling_mode);
+    try std.testing.expectEqual(@as(f64, 2.5), ps.start_lifetime);
+    // two-constant curve: scalar 0, so the max bound wins
+    try std.testing.expectEqual(@as(f64, 6), ps.start_speed);
+    try std.testing.expectEqual(@as(f64, 1), ps.start_size);
+    try std.testing.expectEqual(@as(i64, 1000), ps.max_particles);
+    try std.testing.expect(ps.emission_enabled);
+    try std.testing.expectEqual(@as(f64, 10), ps.rate_over_time);
+    try std.testing.expectEqual(@as(usize, 2), ps.burst_count);
+    try std.testing.expectEqual(@as(i64, 4), ps.shape_type);
+    try std.testing.expectEqual(@as(f64, 25), ps.shape_angle);
+    try std.testing.expectEqual(@as(f64, 1), ps.shape_radius);
+    try std.testing.expect(ps.module_flags[13]); // NoiseModule
+    try std.testing.expect(!ps.module_flags[21]); // TrailModule
 }

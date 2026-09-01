@@ -2320,3 +2320,20 @@ Sound Effects -> NO_FX -> DeathFX -> DeathStinger/DeathPlayer/
 DeathImpacts), six snapshots with names (Default_Mix, Player_Death,
 Player_Stunned, Player_Underwater, SFX_Silence, Player_Deafened), and
 53 group + 6 snapshot objects export individually. 374/374 tests.
+
+2026-09-01 (particle system export): ParticleSystem (class 198) objects
+export a compact `particle_<id>.json` summary: the emitter's timeline
+(lengthInSec, looping, prewarm, playOnAwake, simulationSpeed,
+scalingMode, stopAction, cullingMode) plus the main/emission/shape
+module values and the enabled flag of every module (initial, emission,
+shape, size, rotation, color, uv, velocity, inheritVelocity,
+lifetimeByEmitterSpeed, force, externalForces, clampVelocity, noise,
+sizeBySpeed, rotationBySpeed, colorBySpeed, collision, trigger, sub,
+lights, trail).
+
+MinMaxCurve scalars read via the `scalar` field, falling back to the
+min/max bounds when the curve is two-constant. UnityPy has no
+ParticleSystem export at all. Verified on the real 7DTD bundle: all 92
+particle systems export with values matching the decoded trees (e.g.
+duration 10, startSpeed 5, shape type 18/cone, 30 max particles).
+375/375 tests.
