@@ -1200,6 +1200,145 @@ fn curveScalar(v: value.Value, name: []const u8) f64 {
     return min_scalar;
 }
 
+/// Unity AnimatorController (class 91): the animator's layer/state-machine
+/// constants plus the TOS hash-to-path table that names them. Layer and
+/// state names are not stored as strings - the constants carry name hashes
+/// that resolve through `m_TOS` (e.g. a state's `m_NameID` maps to
+/// "balloon_spin"). UnityPy has no AnimatorController export at all.
+pub const AnimatorController = struct {
+    name: []const u8 = "",
+    clips: []const value.PPtr = &.{},
+    /// m_TOS: hash -> transform/state path.
+    tos: []const TosEntry = &.{},
+    layers: []const Layer = &.{},
+    states: []const State = &.{},
+    state_machine_count: usize = 0,
+    any_state_transitions: usize = 0,
+    default_state: i64 = 0,
+    parameters: usize = 0,
+
+    pub const TosEntry = struct {
+        hash: u32 = 0,
+        path: []const u8 = "",
+    };
+
+    pub const Layer = struct {
+        state_machine_index: i64 = 0,
+        binding: u32 = 0,
+        blending_mode: i64 = 0,
+        default_weight: f64 = 0,
+        ik_pass: bool = false,
+    };
+
+    pub const State = struct {
+        name_id: u32 = 0,
+        full_path_id: u32 = 0,
+        speed: f64 = 0,
+        loop: bool = false,
+        transition_count: usize = 0,
+        blend_tree_count: usize = 0,
+    };
+
+    /// Resolves a name hash through the TOS table.
+    pub fn tosPath(self: *const AnimatorController, hash: u32) []const u8 {
+        for (self.tos) |t| {
+            if (t.hash == hash) return t.path;
+        }
+        return "";
+    }
+
+    pub fn fromValue(v: value.Value) AnimatorController {
+        var self = AnimatorController{ .name = stringField(v, "m_Name") orelse "" };
+        if (fieldOf(v, "m_TOS")) |f| {
+            if (f == .array) {
+                var list: std.ArrayList(TosEntry) = .empty;
+                for (f.array) |item| {
+                    const arr = switch (item) {
+                        .array => |a| a,
+                        else => continue,
+                    };
+                    if (arr.len < 2) continue;
+                    const hash = arr[0].asInt() orelse continue;
+                    const path = switch (arr[1]) {
+                        .string => |s| s,
+                        else => continue,
+                    };
+                    list.append(std.heap.page_allocator, .{ .hash = narrow(u32, hash), .path = path }) catch {};
+                }
+                self.tos = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+            }
+        }
+        if (fieldOf(v, "m_AnimationClips")) |f| {
+            if (f == .array) {
+                var list: std.ArrayList(value.PPtr) = .empty;
+                for (f.array) |item| {
+                    if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
+                        list.append(std.heap.page_allocator, p) catch {};
+                    }
+                }
+                self.clips = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+            }
+        }
+        const controller = fieldOf(v, "m_Controller") orelse return self;
+        if (fieldOf(controller, "m_LayerArray")) |f| {
+            if (f == .array) {
+                var list: std.ArrayList(Layer) = .empty;
+                for (f.array) |item| {
+                    const data = fieldOf(item, "data") orelse continue;
+                    list.append(std.heap.page_allocator, .{
+                        .state_machine_index = intField(data, "m_StateMachineIndex") orelse 0,
+                        .binding = narrow(u32, intField(data, "m_Binding") orelse 0),
+                        .blending_mode = intField(data, "(int&)m_LayerBlendingMode") orelse intField(data, "m_LayerBlendingMode") orelse 0,
+                        .default_weight = floatField(data, "m_DefaultWeight") orelse 0,
+                        .ik_pass = boolField(data, "m_IKPass") orelse false,
+                    }) catch {};
+                }
+                self.layers = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+            }
+        }
+        if (fieldOf(controller, "m_StateMachineArray")) |f| {
+            if (f == .array) {
+                self.state_machine_count = f.array.len;
+                for (f.array) |item| {
+                    const data = fieldOf(item, "data") orelse continue;
+                    self.any_state_transitions += if (fieldOf(data, "m_AnyStateTransitionConstantArray")) |a| (if (a == .array) a.array.len else 0) else 0;
+                    self.default_state = intField(data, "m_DefaultState") orelse 0;
+                    if (fieldOf(data, "m_StateConstantArray")) |sa| {
+                        if (sa == .array) {
+                            var states: std.ArrayList(State) = .empty;
+                            for (sa.array) |sitem| {
+                                const sdata = fieldOf(sitem, "data") orelse continue;
+                                var st = State{
+                                    .name_id = narrow(u32, intField(sdata, "m_NameID") orelse 0),
+                                    .full_path_id = narrow(u32, intField(sdata, "m_FullPathID") orelse 0),
+                                    .speed = floatField(sdata, "m_Speed") orelse 0,
+                                    .loop = boolField(sdata, "m_Loop") orelse false,
+                                };
+                                if (fieldOf(sdata, "m_TransitionConstantArray")) |ta| {
+                                    if (ta == .array) st.transition_count = ta.array.len;
+                                }
+                                if (fieldOf(sdata, "m_BlendTreeConstantArray")) |ba| {
+                                    if (ba == .array) st.blend_tree_count = ba.array.len;
+                                }
+                                states.append(std.heap.page_allocator, st) catch {};
+                            }
+                            self.states = states.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                        }
+                    }
+                }
+            }
+        }
+        if (fieldOf(controller, "m_Values")) |f| {
+            if (fieldOf(f, "data")) |d| {
+                if (fieldOf(d, "m_ValueArray")) |va| {
+                    if (va == .array) self.parameters = va.array.len;
+                }
+            }
+        }
+        return self;
+    }
+};
+
 pub const GameObject = struct {
     name: []const u8 = "",
     layer: i64 = 0,
@@ -2595,4 +2734,60 @@ test "particleSystem fromValue reads the module summary" {
     try std.testing.expectEqual(@as(f64, 1), ps.shape_radius);
     try std.testing.expect(ps.module_flags[13]); // NoiseModule
     try std.testing.expect(!ps.module_flags[21]); // TrailModule
+}
+
+test "animatorController fromValue resolves TOS names" {
+    const v = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "PlayOnSpawn" } },
+        .{ .name = "m_TOS", .value = .{ .array = &[_]value.Value{
+            .{ .array = &[_]value.Value{ .{ .uint = 756556552 }, .{ .string = "Base Layer" } } },
+            .{ .array = &[_]value.Value{ .{ .uint = 2427234550 }, .{ .string = "balloon_spin" } } },
+        } } },
+        .{ .name = "m_AnimationClips", .value = .{ .array = &[_]value.Value{.{ .pptr = .{ .file_id = 0, .path_id = 576 } }} } },
+        .{ .name = "m_Controller", .value = .{ .obj = &[_]value.Field{
+            .{ .name = "m_LayerArray", .value = .{ .array = &[_]value.Value{.{ .obj = &[_]value.Field{
+                .{ .name = "data", .value = .{ .obj = &[_]value.Field{
+                    .{ .name = "m_StateMachineIndex", .value = .{ .int = 0 } },
+                    .{ .name = "m_Binding", .value = .{ .uint = 756556552 } },
+                    .{ .name = "(int&)m_LayerBlendingMode", .value = .{ .int = 0 } },
+                    .{ .name = "m_DefaultWeight", .value = .{ .float = 1 } },
+                    .{ .name = "m_IKPass", .value = .{ .bool = false } },
+                } } },
+            } }} } },
+            .{ .name = "m_StateMachineArray", .value = .{ .array = &[_]value.Value{.{ .obj = &[_]value.Field{
+                .{ .name = "data", .value = .{ .obj = &[_]value.Field{
+                    .{ .name = "m_DefaultState", .value = .{ .int = 0 } },
+                    .{ .name = "m_AnyStateTransitionConstantArray", .value = .{ .array = &[_]value.Value{.{ .obj = &.{} }} } },
+                    .{ .name = "m_StateConstantArray", .value = .{ .array = &[_]value.Value{.{ .obj = &[_]value.Field{
+                        .{ .name = "data", .value = .{ .obj = &[_]value.Field{
+                            .{ .name = "m_NameID", .value = .{ .uint = 2427234550 } },
+                            .{ .name = "m_FullPathID", .value = .{ .uint = 917444821 } },
+                            .{ .name = "m_Speed", .value = .{ .float = 1 } },
+                            .{ .name = "m_Loop", .value = .{ .bool = true } },
+                            .{ .name = "m_TransitionConstantArray", .value = .{ .array = &[_]value.Value{.{ .obj = &.{} }} } },
+                            .{ .name = "m_BlendTreeConstantArray", .value = .{ .array = &[_]value.Value{.{ .obj = &.{} }} } },
+                        } } },
+                    } }} } },
+                } } },
+            } }} } },
+        } } },
+    } };
+    const ac = AnimatorController.fromValue(v);
+    try std.testing.expectEqualStrings("PlayOnSpawn", ac.name);
+    try std.testing.expectEqual(@as(usize, 2), ac.tos.len);
+    try std.testing.expectEqualStrings("Base Layer", ac.tosPath(756556552));
+    try std.testing.expectEqualStrings("balloon_spin", ac.tosPath(2427234550));
+    try std.testing.expectEqualStrings("", ac.tosPath(12345));
+    try std.testing.expectEqual(@as(usize, 1), ac.layers.len);
+    try std.testing.expectEqualStrings("Base Layer", ac.tosPath(ac.layers[0].binding));
+    try std.testing.expectEqual(@as(i64, 0), ac.layers[0].blending_mode);
+    try std.testing.expectEqual(@as(f64, 1), ac.layers[0].default_weight);
+    try std.testing.expectEqual(@as(usize, 1), ac.state_machine_count);
+    try std.testing.expectEqual(@as(usize, 1), ac.states.len);
+    try std.testing.expectEqualStrings("balloon_spin", ac.tosPath(ac.states[0].name_id));
+    try std.testing.expectEqual(@as(usize, 1), ac.states[0].transition_count);
+    try std.testing.expectEqual(@as(usize, 1), ac.states[0].blend_tree_count);
+    try std.testing.expect(ac.states[0].loop);
+    try std.testing.expectEqual(@as(usize, 1), ac.any_state_transitions);
+    try std.testing.expectEqual(@as(i64, 576), ac.clips[0].path_id);
 }

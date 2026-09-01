@@ -2347,3 +2347,22 @@ container paths did not. Verified on real 7DTD data: the two AudioClips
 that stream from the external resources.resource export their FSB5
 banks and decoded WAVs (valid RIFF PCM16 44.1kHz mono), and bundle
 verify is fully clean. 375/375 tests.
+
+2026-09-01 (animator controller export): AnimatorController (class 91)
+objects export an `animator_<id>_<name>.json` summary. The controller's
+m_Controller constant arrays (m_LayerArray, m_StateMachineArray with
+state constants and blend trees) carry name HASHES, not strings; names
+resolve through the controller's m_TOS hash-to-path table - a state's
+m_NameID maps to its path ("balloon_spin"), a layer's m_Binding to
+"Base Layer".
+
+The summary reports layers (state machine index, resolved name,
+blending mode, default weight, IK pass), states (resolved name and
+full path, speed, loop, transition/blend-tree counts), the
+state-machine count, any-state transitions, default state, parameter
+count, the referenced clips, and the full TOS path table. UnityPy has
+no AnimatorController export at all.
+
+Verified on the real 7DTD PlayOnSpawn controller: the single layer and
+its balloon_spin state resolve their names, 1 blend tree, clip 576
+referenced. 376/376 tests.
