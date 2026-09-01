@@ -476,3 +476,41 @@ test "gzip round-trip fuzz: compress, parse, entries survive" {
         try std.testing.expectEqualStrings(if (iter % 2 == 0) "" else "small", wf.entries[1].data);
     }
 }
+
+test "webfile parser survives mutated and truncated input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const plain = try buildFixture(a, &.{
+        .{ .path = "CAB-one", .data = "DATA1" },
+        .{ .path = "CAB-two", .data = "DATA2" },
+    });
+    defer a.free(plain);
+    const gz = try gzipCompress(a, plain);
+    defer a.free(gz);
+
+    var prng = std.Random.DefaultPrng.init(0xbeef01);
+    const rnd = prng.random();
+    var buf: [4096]u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 2000) : (iter += 1) {
+        const source = if (iter % 2 == 0) gz else plain;
+        const mode = rnd.int(u8) % 3;
+        const blen = switch (mode) {
+            0 => rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len))),
+            1 => source.len,
+            else => rnd.intRangeAtMost(u32, 0, 128),
+        };
+        @memcpy(buf[0..source.len], source);
+        if (mode == 1) {
+            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len)));
+            buf[m] ^= @intCast(rnd.int(u8) | 1);
+        } else if (mode == 2 and blen > 0) {
+            rnd.bytes(buf[0..blen]);
+        }
+        var wf = parse(a, buf[0..blen]) catch continue;
+        defer wf.deinit(a);
+        for (wf.entries) |e| _ = e.data;
+    }
+}
