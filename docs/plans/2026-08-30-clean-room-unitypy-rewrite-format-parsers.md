@@ -2082,3 +2082,10 @@ treatment: 3000 seeded iterations mutating, truncating, and
 randomizing valid v17-blob and v11-legacy fixtures through parse() -
 every parse succeeds with reachable roots or errors cleanly, never
 crashes. 348/348 tests.
+
+2026-09-01 (fsb5 metadata parse mutation fuzz): the FSB5 bank
+metadata parser gets the hostile-input treatment: 3000 seeded
+iterations mutating, truncating, and randomizing the hand-built bank
+(header, sample table, chunk chain) through parse() - every parse
+succeeds with a reachable sample table or errors cleanly, never
+crashes. 350/350 tests.
