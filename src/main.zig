@@ -3948,11 +3948,18 @@ fn asPPtr(v: unityz.value.Value) ?unityz.value.PPtr {
 
 /// Reads a Shader object's value tree (borrowing from `sf`), returning null
 /// when the object has no decodable type tree.
-fn shaderObjectValue(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, o: *const unityz.serialized.ObjectInfo) ?unityz.value.Value {
+fn shaderObjectValue(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, o: *const unityz.serialized.ObjectInfo, own_name: []const u8, injected: ?*const InjectedTrees) ?unityz.value.Value {
     const ti = o.type_index orelse return null;
     if (ti >= sf.types.len) return null;
-    const tree = sf.types[ti].type_tree;
-    if (tree.roots.len == 0) return null;
+    var tree = sf.types[ti].type_tree;
+    if (tree.roots.len == 0) {
+        if (injected) |inj| {
+            const od0 = sf.objectData(o) orelse return null;
+            if (injectedTreeFor(arena, inj, sf, own_name, o.class_id, od0)) |it| {
+                tree = it.*;
+            } else return null;
+        } else return null;
+    }
     const od = sf.objectData(o) orelse return null;
     var r = unityz.streams.Reader.init(od);
     r.endian = sf.endian;
@@ -4113,13 +4120,15 @@ fn skinSerializedBytes(
     node: ?[]const u8,
     shaders: *std.ArrayList(ShaderSummary),
     failures: *std.ArrayList(SkinFailure),
+    own_name: []const u8,
+    injected: ?*const InjectedTrees,
 ) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch return;
 
     // Per-shader skinning summary.
     for (sf.objects) |*o| {
         if (o.class_id != 48) continue;
-        const v = shaderObjectValue(arena, &sf, o) orelse continue;
+        const v = shaderObjectValue(arena, &sf, o, own_name, injected) orelse continue;
         const name = shaderDisplayName(v);
         const info = try unityz.shader.skinInfo(arena, v);
         if (info) |inf| {
@@ -4153,7 +4162,7 @@ fn skinSerializedBytes(
     // shader that is deterministically non-skinning.
     for (sf.objects) |*o| {
         if (o.class_id != 137) continue;
-        const rv = shaderObjectValue(arena, &sf, o) orelse continue;
+        const rv = shaderObjectValue(arena, &sf, o, own_name, injected) orelse continue;
         const mats = unityz.classes.fieldOf(rv, "m_Materials") orelse continue;
         const arr = switch (mats) {
             .array => |a| a,
@@ -4185,9 +4194,15 @@ fn skinSerializedBytes(
 /// not skin. Recurse into bundle/webfile serialized nodes.
 fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     var json = false;
-    for (rest) |arg| {
+    var trees_path: ?[]const u8 = null;
+    var ai: usize = 0;
+    while (ai < rest.len) : (ai += 1) {
+        const arg = rest[ai];
         if (std.mem.eql(u8, arg, "--json")) {
             json = true;
+        } else if (std.mem.eql(u8, arg, "--trees") and ai + 1 < rest.len) {
+            trees_path = rest[ai + 1];
+            ai += 1;
         } else {
             try stdout.print("unityz: unknown skin option '{s}'\n", .{arg});
             return;
@@ -4197,6 +4212,7 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
 
     var shaders: std.ArrayList(ShaderSummary) = .empty;
     defer shaders.deinit(arena);
@@ -4204,7 +4220,7 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     defer failures.deinit(arena);
 
     switch (unityz.container.sniff(bytes).container) {
-        .serialized => try skinSerializedBytes(arena, bytes, null, &shaders, &failures),
+        .serialized => try skinSerializedBytes(arena, bytes, null, &shaders, &failures, basename(path), injected),
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
                 try diag(json, stdout, "{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
@@ -4213,7 +4229,7 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             };
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                try skinSerializedBytes(arena, n.data, n.path, &shaders, &failures);
+                try skinSerializedBytes(arena, n.data, n.path, &shaders, &failures, basename(n.path), injected);
             }
         },
         .webfile => {
@@ -4224,7 +4240,7 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             };
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try skinSerializedBytes(arena, e.data, e.path, &shaders, &failures);
+                try skinSerializedBytes(arena, e.data, e.path, &shaders, &failures, basename(e.path), injected);
             }
         },
         .archive => {

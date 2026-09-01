@@ -2422,3 +2422,12 @@ printed empty hierarchies. Verified on the real 7DTD bundle: level0/1
 UI scenes and the resources.assets world decode fully (223 hierarchy
 entries; the twitch_balloon rig shows its String bone chain with bone
 markers and per-node positions/components). 378/378 tests.
+
+2026-09-01 (find/skin --trees): the find and skin commands now accept
+--trees and decode typeless Mono files through the injected table (the
+scan loops fall back to injectedTreeFor, and shaderObjectValue gained
+the injected fallback), completing the typeless story for every command
+that decodes objects. Verified on the real 7DTD bundle: find --trees
+returns the twitch_balloon materials/texture/mesh/clips/GameObjects
+(186 GameObjects match "a"), and skin --trees analyzes the typeless
+shaders (e.g. Legacy Shaders/Specular: skins false). 378/378 tests.
