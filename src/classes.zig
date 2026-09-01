@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const value = @import("value.zig");
+const streams = @import("streams.zig");
 
 /// Class name for a Unity class ID, mirroring UnityPy's `ClassIDType`
 /// enum (the full runtime + editor table). `null` for IDs the enum does
@@ -559,6 +560,193 @@ pub const AudioClip = struct {
         };
     }
 };
+
+/// Unity Font (class 128): glyph metrics plus the embedded TrueType/OpenType
+/// data. In release binaries the font bytes always sit inline in the object
+/// (`m_FontData`, i32 size + bytes) — the tree's `NoTransfer` flag only moves
+/// the payload in editor/YAML layouts — so typeless files (Mono builds strip
+/// type trees) decode from the raw layout with no sidecar lookup. UnityPy
+/// has no Font export at all; the raw layout matches AssetStudio's 5.5+
+/// Font.cs, and the char-rect/kerning counts are verified against real
+/// Unity 2022.3 fonts.
+pub const Font = struct {
+    name: []const u8 = "",
+    line_spacing: f64 = 0,
+    default_material: ?value.PPtr = null,
+    font_size: f64 = 0,
+    texture: ?value.PPtr = null,
+    ascii_start_offset: i64 = 0,
+    tracking: f64 = 0,
+    character_spacing: i64 = 0,
+    character_padding: i64 = 0,
+    convert_case: i64 = 0,
+    /// Number of legacy `CharacterInfo` entries (dynamic fonts use 0).
+    character_rects: usize = 0,
+    /// Number of kerning pairs (each a `u16, u16, float` tuple).
+    kerning_values: usize = 0,
+    pixel_scale: f64 = 0,
+    /// The embedded TTF/OTF bytes, empty when the font has none.
+    font_data: []const u8 = &.{},
+    ascent: f64 = 0,
+    descent: f64 = 0,
+    default_style: u64 = 0,
+    /// Additional font names (dynamic fonts list their face names).
+    font_names: []const []const u8 = &.{},
+    fallback_fonts: []const value.PPtr = &.{},
+    font_rendering_mode: i64 = 0,
+    use_legacy_bounds_calculation: bool = false,
+    should_round_advance_value: bool = false,
+
+    pub fn fromValue(v: value.Value) Font {
+        var self = Font{
+            .name = stringField(v, "m_Name") orelse "",
+            .line_spacing = floatField(v, "m_LineSpacing") orelse 0,
+            .default_material = pptrField(v, "m_DefaultMaterial"),
+            .font_size = floatField(v, "m_FontSize") orelse 0,
+            .texture = pptrField(v, "m_Texture"),
+            .ascii_start_offset = intField(v, "m_AsciiStartOffset") orelse 0,
+            .tracking = floatField(v, "m_Tracking") orelse 0,
+            .character_spacing = intField(v, "m_CharacterSpacing") orelse 0,
+            .character_padding = intField(v, "m_CharacterPadding") orelse 0,
+            .convert_case = intField(v, "m_ConvertCase") orelse 0,
+            .pixel_scale = floatField(v, "m_PixelScale") orelse 0,
+            .font_data = bytesField(v, "m_FontData") orelse &.{},
+            .ascent = floatField(v, "m_Ascent") orelse 0,
+            .descent = floatField(v, "m_Descent") orelse 0,
+            .font_rendering_mode = intField(v, "m_FontRenderingMode") orelse 0,
+            .use_legacy_bounds_calculation = boolField(v, "m_UseLegacyBoundsCalculation") orelse false,
+            .should_round_advance_value = boolField(v, "m_ShouldRoundAdvanceValue") orelse false,
+        };
+        if (fieldOf(v, "m_DefaultStyle")) |f| {
+            if (f.asInt()) |i| self.default_style = narrow(u64, i);
+        }
+        if (fieldOf(v, "m_CharacterRects")) |f| {
+            if (f == .array) self.character_rects = f.array.len;
+        }
+        if (fieldOf(v, "m_KerningValues")) |f| {
+            if (f == .array) self.kerning_values = f.array.len;
+        }
+        if (fieldOf(v, "m_FontNames")) |f| {
+            if (f == .array) {
+                var names: std.ArrayList([]const u8) = .empty;
+                for (f.array) |item| {
+                    if (item == .string) names.append(std.heap.page_allocator, item.string) catch {};
+                }
+                self.font_names = names.toOwnedSlice(std.heap.page_allocator) catch &.{};
+            }
+        }
+        if (fieldOf(v, "m_FallbackFonts")) |f| {
+            if (f == .array) {
+                var fonts: std.ArrayList(value.PPtr) = .empty;
+                for (f.array) |item| {
+                    if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
+                        fonts.append(std.heap.page_allocator, p) catch {};
+                    }
+                }
+                self.fallback_fonts = fonts.toOwnedSlice(std.heap.page_allocator) catch &.{};
+            }
+        }
+        return self;
+    }
+
+    /// Raw serialized layout for Unity 5.5 and newer (see the struct docs
+    /// for the field order). Older fonts use a different pre-5.5 layout and
+    /// are rejected rather than misread.
+    pub fn fromRaw(bytes: []const u8, endian: std.builtin.Endian, unity_version: []const u8) !Font {
+        if (!fontLayoutIsModern(unity_version)) return error.UnsupportedVersion;
+        var r = streams.Reader.init(bytes);
+        r.endian = endian;
+
+        var self = Font{};
+        self.name = try r.readAlignedStringBorrow();
+        self.line_spacing = try r.readFloat(f32);
+        const mat = try readPPtr(&r);
+        if (mat.file_id != 0 or mat.path_id != 0) self.default_material = mat;
+        self.font_size = try r.readFloat(f32);
+        const tex = try readPPtr(&r);
+        if (tex.file_id != 0 or tex.path_id != 0) self.texture = tex;
+        self.ascii_start_offset = try r.readInt(i32);
+        self.tracking = try r.readFloat(f32);
+        self.character_spacing = try r.readInt(i32);
+        self.character_padding = try r.readInt(i32);
+        self.convert_case = try r.readInt(i32);
+
+        // Legacy CharacterInfo entries: index, two Rectf, advance, flipped.
+        // The tree sizes one entry at 41 bytes; all dynamic fonts carry 0.
+        const rect_count = try r.readInt(i32);
+        if (rect_count < 0) return error.Malformed;
+        self.character_rects = @intCast(rect_count);
+        try r.skip(@as(usize, @intCast(rect_count)) * 41);
+
+        // Kerning pairs: u16 first, u16 second, float value (8 bytes each).
+        const kern_count = try r.readInt(i32);
+        if (kern_count < 0) return error.Malformed;
+        self.kerning_values = @intCast(kern_count);
+        try r.skip(@as(usize, @intCast(kern_count)) * 8);
+
+        self.pixel_scale = try r.readFloat(f32);
+        const data_size = try r.readInt(i32);
+        if (data_size < 0) return error.Malformed;
+        self.font_data = try r.readSlice(@intCast(data_size));
+        self.ascent = try r.readFloat(f32);
+        self.descent = try r.readFloat(f32);
+        self.default_style = try r.readInt(u32);
+        self.font_names = try readStringArray(&r);
+        self.fallback_fonts = try readPPtrArray(&r);
+        self.font_rendering_mode = try r.readInt(i32);
+        self.use_legacy_bounds_calculation = (try r.readByte()) != 0;
+        self.should_round_advance_value = (try r.readByte()) != 0;
+        return self;
+    }
+};
+
+/// PPtr as serialized in an object stream: i32 file id + i64 path id.
+fn readPPtr(r: *streams.Reader) !value.PPtr {
+    return .{
+        .file_id = try r.readInt(i32),
+        .path_id = try r.readInt(i64),
+    };
+}
+
+/// Vector of strings: i32 count, then aligned strings.
+fn readStringArray(r: *streams.Reader) ![]const []const u8 {
+    const count = try r.readInt(i32);
+    if (count <= 0) return &.{};
+    const out = std.heap.page_allocator.alloc([]const u8, @intCast(count)) catch return &.{};
+    for (out) |*s| {
+        s.* = r.readAlignedStringBorrow() catch {
+            std.heap.page_allocator.free(out);
+            return &.{};
+        };
+    }
+    return out;
+}
+
+/// Vector of PPtrs: i32 count, then PPtrs.
+fn readPPtrArray(r: *streams.Reader) ![]const value.PPtr {
+    const count = try r.readInt(i32);
+    if (count <= 0) return &.{};
+    const out = std.heap.page_allocator.alloc(value.PPtr, @intCast(count)) catch return &.{};
+    for (out) |*p| {
+        p.* = readPPtr(r) catch {
+            std.heap.page_allocator.free(out);
+            return &.{};
+        };
+    }
+    return out;
+}
+
+/// True when the Unity version string describes 5.5 or newer, where the
+/// Font layout above applies. Unknown strings (e.g. a bundle's "5.x.x"
+/// placeholder) are treated as modern rather than rejected.
+fn fontLayoutIsModern(unity_version: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, unity_version, '.');
+    const major = std.fmt.parseInt(u32, parts.next() orelse return true, 10) catch return true;
+    if (major > 5) return true;
+    if (major < 5) return false;
+    const minor = std.fmt.parseInt(u32, parts.next() orelse return true, 10) catch return true;
+    return minor >= 5;
+}
 
 pub const GameObject = struct {
     name: []const u8 = "",
@@ -1593,4 +1781,138 @@ test "mesh multi-stream layout and per-vertex reads" {
     // vertex 1 uv (channel 4, stream 1) = (0.75, 0.125)
     try std.testing.expectEqual(@as(f32, 0.75), @as(f32, @bitCast(std.mem.readInt(u32, data[56..][0..4], endian))));
     try std.testing.expectEqual(@as(f32, 0.125), @as(f32, @bitCast(std.mem.readInt(u32, data[60..][0..4], endian))));
+}
+
+test "font fromValue reads the type-tree fields" {
+    const v = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "LiberationSans" } },
+        .{ .name = "m_LineSpacing", .value = .{ .float = 18.4 } },
+        .{ .name = "m_DefaultMaterial", .value = .{ .pptr = .{ .file_id = 0, .path_id = 128 } } },
+        .{ .name = "m_FontSize", .value = .{ .float = 16 } },
+        .{ .name = "m_Texture", .value = .{ .pptr = .{ .file_id = 0, .path_id = 324 } } },
+        .{ .name = "m_AsciiStartOffset", .value = .{ .int = 0 } },
+        .{ .name = "m_Tracking", .value = .{ .float = 1 } },
+        .{ .name = "m_CharacterSpacing", .value = .{ .int = 0 } },
+        .{ .name = "m_CharacterPadding", .value = .{ .int = 1 } },
+        .{ .name = "m_ConvertCase", .value = .{ .int = -2 } },
+        .{ .name = "m_CharacterRects", .value = .{ .array = &.{} } },
+        .{ .name = "m_KerningValues", .value = .{ .array = &[_]value.Value{ .{ .obj = &.{} }, .{ .obj = &.{} } } } },
+        .{ .name = "m_PixelScale", .value = .{ .float = 0.1 } },
+        .{ .name = "m_FontData", .value = .{ .bytes = "OTTO" } },
+        .{ .name = "m_Ascent", .value = .{ .float = 14.6 } },
+        .{ .name = "m_Descent", .value = .{ .float = -3.2 } },
+        .{ .name = "m_DefaultStyle", .value = .{ .uint = 1 } },
+        .{ .name = "m_FontNames", .value = .{ .array = &[_]value.Value{ .{ .string = "Liberation Sans" }, .{ .string = "Noto Sans CJK JP" } } } },
+        .{ .name = "m_FallbackFonts", .value = .{ .array = &[_]value.Value{.{ .pptr = .{ .file_id = 0, .path_id = 583 } }} } },
+        .{ .name = "m_FontRenderingMode", .value = .{ .int = 0 } },
+        .{ .name = "m_UseLegacyBoundsCalculation", .value = .{ .bool = false } },
+        .{ .name = "m_ShouldRoundAdvanceValue", .value = .{ .bool = true } },
+    } };
+    const f = Font.fromValue(v);
+    try std.testing.expectEqualStrings("LiberationSans", f.name);
+    try std.testing.expectEqual(@as(f64, 18.4), f.line_spacing);
+    try std.testing.expectEqual(@as(f64, 16), f.font_size);
+    try std.testing.expectEqual(@as(i64, 324), f.texture.?.path_id);
+    try std.testing.expectEqual(@as(usize, 2), f.kerning_values);
+    try std.testing.expectEqual(@as(f64, 0.1), f.pixel_scale);
+    try std.testing.expectEqualStrings("OTTO", f.font_data);
+    try std.testing.expectEqual(@as(f64, -3.2), f.descent);
+    try std.testing.expectEqual(@as(u64, 1), f.default_style);
+    try std.testing.expectEqual(@as(usize, 2), f.font_names.len);
+    try std.testing.expectEqualStrings("Noto Sans CJK JP", f.font_names[1]);
+    try std.testing.expectEqual(@as(i64, 583), f.fallback_fonts[0].path_id);
+    try std.testing.expect(f.should_round_advance_value);
+}
+
+test "font fromRaw parses the serialized 5.5+ layout" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var tmp: [8]u8 = undefined;
+    const putInt = struct {
+        fn put(list: *std.ArrayList(u8), b: []u8, comptime T: type, v: T) !void {
+            std.mem.writeInt(T, b[0..@sizeOf(T)], v, .little);
+            try list.appendSlice(std.testing.allocator, b[0..@sizeOf(T)]);
+        }
+    }.put;
+    // m_Name: "TestFont" (8 chars; 4 + 8 = 12 is already 4-aligned)
+    try putInt(&buf, &tmp, i32, 8);
+    try buf.appendSlice(std.testing.allocator, "TestFont");
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, 19.5))); // m_LineSpacing
+    try putInt(&buf, &tmp, i32, 0); // m_DefaultMaterial.m_FileID
+    try putInt(&buf, &tmp, i64, 126); // m_DefaultMaterial.m_PathID
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, 16))); // m_FontSize
+    try putInt(&buf, &tmp, i32, 0); // m_Texture.m_FileID
+    try putInt(&buf, &tmp, i64, 234); // m_Texture.m_PathID
+    try putInt(&buf, &tmp, i32, 0); // m_AsciiStartOffset
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, 1))); // m_Tracking
+    try putInt(&buf, &tmp, i32, 0); // m_CharacterSpacing
+    try putInt(&buf, &tmp, i32, 1); // m_CharacterPadding
+    try putInt(&buf, &tmp, i32, -2); // m_ConvertCase
+    try putInt(&buf, &tmp, i32, 0); // m_CharacterRects count (dynamic font)
+    try putInt(&buf, &tmp, i32, 2); // m_KerningValues count
+    try putInt(&buf, &tmp, u16, 70); // kerning pair (70, 44, -1)
+    try putInt(&buf, &tmp, u16, 44);
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, -1)));
+    try putInt(&buf, &tmp, u16, 80); // kerning pair (80, 46, -1)
+    try putInt(&buf, &tmp, u16, 46);
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, -1)));
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, 0.1))); // m_PixelScale
+    try putInt(&buf, &tmp, i32, 4); // m_FontData size
+    try buf.appendSlice(std.testing.allocator, "OTTO"); // inline font data
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, 11.79))); // m_Ascent
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, -2.57))); // m_Descent
+    try putInt(&buf, &tmp, u32, 0); // m_DefaultStyle
+    try putInt(&buf, &tmp, i32, 1); // m_FontNames count
+    try putInt(&buf, &tmp, i32, 8); // "TestFace" (4 + 8 = 12, already aligned)
+    try buf.appendSlice(std.testing.allocator, "TestFace");
+    try putInt(&buf, &tmp, i32, 1); // m_FallbackFonts count
+    try putInt(&buf, &tmp, i32, 0); // fallback m_FileID
+    try putInt(&buf, &tmp, i64, 583); // fallback m_PathID
+    try putInt(&buf, &tmp, i32, 0); // m_FontRenderingMode
+    try buf.appendSlice(std.testing.allocator, &.{ 0, 1 }); // m_UseLegacyBoundsCalculation, m_ShouldRoundAdvanceValue
+
+    const f = try Font.fromRaw(buf.items, .little, "2022.3.62f2");
+    try std.testing.expectEqualStrings("TestFont", f.name);
+    try std.testing.expectEqual(@as(f64, @floatCast(@as(f32, 19.5))), f.line_spacing);
+    try std.testing.expectEqual(@as(i64, 126), f.default_material.?.path_id);
+    try std.testing.expectEqual(@as(f64, @floatCast(@as(f32, 16))), f.font_size);
+    try std.testing.expectEqual(@as(i64, 234), f.texture.?.path_id);
+    try std.testing.expectEqual(@as(usize, 0), f.character_rects);
+    try std.testing.expectEqual(@as(usize, 2), f.kerning_values);
+    try std.testing.expectEqual(@as(f64, @floatCast(@as(f32, 0.1))), f.pixel_scale);
+    try std.testing.expectEqualStrings("OTTO", f.font_data);
+    try std.testing.expectEqual(@as(f64, @floatCast(@as(f32, 11.79))), f.ascent);
+    try std.testing.expectEqual(@as(f64, @floatCast(@as(f32, -2.57))), f.descent);
+    try std.testing.expectEqualStrings("TestFace", f.font_names[0]);
+    try std.testing.expectEqual(@as(i64, 583), f.fallback_fonts[0].path_id);
+    try std.testing.expect(!f.use_legacy_bounds_calculation);
+    try std.testing.expect(f.should_round_advance_value);
+}
+
+test "font fromRaw version gate and truncation" {
+    // pre-5.5 layouts are rejected, unknown version strings pass
+    try std.testing.expectError(error.UnsupportedVersion, Font.fromRaw(&.{}, .little, "5.4.6f1"));
+    try std.testing.expectError(error.UnsupportedVersion, Font.fromRaw(&.{}, .little, "4.7.2f1"));
+    _ = Font.fromRaw(&.{}, .little, "5.5.0f1") catch {}; // empty body: reads fail on the first field, but the gate passes
+    _ = Font.fromRaw(&.{}, .little, "2022.3.62f2") catch {};
+    // a body cut short mid-object reads out of bounds
+    try std.testing.expectError(error.OutOfBounds, Font.fromRaw("\x04\x00\x00\x00TEST", .little, "2022.3.62f2"));
+    // a negative character-rect count (corrupt data) is malformed
+    // head: name "" + lineSpacing + material + fontSize + texture + spacing
+    // ints, ending in the m_CharacterRects count
+    var head: [60]u8 = undefined;
+    std.mem.writeInt(i32, head[0..4], 0, .little); // m_Name length 0
+    std.mem.writeInt(u32, head[4..8], 0, .little); // m_LineSpacing
+    std.mem.writeInt(i32, head[8..12], 0, .little); // m_DefaultMaterial.m_FileID
+    std.mem.writeInt(i64, head[12..20], 0, .little); // m_DefaultMaterial.m_PathID
+    std.mem.writeInt(u32, head[20..24], 0, .little); // m_FontSize
+    std.mem.writeInt(i32, head[24..28], 0, .little); // m_Texture.m_FileID
+    std.mem.writeInt(i64, head[28..36], 0, .little); // m_Texture.m_PathID
+    std.mem.writeInt(i32, head[36..40], 0, .little); // m_AsciiStartOffset
+    std.mem.writeInt(u32, head[40..44], 0, .little); // m_Tracking
+    std.mem.writeInt(i32, head[44..48], 0, .little); // m_CharacterSpacing
+    std.mem.writeInt(i32, head[48..52], 0, .little); // m_CharacterPadding
+    std.mem.writeInt(i32, head[52..56], 0, .little); // m_ConvertCase
+    std.mem.writeInt(i32, head[56..60], -1, .little); // m_CharacterRects count = -1
+    try std.testing.expectError(error.Malformed, Font.fromRaw(&head, .little, "2022.3.62f2"));
 }
