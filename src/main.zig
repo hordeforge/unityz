@@ -5847,6 +5847,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var json = false;
     var exact = false;
     var any = false;
+    var trees_path: ?[]const u8 = null;
     var i: usize = 1;
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
@@ -5861,6 +5862,9 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             exact = true;
         } else if (std.mem.eql(u8, rest[i], "--any")) {
             any = true;
+        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
+            trees_path = rest[i + 1];
+            i += 1;
         } else {
             try stdout.print("unityz: unknown find option '{s}'\n", .{rest[i]});
             return;
@@ -5870,6 +5874,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
     var found: std.ArrayList(FindMatch) = .empty;
 
     switch (unityz.container.sniff(bytes).container) {
@@ -5881,7 +5886,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             };
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                try findSerializedBytes(arena, n.data, n.path, needle, class_filter, exact, any, json, &found, stdout);
+                try findSerializedBytes(arena, n.data, n.path, needle, class_filter, exact, any, json, &found, basename(n.path), injected, stdout);
             }
         },
         .webfile => {
@@ -5892,10 +5897,10 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             };
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try findSerializedBytes(arena, e.data, e.path, needle, class_filter, exact, any, json, &found, stdout);
+                try findSerializedBytes(arena, e.data, e.path, needle, class_filter, exact, any, json, &found, basename(e.path), injected, stdout);
             }
         },
-        .serialized => try findSerializedBytes(arena, bytes, null, needle, class_filter, exact, any, json, &found, stdout),
+        .serialized => try findSerializedBytes(arena, bytes, null, needle, class_filter, exact, any, json, &found, basename(path), injected, stdout),
         else => {
             try diag(json, stdout, "{s}: find requires a serialized file, bundle, or webfile\n", .{path});
         },
@@ -5963,7 +5968,7 @@ fn anyStringEquals(v: unityz.value.Value, needle: []const u8) bool {
     };
 }
 
-fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, needle: []const u8, class_filter: ?i32, exact: bool, any: bool, json: bool, found: *std.ArrayList(FindMatch), stdout: *Io.Writer) !void {
+fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, needle: []const u8, class_filter: ?i32, exact: bool, any: bool, json: bool, found: *std.ArrayList(FindMatch), own_name: []const u8, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try diag(json, stdout, "  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
@@ -5984,9 +5989,15 @@ fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
         }
         const type_index = o.type_index orelse continue;
         if (type_index >= sf.types.len) continue;
-        const tree = sf.types[type_index].type_tree;
-        if (tree.roots.len == 0) continue;
         const data = sf.objectData(o) orelse continue;
+        var tree = sf.types[type_index].type_tree;
+        if (tree.roots.len == 0) {
+            if (injected) |inj| {
+                if (injectedTreeFor(obj_arena, inj, &sf, own_name, o.class_id, data)) |it| {
+                    tree = it.*;
+                } else continue;
+            } else continue;
+        }
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
         const v = unityz.object_reader.readObject(obj_arena, &r, &tree.roots[0]) catch continue;
@@ -6307,7 +6318,7 @@ fn cmdEditWebFile(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs:
         if (sel.node) |sn| {
             if (!std.mem.eql(u8, e.path, sn)) continue;
         }
-        const edited = editSerializedObject(arena, e.data, sel.path_id, pairs) catch |err| {
+        const edited = editSerializedObject(arena, e.data, sel.path_id, pairs, basename(e.path), injected) catch |err| {
             if (err == error.ObjectNotFound) continue;
             try stdout.print("unityz: {s}: edit failed: {s}\n", .{ e.path, @errorName(err) });
             return;
@@ -6326,7 +6337,7 @@ fn cmdEditWebFile(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs:
 /// Edits one object inside a bundle: finds the serialized node that
 /// contains the path id, edits it, and rebuilds the bundle with the node
 /// replaced (uncompressed blocks).
-fn cmdEditBundle(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs: []const []const u8, verify: bool, bytes: []const u8, stdout: *Io.Writer) !void {
+fn cmdEditBundle(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs: []const []const u8, verify: bool, bytes: []const u8, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -6340,7 +6351,7 @@ fn cmdEditBundle(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs: 
         if (sel.node) |sn| {
             if (!std.mem.eql(u8, n.path, sn)) continue;
         }
-        const edited = editSerializedObject(arena, n.data, sel.path_id, pairs) catch |err| {
+        const edited = editSerializedObject(arena, n.data, sel.path_id, pairs, basename(n.path), injected) catch |err| {
             if (err == error.ObjectNotFound) continue;
             try stdout.print("unityz: {s}: edit failed: {s}\n", .{ n.path, @errorName(err) });
             return;
@@ -6358,13 +6369,19 @@ fn cmdEditBundle(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs: 
 
 /// Edits one object of a serialized file, returning the rewritten file
 /// bytes. `error.ObjectNotFound` when the path id is absent.
-fn editSerializedObject(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, pairs: []const []const u8) ![]u8 {
+fn editSerializedObject(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, pairs: []const []const u8, own_name: []const u8, injected: ?*const InjectedTrees) ![]u8 {
     const sf = try unityz.serialized.parse(arena, bytes);
     const o = sf.findObject(path_id) orelse return error.ObjectNotFound;
     const type_index = o.type_index orelse return error.MissingTypeIndex;
     if (type_index >= sf.types.len) return error.MissingTypeIndex;
-    const tree = sf.types[type_index].type_tree;
-    if (tree.roots.len == 0) return error.MissingTypeIndex;
+    var tree = sf.types[type_index].type_tree;
+    if (tree.roots.len == 0) {
+        // Typeless Mono file: decode from the injected table.
+        if (injected) |inj| {
+            const d0 = sf.objectData(o) orelse return error.OutOfMemory;
+            tree = (injectedTreeFor(arena, inj, &sf, own_name, o.class_id, d0) orelse return error.MissingTypeIndex).*;
+        } else return error.MissingTypeIndex;
+    }
     const data = sf.objectData(o) orelse return error.OutOfMemory;
     var r = unityz.streams.Reader.init(data);
     r.endian = sf.endian;
@@ -6766,6 +6783,7 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var patch_path: ?[]const u8 = null;
     var out_path: ?[]const u8 = null;
     var verify = false;
+    var trees_path: ?[]const u8 = null;
     var pairs: std.ArrayList([]const u8) = .empty;
     // rest[0] is the path id in the single-object form; in the --patch form
     // it is an option, so options are scanned from index 0 or 1 accordingly
@@ -6780,6 +6798,9 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             i += 1;
         } else if (std.mem.eql(u8, rest[i], "--verify")) {
             verify = true;
+        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
+            trees_path = rest[i + 1];
+            i += 1;
         } else {
             try pairs.append(arena, rest[i]);
         }
@@ -6800,10 +6821,11 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         try stdout.print("unityz: invalid path id '{s}'\n", .{rest[0]});
         return;
     };
+    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
 
     switch (unityz.container.sniff(bytes).container) {
-        .bundle => return cmdEditBundle(path, out_path, sel, pairs.items, verify, bytes, stdout),
-        .webfile => return cmdEditWebFile(path, out_path, sel, pairs.items, verify, bytes, stdout),
+        .bundle => return cmdEditBundle(path, out_path, sel, pairs.items, verify, bytes, injected, stdout),
+        .webfile => return cmdEditWebFile(path, out_path, sel, pairs.items, verify, bytes, injected, stdout),
         .serialized => {
             if (sel.node != null) {
                 try stdout.print("unityz: node selector not valid for a serialized file\n", .{});
@@ -6828,18 +6850,31 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         try stdout.print("unityz: object {d} has no type index\n", .{sel.path_id});
         return;
     };
-    if (type_index >= sf.types.len or sf.types[type_index].type_tree.roots.len == 0) {
+    if (type_index >= sf.types.len) {
         try stdout.print("unityz: object {d} has no type tree\n", .{sel.path_id});
         return;
     }
+    var tree = sf.types[type_index].type_tree;
     const data = sf.objectData(o) orelse {
         try stdout.print("unityz: object {d} has no data\n", .{sel.path_id});
         return;
     };
+    if (tree.roots.len == 0) {
+        // Typeless Mono file: decode from the injected table.
+        if (injected) |inj| {
+            tree = (injectedTreeFor(arena, inj, &sf, basename(path), o.class_id, data) orelse {
+                try stdout.print("unityz: object {d} has no type tree\n", .{sel.path_id});
+                return;
+            }).*;
+        } else {
+            try stdout.print("unityz: object {d} has no type tree\n", .{sel.path_id});
+            return;
+        }
+    }
 
     var r = unityz.streams.Reader.init(data);
     r.endian = sf.endian;
-    const root = &sf.types[type_index].type_tree.roots[0];
+    const root = &tree.roots[0];
     var edited = unityz.object_reader.readObject(arena, &r, root) catch |err| {
         try stdout.print("unityz: object read failed: {s}\n", .{@errorName(err)});
         return;
