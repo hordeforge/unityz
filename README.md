@@ -39,7 +39,8 @@ shellcheck scripts/*.sh
 
 - **Look inside any Unity asset** - open a bundle, `.assets` file, or
   sidecar and see its containers, objects, and type trees (`info`, `show`).
-- **Extract everything** - textures and sprites as images, meshes as OBJ,
+- **Extract everything** - textures and sprites as images, meshes as OBJ
+  and glTF/GLB,
   audio as playable files (OGG/FSB/WAV), video cutscenes as MP4, terrain
   heightmaps as PGM, readable ShaderLab for shaders, fonts, and structured
   JSON for most other classes (animations, animator controllers, mixers,
