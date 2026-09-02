@@ -7877,7 +7877,10 @@ fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             const ename = try arena.dupe(u8, entry.name);
             if (!std.mem.endsWith(u8, ename, ".dll")) continue;
             const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ assembly_dir, ename });
-            const data = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch continue;
+            const data = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch |err| {
+                try stdout.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
+                continue;
+            };
             try files.names.append(arena, ename);
             try files.datas.append(arena, data);
         }
@@ -8022,9 +8025,15 @@ fn buildManagedTrees(arena: std.mem.Allocator, path: []const u8, files: *const M
                 std.mem.startsWith(u8, ename, "level");
             if (!is_serialized) continue;
             const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ scan_dir, ename });
-            const data = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch continue;
+            const data = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch |err| {
+                try stdout.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
+                continue;
+            };
             if (unityz.container.sniff(data).container != .serialized) continue;
-            const found = unityz.managed_trees.scanMonoScripts(arena, data, try arena.dupe(u8, ename)) catch continue;
+            const found = unityz.managed_trees.scanMonoScripts(arena, data, try arena.dupe(u8, ename)) catch |err| {
+                try stdout.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
+                continue;
+            };
             for (found) |r| try refs.append(arena, r);
         }
     }

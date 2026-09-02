@@ -985,12 +985,10 @@ fn readPPtr(r: *streams.Reader) !value.PPtr {
 fn readStringArray(r: *streams.Reader) ![]const []const u8 {
     const count = try r.readInt(i32);
     if (count <= 0) return &.{};
-    const out = std.heap.page_allocator.alloc([]const u8, @intCast(count)) catch return &.{};
+    const out = std.heap.page_allocator.alloc([]const u8, @intCast(count)) catch return error.OutOfMemory;
+    errdefer std.heap.page_allocator.free(out);
     for (out) |*s| {
-        s.* = r.readAlignedStringBorrow() catch {
-            std.heap.page_allocator.free(out);
-            return &.{};
-        };
+        s.* = try r.readAlignedStringBorrow();
     }
     return out;
 }
@@ -999,12 +997,10 @@ fn readStringArray(r: *streams.Reader) ![]const []const u8 {
 fn readPPtrArray(r: *streams.Reader) ![]const value.PPtr {
     const count = try r.readInt(i32);
     if (count <= 0) return &.{};
-    const out = std.heap.page_allocator.alloc(value.PPtr, @intCast(count)) catch return &.{};
+    const out = std.heap.page_allocator.alloc(value.PPtr, @intCast(count)) catch return error.OutOfMemory;
+    errdefer std.heap.page_allocator.free(out);
     for (out) |*p| {
-        p.* = readPPtr(r) catch {
-            std.heap.page_allocator.free(out);
-            return &.{};
-        };
+        p.* = try readPPtr(r);
     }
     return out;
 }
