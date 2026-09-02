@@ -3573,7 +3573,13 @@ fn writeShaderTags(w: *unityz.streams.Writer, owner: unityz.value.Value, indent:
                 for (pairs.array, 0..) |pair, i| {
                     if (i != 0) try w.writeBytes(" ");
                     if (pair == .array and pair.array.len >= 2) {
-                        try w.print("\"{s}\" = \"{s}\"", .{ switch (pair.array[0]) { .string => |s| s, else => "" }, switch (pair.array[1]) { .string => |s| s, else => "" } });
+                        try w.print("\"{s}\" = \"{s}\"", .{ switch (pair.array[0]) {
+                            .string => |s| s,
+                            else => "",
+                        }, switch (pair.array[1]) {
+                            .string => |s| s,
+                            else => "",
+                        } });
                     }
                 }
                 try w.writeBytes(" }\n");
@@ -7938,7 +7944,8 @@ fn managedFieldType(f: unityz.dotnet.Field) []const u8 {
     return unityz.dotnet.elementTypeName(f.elem_type);
 }
 
-fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, json: bool, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
+fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, json: bool, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
+    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
     };

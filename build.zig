@@ -60,6 +60,12 @@ pub fn build(b: *std.Build) void {
     // the default Debug build, and its `-O0` debug path is not stable. An
     // optimized vendored lib decodes identically.
     lzham_lib.root_module.optimize = .ReleaseFast;
+    // The vendored LZHAM decoder (public-domain / zlib) compiles with the
+    // same warnings-as-errors posture as the unitycrunch decoder above.
+    // The single exclusion covers one vendored construct, never the shim:
+    // the prefix-coding table copy in `lzham_prefix_coding.h` memcpies a
+    // non-trivially copyable type, which clang's `-Wnontrivial-memcall`
+    // (on via `-Wall`) rejects.
     lzham_lib.root_module.addIncludePath(b.path("src/vendor/lzham"));
     for ([_][]const u8{
         "src/vendor/lzham/lzham_assert.cpp",
@@ -78,7 +84,14 @@ pub fn build(b: *std.Build) void {
     }) |src| {
         lzham_lib.root_module.addCSourceFile(.{
             .file = b.path(src),
-            .flags = &.{ "-DNDEBUG", "-DLZHAM_NO_FAST_FILE" },
+            .flags = &.{
+                "-DNDEBUG",
+                "-DLZHAM_NO_FAST_FILE",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-Wno-nontrivial-memcall",
+            },
         });
     }
     lib.linkLibrary(lzham_lib);
