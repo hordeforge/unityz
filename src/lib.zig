@@ -87,6 +87,7 @@ pub const serialized_writer = @import("serialized_writer.zig");
 
 /// .NET assembly metadata reader (MonoBehaviour script field layouts).
 pub const dotnet = @import("dotnet.zig");
+pub const managed_trees = @import("managed_trees.zig");
 
 /// File extensions of Unity asset files this project intends to support.
 /// Note that some serialized files (e.g. `globalgamemanagers`, `level0`)
