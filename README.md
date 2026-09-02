@@ -91,9 +91,14 @@ Mono builds strip class type trees, leaving typeless objects
 undecodable. `--trees <file.json>` supplies them, and `extract`, `show`,
 `verify`, `find`, `skin`, `hierarchy`, and `edit` all decode with the
 injected trees. The trees JSON shape is what
-`TypeTreeGeneratorAPI.get_nodes_as_json()` emits; `scripts/structsdump-to-trees.py`
-converts AssetRipper's public type-tree dumps into the format. Without
-trees, a typeless file reports how many objects were skipped.
+`TypeTreeGeneratorAPI.get_nodes_as_json()` emits. unityz can build one
+itself: `managed <data-dir> --trees <out.json>` derives the script trees
+from the game's own assemblies (its `Managed/` folder) and the MonoScript
+objects in its top-level serialized files, so the trees match that
+specific game's layouts. For version-generic trees instead,
+`scripts/structsdump-to-trees.py` converts AssetRipper's public type-tree
+dumps into the format. Without trees, a typeless file reports how many
+objects were skipped.
 
 ### Editing
 
