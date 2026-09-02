@@ -5,63 +5,52 @@ to its PRD or ADR; keep detailed design and acceptance criteria in those files.
 
 ## Current
 
-Nothing in flight.
+- `managed --trees`: auto-build MonoBehaviour type trees from a game's
+  .NET assemblies so typeless MonoBehaviours decode without hand-made
+  trees files.
+- `stats --trees`: let per-class stats decode typeless Mono files.
+- Mesh export as glTF/GLB alongside OBJ.
 
 ## Planned
 
-Nothing open that blocks use. Remaining items need external samples or
-tools not available here (see the plan's completion notes).
+- UnityArchive container parsing. The format is detected but not parsed;
+  no real sample exists anywhere in the available games (verified by a
+  full-library scan), so it needs an old Unity 4 game or a crafted
+  fixture.
+- PVRTC verification against real assets. Decoding exists; all available
+  games are PC/console builds without PVRTC textures, so the path is
+  verified only against synthetic inputs.
 
 ## Done
 
+- Post-capstone batch (PRs #102-#104): `managed` reads a Mono build's
+  assemblies and lists every MonoBehaviour's serialized field layout
+  (no external CLR); `edit --patch` accepts `--trees`; extract writes
+  one consolidated `scripts.json` and a dry-run `--summary`; Shader
+  objects export readable ShaderLab; VideoClips export their streamed
+  video as MP4 (Green Hell cutscenes); TerrainData exports normalized
+  heightmap PGM images (Raft, Stranded Deep, Green Hell) with a shipped
+  2021.x tree. The earlier "sample-blocked" verdicts for VideoClip and
+  TerrainData were class-ID bugs (329 and 156, not 333/334 and 27) and
+  were resolved by the sample sweep.
 - Beyond-parity CLI work: `diff --pixels`/`--audio`/`--fields` compare
-  matched objects' decoded pixels, audio streams, and exact field paths
-  (text and `--json`); `extract` gains TGA/BMP/raw RGBA output formats,
-  `--name` filtering, SpriteAtlas/AssetBundle/AnimationClip/Material/
-  Shader structured JSON exports; FSB5 audio decodes to WAV in pure Zig
-  (PCM8/16/24/32/FLOAT, GCADPCM, IMA ADPCM) and Vorbis banks remux to a
-  playable Ogg (headers synthesized, setup header from a CRC-keyed
-  table); `find --any` searches every
-  string field; `info --objects` shows names; a `hierarchy` command
-  prints the GameObject/Transform tree with bones marked.
-- Multi-stream mesh export: a Mesh whose vertex channels spread over
-  `m_Streams_0_..3_` exports an OBJ instead of silently nothing; the
-  per-stream stride/offset is derived as UnityPy's MeshHandler does, and
-  single-stream output stays byte-identical.
-- Serialized format 4 parses and rewrites byte-exactly (Unity 4.x
-  metadata/object-info layout, legacy aligned type-tree strings), which
-  also fixed two legacy16 rewrite bugs. `container.sniff` still filters
-  v4 out, so a bare v4 file is not yet reachable from the CLI.
-- The remaining block-format parity gap closes: the 3DS ETC variants
-  (ETC_RGB4_3DS 60, ETC_RGBA8_3DS 61) decode as ETC1 (matching UnityPy,
-  which routes both to its ETC1 decoder) and ETC2_RGBA1 (46) decodes its
-  punch-through alpha, validated pixel-identical to UnityPy's
-  texture2ddecoder over a 96-block corpus.
-- Managed-reference registries decode through their type trees,
-  MonoBehaviours export the decoded managed .NET object graph as a
-  `.json` sidecar (resolves the earlier m_Script limitation; UnityPy
-  needs external .NET assemblies for the raw graph).
+  matched objects' decoded pixels, audio streams, and exact field paths;
+  `extract` gains TGA/BMP/raw RGBA output, `--name` filtering, and
+  structured JSON exports; FSB5 audio decodes to WAV in pure Zig and
+  Vorbis banks remux to a playable Ogg; `find --any`, `info --objects`,
+  and a `hierarchy` command.
+- Multi-stream mesh export: Meshes whose vertex channels spread over
+  `m_Streams_0_..3_` export an OBJ instead of silently nothing.
+- Serialized format 4 parses and rewrites byte-exactly.
+- The 3DS ETC variants (60/61) decode as ETC1 and ETC2_RGBA1 (46)
+  decodes its punch-through alpha, pixel-identical to UnityPy.
+- Crunch DXT variants decode through the vendored unitycrunch machinery.
+- Shader sub-program blobs fully decode: record tables, parameter blobs,
+  code blobs with DXBC chunk sets, ISGN/RDEF, bind channels, and
+  skinning detection.
+- Sprite export covers packed sprites: alpha merges, packing rotation,
+  tight/polygon rendering through the sprite mesh, matching UnityPy.
 - Clean-room UnityPy rewrite in Zig - format parsers, object reader,
   reserialize/edit, and extraction. See
   [the plan](plans/2026-08-30-clean-room-unitypy-rewrite-format-parsers.md),
   which is marked Complete with per-pass completion notes.
-- Crunch DXT variants decode: DXT1Crunched (28) and DXT5Crunched (29)
-  route through the same vendored unitycrunch machinery as the ETC crunch
-  formats, worth fixing a latent 565→888 truncation so the whole DXT
-  family matches UnityPy byte-exact.
-- Shader sub-program blobs parse: the per-platform LZ4 blob decodes to its
-  parameter and code records, and a shader's vertex stage is reported as
-  skinning or not (`info --json`, plus a `skin` command that exits non-zero
-  when a SkinnedMeshRenderer references a shader that does not skin).
-- Shader sub-program blobs fully decode: each record is listed under
-  `show`/`shader <path> <node:path-id>` with its parameter blob (constant
-  buffers and member offsets, texture/cbuffer/UAV/sampler entries) or code
-  blob (38-byte program-data header, DXBC chunk set, ISGN input signature,
-  RDEF member offsets, ParserBindChannels (source,target) pairs), and
-  `verify` round-trips the parameter blobs byte for byte. Validated against
-  the game bundle and the pipeline-synthesized shader bundle, reproducing
-  the Game/SDCS/Skin d3d11 vertex bind tables.
-- Sprite export covers packed sprites: separate alpha textures merge in
-  (RGB from the main texture, alpha from the alpha texture's R channel),
-  packing rotation is applied, and tight/polygon sprites render through
-  their mesh (polygon mask or UV texture-map), matching UnityPy.

@@ -2483,3 +2483,29 @@ VideoClip exists in Green Hell (16, 1080p60 and 4K cutscenes), and
 as `.mp4` plus a metadata JSON. UnityArchive remains the only container
 with no samples.
 
+2026-09-02 (post-capstone batch): PRs #102-#104 shipped beyond-parity
+features. `managed` reads a Mono build's .NET assemblies (PE/CLI header,
+#~ table stream, TypeDef/TypeRef/Field, compressed coded indices,
+generics) and lists every MonoBehaviour's serialized field layout;
+verified on Raft (1235 classes across the Managed folder). `edit
+--patch` accepts `--trees`, making typeless Mono files patchable via the
+JSON form (verified on 7DTD).
+
+extract consolidates MonoScripts into one
+`scripts.json` (6501 entries for 7DTD) and adds a dry-run `--summary`.
+Shader objects export readable ShaderLab (.shader). VideoClips (329)
+extract their streamed video from the .resource sidecar as .mp4 plus a
+metadata JSON (Green Hell: 16 cutscenes, 1080p60 and 4K).
+
+TerrainData
+(156) exports normalized heightmap PGM images with a shipped
+`trees/TerrainData-2021.x.json` (editor tree minus stripped base fields,
+plus a 36-byte runtime-only region derived from real objects); verified
+on Raft (513x513), Stranded Deep (51 island zones, 257x257, real
+relief), and Green Hell (4097x4097). docs-check is fully green after
+splitting the kit-template and README paragraphs.
+
+2026-09-02 (doc sweep): the README was tightened from 508 to ~140 lines -
+the per-class capability wall of text and the "Status" section moved to
+docs/features.md, ROADMAP.md was brought current, and docs/README.md now
+points at features.md.

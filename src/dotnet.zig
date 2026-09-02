@@ -38,12 +38,20 @@ pub const Field = struct {
     /// ("System.String", "UnityEngine.Vector3", "System.Int32[]", ...);
     /// empty for the plain primitives (named by `elementTypeName`).
     type_name: []const u8 = "",
+    /// For generic instantiations (List<T>, Dictionary<K,V>): the resolved
+    /// first type argument.
+    generic_arg: []const u8 = "",
+    /// The resolved second type argument (Dictionary<K,V> values).
+    generic_arg2: []const u8 = "",
 
     pub fn isPublic(self: Field) bool {
         return (self.flags & 0x6) == 0x6;
     }
     pub fn isStatic(self: Field) bool {
         return (self.flags & 0x10) != 0;
+    }
+    pub fn isLiteral(self: Field) bool {
+        return (self.flags & 0x20) != 0;
     }
 };
 
@@ -398,8 +406,11 @@ fn readTypeName(arena: std.mem.Allocator, r: *streams.Reader, td: *const TableDa
         else => {
             const prim = elementTypeName(e);
             if (prim.len != 0) return arena.dupe(u8, prim);
+            // uncommon signature element types (byref, var, mvar, fnptr...):
+            // name them from a scratch buffer, owned by the arena
             var name_buf: [16]u8 = undefined;
-            return std.fmt.bufPrint(&name_buf, "type{x}", .{e}) catch arena.dupe(u8, "?");
+            const nm = std.fmt.bufPrint(&name_buf, "type{x}", .{e}) catch return arena.dupe(u8, "?");
+            return arena.dupe(u8, nm);
         },
     }
 }
@@ -423,6 +434,16 @@ fn parseFieldSig(arena: std.mem.Allocator, blob: []const u8, td: *const TableDat
         },
         element.genericinst => {
             field.type_name = try readTypeName(arena, &r, td, heaps);
+            const arity = try readCompressed(&r);
+            var gi: u32 = 0;
+            while (gi < arity) : (gi += 1) {
+                const arg = try readTypeName(arena, &r, td, heaps);
+                if (gi == 0) {
+                    field.generic_arg = arg;
+                } else if (gi == 1) {
+                    field.generic_arg2 = arg;
+                }
+            }
         },
         else => {},
     }
@@ -716,4 +737,40 @@ test "parseTableStream sizes rows and offsets" {
     try std.testing.expectEqual(rows_start + 12, td.offsets[tables.typeref]);
     try std.testing.expectEqual(rows_start + 12 + 10, td.offsets[tables.typedef]);
     try std.testing.expectEqual(rows_start + 12 + 10 + 36, td.offsets[tables.field]);
+}
+
+/// The serialized-visible fields of a class, base classes first: Unity
+/// serializes base fields before derived ones, and only public instance
+/// fields (plus [SerializeField] private, not detected here) that are not
+/// static or const.
+pub fn collectFields(arena: std.mem.Allocator, td: TypeDef, type_defs: []const TypeDef) ![]const Field {
+    // walk the same-assembly base chain into a stack
+    var chain: [64]TypeDef = undefined;
+    var n: usize = 0;
+    var current: ?TypeDef = td;
+    while (current) |c| {
+        if (n >= chain.len) break;
+        chain[n] = c;
+        n += 1;
+        const base = c.base_name orelse break;
+        var found: ?TypeDef = null;
+        for (type_defs) |d| {
+            if (std.mem.eql(u8, d.fullName(arena), base)) {
+                found = d;
+                break;
+            }
+        }
+        if (found == null) break;
+        current = found;
+    }
+    var out: std.ArrayList(Field) = .empty;
+    var i: usize = n;
+    while (i > 0) {
+        i -= 1;
+        for (chain[i].fields) |f| {
+            if (!f.isPublic() or f.isStatic() or f.isLiteral()) continue;
+            try out.append(arena, f);
+        }
+    }
+    return out.toOwnedSlice(arena);
 }

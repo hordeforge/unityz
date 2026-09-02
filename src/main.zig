@@ -88,7 +88,11 @@ const usage =
     \\                 layout Unity's serializer uses for those objects,
     \\                 which no other extractor reads without loading a
     \\                 whole .NET runtime (--json for machine-readable;
-    \\                 also accepts a single .dll path)
+    \\                 also accepts a single .dll path;
+    \\                 --trees <out.json> writes an injected-trees file
+    \\                 built from the assemblies and the game's MonoScript
+    \\                 objects, so typeless MonoBehaviours decode without
+    \\                 a hand-made trees file)
     \\
     \\Edit usage: unityz edit <file> <path_id> <field> <json-value> [<field> <json-value> ...]
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
@@ -7814,6 +7818,12 @@ const GoInfo = struct {
     components: std.ArrayList(i32) = .empty,
 };
 
+/// Assembly files (name + bytes) collected for the `managed` command.
+const ManagedFiles = struct {
+    names: std.ArrayList([]const u8) = .empty,
+    datas: std.ArrayList([]const u8) = .empty,
+};
+
 /// `managed <dir>` — read a Mono build's managed assemblies and list the
 /// MonoBehaviour script classes with their serialized field layouts. This is
 /// the layout Unity's serializer uses for class-114 objects, which UnityPy
@@ -7821,9 +7831,15 @@ const GoInfo = struct {
 /// parsing. Accepts a directory (scans *.dll) or a single assembly path.
 fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     var json = false;
-    for (rest) |arg| {
+    var trees_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const arg = rest[i];
         if (std.mem.eql(u8, arg, "--json")) {
             json = true;
+        } else if (std.mem.eql(u8, arg, "--trees") and i + 1 < rest.len) {
+            trees_path = rest[i + 1];
+            i += 1;
         } else {
             try stdout.print("unityz: unknown managed option '{s}'\n", .{arg});
             return;
@@ -7835,16 +7851,21 @@ fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, std
     const arena = arena_state.allocator();
 
     // Collect (name, bytes) pairs: the single file, or every *.dll in the dir.
-    const Files = struct { names: std.ArrayList([]const u8) = .empty, datas: std.ArrayList([]const u8) = .empty };
-    var files: Files = .{};
+    var files: ManagedFiles = .{};
     const io = io_global.io;
     const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| {
         try stdout.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
         return;
     };
+    // With --trees the path is a game data dir; its assemblies live in a
+    // Managed/ subdir when present.
+    var assembly_dir = path;
+    if (trees_path != null and stat.kind == .directory and dirHasSubdir(path, "Managed")) {
+        assembly_dir = try std.fmt.allocPrint(arena, "{s}/Managed", .{path});
+    }
     if (stat.kind == .directory) {
-        var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| {
-            try stdout.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
+        var dir = std.Io.Dir.cwd().openDir(io, assembly_dir, .{ .iterate = true }) catch |err| {
+            try stdout.print("unityz: {s}: {s}\n", .{ assembly_dir, @errorName(err) });
             return;
         };
         defer dir.close(io);
@@ -7855,7 +7876,7 @@ fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             // before anything else touches the iterator
             const ename = try arena.dupe(u8, entry.name);
             if (!std.mem.endsWith(u8, ename, ".dll")) continue;
-            const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ path, ename });
+            const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ assembly_dir, ename });
             const data = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch continue;
             try files.names.append(arena, ename);
             try files.datas.append(arena, data);
@@ -7865,8 +7886,11 @@ fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, std
         try files.datas.append(arena, bytes);
     }
     if (files.names.items.len == 0) {
-        try stdout.print("unityz: {s}: no assemblies found\n", .{path});
+        try stdout.print("unityz: {s}: no assemblies found\n", .{assembly_dir});
         return;
+    }
+    if (trees_path) |tp| {
+        return try buildManagedTrees(arena, path, &files, tp, stdout);
     }
 
     if (json) try stdout.writeByte('[');
@@ -7943,8 +7967,129 @@ fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, std
 
 /// The display name of a managed field's type: the resolved class name for
 /// class/valuetype/array signatures, the CLR primitive name otherwise.
-fn managedFieldType(f: unityz.dotnet.Field) []const u8 {
-    if (f.type_name.len != 0) return f.type_name;
+/// Whether `dir_path` has a subdirectory named `name`.
+fn dirHasSubdir(dir_path: []const u8, name: []const u8) bool {
+    const io = io_global.io;
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (it.next(io) catch return false) |entry| {
+        if (entry.kind == .directory and std.mem.eql(u8, entry.name, name)) return true;
+    }
+    return false;
+}
+
+/// `managed <data-dir> --trees <out.json>`: builds an injected-trees file
+/// from a Mono build's assemblies and its MonoScript objects, so typeless
+/// MonoBehaviour files decode without a hand-made trees file. The scan
+/// covers the data dir's top-level serialized files.
+fn buildManagedTrees(arena: std.mem.Allocator, path: []const u8, files: *const ManagedFiles, out_path: []const u8, stdout: *Io.Writer) !void {
+    const io = io_global.io;
+
+    // Parse the assemblies and index every type.
+    var assemblies: std.ArrayList(unityz.dotnet.Assembly) = .empty;
+    for (files.names.items, 0..) |fname, fi| {
+        const assembly = unityz.dotnet.parseAssembly(arena, fname, files.datas.items[fi]) catch |err| {
+            try stdout.print("unityz: {s}: {s}\n", .{ fname, @errorName(err) });
+            continue;
+        };
+        try assemblies.append(arena, assembly);
+    }
+    if (assemblies.items.len == 0) {
+        try stdout.print("unityz: no assemblies could be parsed\n", .{});
+        return;
+    }
+    const types = try unityz.managed_trees.buildTypeMap(arena, assemblies.items);
+
+    // Scan the data dir's serialized files for MonoScript objects. A bare
+    // "Managed" argument scans its parent.
+    var scan_dir = path;
+    if (std.mem.eql(u8, basename(path), "Managed")) {
+        if (std.fs.path.dirname(path)) |d| scan_dir = d;
+    }
+    const script_refs: std.ArrayList(unityz.managed_trees.ScriptRef) = .empty;
+    var refs = script_refs;
+    {
+        var dir = std.Io.Dir.cwd().openDir(io, scan_dir, .{ .iterate = true }) catch |err| {
+            try stdout.print("unityz: {s}: {s}\n", .{ scan_dir, @errorName(err) });
+            return;
+        };
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            const ename = entry.name;
+            const is_serialized = std.mem.endsWith(u8, ename, ".assets") or
+                std.mem.eql(u8, ename, "globalgamemanagers") or
+                std.mem.startsWith(u8, ename, "level");
+            if (!is_serialized) continue;
+            const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ scan_dir, ename });
+            const data = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch continue;
+            if (unityz.container.sniff(data).container != .serialized) continue;
+            const found = unityz.managed_trees.scanMonoScripts(arena, data, try arena.dupe(u8, ename)) catch continue;
+            for (found) |r| try refs.append(arena, r);
+        }
+    }
+    try stdout.print("managed: {d} MonoBehaviour class(es) in assemblies, {d} MonoScript object(s) in data files\n", .{ types.count(), refs.items.len });
+
+    // Build one script tree per MonoScript whose class lives in the game's
+    // assemblies (skip UnityEngine/UnityEditor built-ins).
+    const header = try unityz.managed_trees.monoBehaviourHeader(arena);
+    var warnings: std.ArrayList([]const u8) = .empty;
+    var json: std.ArrayList(u8) = .empty;
+    var jw = std.Io.Writer.Allocating.fromArrayList(arena, &json);
+    const w = &jw.writer;
+    try w.writeAll("{\"__class_ids__\":{\"MonoBehaviour\":114},\"MonoBehaviour\":");
+    try w.writeAll(try unityz.managed_trees.nodesToJson(arena, try unityz.managed_trees.monoHeaderTree(arena, header)));
+    try w.writeAll(",\"__script_trees__\":{");
+    var trees_written: usize = 0;
+    var monos: std.ArrayList(unityz.managed_trees.ScriptRef) = .empty;
+    for (refs.items) |r| {
+        const full_name = if (r.namespace.len != 0)
+            try std.fmt.allocPrint(arena, "{s}.{s}", .{ r.namespace, r.class_name })
+        else
+            r.class_name;
+        if (std.mem.startsWith(u8, r.namespace, "UnityEngine") or std.mem.startsWith(u8, r.namespace, "UnityEditor")) continue;
+        const info = types.get(full_name) orelse continue;
+        if (!info.is_object_derived or info.is_enum) continue;
+        if (trees_written != 0) try w.writeByte(',');
+        try unityz.managed_trees.writeJsonString(w, full_name);
+        try w.writeAll(":");
+        var budget: unityz.managed_trees.NodeBudget = .{};
+        const tree_nodes = try unityz.managed_trees.buildScriptTree(arena, full_name, header, info.fields, &budget, &types, &warnings);
+        try w.writeAll(try unityz.managed_trees.nodesToJson(arena, tree_nodes));
+        trees_written += 1;
+        try monos.append(arena, r);
+    }
+    try w.writeAll("},\"__monoscripts__\":[");
+    for (monos.items, 0..) |r, k| {
+        if (k != 0) try w.writeByte(',');
+        try w.writeAll("{\"file\":");
+        try unityz.managed_trees.writeJsonString(w, r.file);
+        try w.print(",\"path_id\":{d},\"class\":", .{r.path_id});
+        const full_name = if (r.namespace.len != 0)
+            try std.fmt.allocPrint(arena, "{s}.{s}", .{ r.namespace, r.class_name })
+        else
+            r.class_name;
+        try unityz.managed_trees.writeJsonString(w, full_name);
+        try w.writeByte('}');
+    }
+    try w.writeAll("]}\n");
+    if (warnings.items.len != 0) {
+        try stdout.print("managed: {d} field type(s) fell back to int placeholders (unknown types)\n", .{warnings.items.len});
+    }
+
+    const out_bytes = jw.toArrayList().items;
+    const file = std.Io.Dir.cwd().createFile(io, out_path, .{}) catch |err| {
+        try stdout.print("unityz: {s}: {s}\n", .{ out_path, @errorName(err) });
+        return;
+    };
+    defer file.close(io);
+    try file.writeStreamingAll(io, out_bytes);
+    try stdout.print("wrote {s} ({d} script tree(s), {d} mono-script mapping(s))\n", .{ out_path, trees_written, monos.items.len });
+}
+
+fn managedFieldType(f: unityz.dotnet.Field) []const u8 {    if (f.type_name.len != 0) return f.type_name;
     return unityz.dotnet.elementTypeName(f.elem_type);
 }
 
