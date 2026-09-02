@@ -5,11 +5,7 @@ to its PRD or ADR; keep detailed design and acceptance criteria in those files.
 
 ## Current
 
-- `managed --trees`: auto-build MonoBehaviour type trees from a game's
-  .NET assemblies so typeless MonoBehaviours decode without hand-made
-  trees files.
-- `stats --trees`: let per-class stats decode typeless Mono files.
-- Mesh export as glTF/GLB alongside OBJ.
+Nothing in flight.
 
 ## Planned
 
@@ -23,6 +19,13 @@ to its PRD or ADR; keep detailed design and acceptance criteria in those files.
 
 ## Done
 
+- Managed trees and modern mesh export (PRs #110-#111): `managed
+  --trees` auto-builds MonoBehaviour type trees from a game's assemblies
+  so typeless MonoBehaviours decode without hand-made trees files
+  (verified on Raft, Stranded Deep, Green Hell); `stats --trees` adds a
+  per-script MonoBehaviour breakdown for Mono builds; meshes export as
+  self-contained glTF/GLB alongside OBJ. The README was tightened and the
+  detail moved to docs/features.md.
 - Post-capstone batch (PRs #102-#104): `managed` reads a Mono build's
   assemblies and lists every MonoBehaviour's serialized field layout
   (no external CLR); `edit --patch` accepts `--trees`; extract writes
