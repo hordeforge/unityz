@@ -59,8 +59,10 @@ automatically.
 
 - Textures (28), sprites (213), cubemap faces (89, `_posx`... `_negz`
   PNGs), SpriteAtlas (687078895, packed-sprite mapping JSON)
-- Meshes (43) as Wavefront OBJ (vertices, normals, UVs, faces),
-  multi-stream vertex layouts included
+- Meshes (43) as Wavefront OBJ (vertices, normals, UVs, faces,
+  multi-stream vertex layouts included) plus a self-contained glTF/GLB
+  (positions, normals, UVs, indices; X mirrored and V flipped to glTF's
+  right-handed, top-left-origin conventions)
 - TextAssets (49), fonts (128, embedded TTF/OTF + metrics sidecar),
   ComputeShaders (72, DXBC/SPIR-V/GLSL per platform + descriptor JSON)
 - AudioClips (83): OGG/FSB banks, WAV-wrapped PCM, MP3, plus an FSB5
@@ -157,6 +159,16 @@ container node (a `.resS`/`.resource` sidecar) replaces bytes at an
 offset without touching the object tree, keeping every sidecar reference
 valid.
 
+## Stats
+
+`stats` reports per-class sizes and duplicate-object detection, with
+`--json` for scripts. With `--trees <file.json>`, typeless Mono files also
+get a per-script breakdown: MonoBehaviours are decoded through the injected
+trees and counted by their resolved script class name, so
+`stats <game> --trees trees.json` answers "which scripts does this game
+actually instantiate" (verified on Raft: 74 script classes across
+resources.assets alone).
+
 ## Verification
 
 `verify` round-trips every object and checks that each streamed
@@ -177,6 +189,16 @@ Animators, MonoScripts. UnityPy shells out to ffmpeg for audio
 conversion; unityz decodes in pure Zig. UnityPy only writes PNG; unityz
 adds TGA, BMP, and raw RGBA. UnityPy raises `NotImplementedError` on
 UnityArchive files; unityz detects the container.
+
+## Stats
+
+`stats` reports per-class sizes and duplicate-object detection, with
+`--json` for scripts. With `--trees <file.json>`, typeless Mono files also
+get a per-script breakdown: MonoBehaviours are decoded through the injected
+trees and counted by their resolved script class name, so
+`stats <game> --trees trees.json` answers "which scripts does this game
+actually instantiate" (verified on Raft: 74 script classes across
+resources.assets alone).
 
 ## Verification summary
 

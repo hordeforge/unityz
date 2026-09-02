@@ -44,7 +44,8 @@ const usage =
     \\  stats <path>    Per-class sizes + duplicate-object detection
     \\                 (--json for a machine-readable summary;
     \\                  --class <id> to filter; --dups for only the
-    \\                  duplicate report)
+    \\                  duplicate report; --trees <file.json> adds a
+    \\                  per-script MonoBehaviour breakdown for Mono builds)
     \\  find <path> <s>  Find objects whose name contains <s>,
     \\                 case-insensitively
     \\                 (--class <id> to filter by class;
@@ -1959,7 +1960,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 extracted += 1;
                 try manifest.append(arena, .{ .path_id = o.path_id, .class_id = 115, .name = ms.name, .subdir = subdir });
             },
-            43 => { // Mesh -> Wavefront OBJ
+            43 => { // Mesh -> Wavefront OBJ + glTF/GLB
                 const mesh = unityz.classes.Mesh.fromValue(v);
                 const obj = writeMeshObj(arena, &sf, v, &mesh) catch |err| {
                     try stdout.print("  mesh {d}: OBJ conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
@@ -1976,6 +1977,18 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try extractFile(subdir, name, obj);
                 try stdout.print("extracted {s} ({d} vertices, {d} indices)\n", .{ name, mesh.vertex_count, mesh.index_buffer.len / @as(usize, if (mesh.index_format == 1) 4 else 2) });
                 extracted += 1;
+                // GLB (glTF 2.0 binary) alongside the OBJ: self-contained
+                // and material/UV/bone-friendly for modern pipelines.
+                const glb = writeMeshGlb(arena, &sf, v, &mesh) catch null;
+                if (glb) |g| {
+                    if (g.len != 0) {
+                        var glb_buf: [160]u8 = undefined;
+                        const glb_name = sanitizeComponent(try std.fmt.bufPrint(&glb_buf, "{s}.glb", .{name[0 .. name.len - 4]}));
+                        try extractFile(subdir, glb_name, g);
+                        try stdout.print("extracted {s} ({d} bytes, glTF binary)\n", .{ glb_name, g.len });
+                        extracted += 1;
+                    }
+                }
             },
             74 => { // AnimationClip -> curves JSON
                 const clip_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
@@ -3166,6 +3179,222 @@ fn roundHalfEven(x: f64) f64 {
         r = if (x < 0) r + 1.0 else r - 1.0;
     }
     return r;
+}
+
+/// GLB (glTF 2.0 binary) export of a Mesh: positions, normals, UVs, and
+/// triangle indices in one self-contained file. Unity is left-handed with
+/// bottom-left UVs; glTF is right-handed with top-left UVs, so X is
+/// mirrored, the winding reversed, and V flipped (matching the OBJ export's
+/// convention).
+fn writeMeshGlb(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    v: unityz.value.Value,
+    mesh: *const unityz.classes.Mesh,
+) ![]const u8 {
+    if (unityz.classes.intField(v, "m_MeshCompression") orelse 0 != 0) return &.{};
+    const vch = mesh.channel(0) orelse return &.{};
+    if (vch.format != 0 or vch.dimension < 3) return &.{};
+    const vcount: usize = mesh.vertex_count;
+    if (mesh.index_format != 0 and mesh.index_format != 1) return &.{};
+    const idx_bytes: usize = if (mesh.index_format == 1) 4 else 2;
+    if (mesh.index_buffer.len < idx_bytes * 3) return &.{};
+
+    const nrm = mesh.channel(1);
+    const uv_major = unityMajor(sf.unity_version);
+    const uv_index: usize = if (uv_major >= 2018) 4 else 3;
+    const uv = mesh.channel(uv_index);
+    const has_n = nrm != null and nrm.?.format == 0 and nrm.?.dimension >= 3;
+    const has_t = uv != null and uv.?.format == 0 and uv.?.dimension >= 2;
+
+    // -------- BIN chunk: positions, normals, UVs, indices --------
+    var bin: unityz.streams.Writer = .init(arena);
+    var pos_min = [3]f32{ std.math.inf(f32), std.math.inf(f32), std.math.inf(f32) };
+    var pos_max = [3]f32{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
+    const pos_off: u32 = 0;
+    for (0..vcount) |i| {
+        const x = meshF32(mesh, 0, i, 0, sf.endian) orelse return &.{};
+        const y = meshF32(mesh, 0, i, 1, sf.endian) orelse return &.{};
+        const z = meshF32(mesh, 0, i, 2, sf.endian) orelse return &.{};
+        const fx = -x; // X mirror: left-handed -> right-handed
+        if (fx < pos_min[0]) pos_min[0] = fx;
+        if (y < pos_min[1]) pos_min[1] = y;
+        if (z < pos_min[2]) pos_min[2] = z;
+        if (fx > pos_max[0]) pos_max[0] = fx;
+        if (y > pos_max[1]) pos_max[1] = y;
+        if (z > pos_max[2]) pos_max[2] = z;
+        try bin.writeFloat(f32, fx);
+        try bin.writeFloat(f32, y);
+        try bin.writeFloat(f32, z);
+    }
+    const nrm_off: u32 = @intCast(bin.getWritten().len);
+    if (has_n) {
+        for (0..vcount) |i| {
+            try bin.writeFloat(f32, -@as(f32, meshF32(mesh, 1, i, 0, sf.endian) orelse 0));
+            try bin.writeFloat(f32, @as(f32, meshF32(mesh, 1, i, 1, sf.endian) orelse 0));
+            try bin.writeFloat(f32, @as(f32, meshF32(mesh, 1, i, 2, sf.endian) orelse 0));
+        }
+    }
+    const uv_off: u32 = @intCast(bin.getWritten().len);
+    if (has_t) {
+        for (0..vcount) |i| {
+            try bin.writeFloat(f32, @as(f32, meshF32(mesh, uv_index, i, 0, sf.endian) orelse 0));
+            // glTF UV origin is top-left; Unity is bottom-left, so flip V
+            try bin.writeFloat(f32, 1.0 - @as(f32, meshF32(mesh, uv_index, i, 1, sf.endian) orelse 0));
+        }
+    }
+    const idx_off: u32 = @intCast(bin.getWritten().len);
+    const use_u16 = vcount < 0x10000;
+    // Walk submeshes: triangles (topology 0) and quads (topology 2, each
+    // quad becomes two triangles). Winding reversed for the X mirror.
+    var index_cursor: usize = 0;
+    if (unityz.classes.fieldOf(v, "m_SubMeshes")) |subs| {
+        if (subs == .array) {
+            for (subs.array) |sub| {
+                const topology = unityz.classes.intField(sub, "topology") orelse 0;
+                const per_face: usize = switch (topology) {
+                    0 => 3,
+                    2 => 4,
+                    else => continue,
+                };
+                const index_count = unityz.classes.intField(sub, "indexCount") orelse 0;
+                const start = index_cursor;
+                const index_slots = mesh.index_buffer.len / idx_bytes;
+                if (start >= index_slots) break;
+                const want: usize = @intCast(@max(index_count, 0));
+                const end = start + @min(want, index_slots - start);
+                index_cursor = end;
+                const faces = (end - start) / per_face;
+                for (0..faces) |f| {
+                    const face_start = start + f * per_face;
+                    if (per_face == 4) {
+                        // quad as two triangles, winding reversed
+                        const q0 = readIndex(mesh.index_buffer, idx_bytes, face_start + 0, sf.endian);
+                        const q1 = readIndex(mesh.index_buffer, idx_bytes, face_start + 1, sf.endian);
+                        const q2 = readIndex(mesh.index_buffer, idx_bytes, face_start + 2, sf.endian);
+                        const q3 = readIndex(mesh.index_buffer, idx_bytes, face_start + 3, sf.endian);
+                        try writeIndex(&bin, use_u16, q2);
+                        try writeIndex(&bin, use_u16, q1);
+                        try writeIndex(&bin, use_u16, q0);
+                        try writeIndex(&bin, use_u16, q3);
+                        try writeIndex(&bin, use_u16, q2);
+                        try writeIndex(&bin, use_u16, q0);
+                    } else {
+                        const ia = readIndex(mesh.index_buffer, idx_bytes, face_start + 0, sf.endian);
+                        const ib = readIndex(mesh.index_buffer, idx_bytes, face_start + 1, sf.endian);
+                        const ic = readIndex(mesh.index_buffer, idx_bytes, face_start + 2, sf.endian);
+                        try writeIndex(&bin, use_u16, ic);
+                        try writeIndex(&bin, use_u16, ib);
+                        try writeIndex(&bin, use_u16, ia);
+                    }
+                }
+            }
+        }
+    }
+    if (index_cursor == 0) {
+        const faces = mesh.index_buffer.len / (idx_bytes * 3);
+        for (0..faces) |f| {
+            const ia = readIndex(mesh.index_buffer, idx_bytes, f * 3 + 0, sf.endian);
+            const ib = readIndex(mesh.index_buffer, idx_bytes, f * 3 + 1, sf.endian);
+            const ic = readIndex(mesh.index_buffer, idx_bytes, f * 3 + 2, sf.endian);
+            try writeIndex(&bin, use_u16, ic);
+            try writeIndex(&bin, use_u16, ib);
+            try writeIndex(&bin, use_u16, ia);
+        }
+    }
+    const idx_count = (bin.getWritten().len - idx_off) / (if (use_u16) @as(usize, 2) else 4);
+
+    // -------- JSON chunk --------
+    const name = std.mem.trimEnd(u8, mesh.name, "\x00");
+    var jsbuf: std.ArrayList(u8) = .empty;
+    var jaw = std.Io.Writer.Allocating.fromArrayList(arena, &jsbuf);
+    const js = &jaw.writer;
+    try js.print("{{\"asset\":{{\"version\":\"2.0\",\"generator\":\"unityz\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0,\"name\":", .{});
+    try writeJsonString(js, name);
+    try js.writeAll("}],\"meshes\":[{\"name\":");
+    try writeJsonString(js, name);
+    try js.writeAll(",\"primitives\":[{\"attributes\":{\"POSITION\":0");
+    var accessor_index: usize = 1;
+    if (has_n) {
+        try js.print(",\"NORMAL\":{d}", .{accessor_index});
+        accessor_index += 1;
+    }
+    if (has_t) {
+        try js.print(",\"TEXCOORD_0\":{d}", .{accessor_index});
+        accessor_index += 1;
+    }
+    try js.print("}},\"indices\":{d},\"mode\":4", .{accessor_index});
+    try js.writeAll("}]}],\"accessors\":[");
+    // POSITION
+    try js.print("{{\"bufferView\":0,\"componentType\":5126,\"count\":{d},\"type\":\"VEC3\",\"min\":[{d},{d},{d}],\"max\":[{d},{d},{d}]}}", .{ vcount, pos_min[0], pos_min[1], pos_min[2], pos_max[0], pos_max[1], pos_max[2] });
+    var view_index: usize = 1;
+    var view_offset: u32 = pos_off + @as(u32, @intCast(vcount * 12));
+    if (has_n) {
+        try js.print(",{{\"bufferView\":{d},\"componentType\":5126,\"count\":{d},\"type\":\"VEC3\"}}", .{ view_index, vcount });
+        view_index += 1;
+        view_offset += @as(u32, @intCast(vcount * 12));
+    }
+    if (has_t) {
+        try js.print(",{{\"bufferView\":{d},\"componentType\":5126,\"count\":{d},\"type\":\"VEC2\"}}", .{ view_index, vcount });
+        view_index += 1;
+        view_offset += @as(u32, @intCast(vcount * 8));
+    }
+    const idx_component: i32 = if (use_u16) 5123 else 5125;
+    try js.print(",{{\"bufferView\":{d},\"componentType\":{d},\"count\":{d},\"type\":\"SCALAR\"}}", .{ view_index, idx_component, idx_count });
+    try js.writeAll("],\"bufferViews\":[");
+    try js.print("{{\"buffer\":0,\"byteOffset\":0,\"byteLength\":{d},\"target\":34962}}", .{nrm_off});
+    view_index = 1;
+    var bv_off: u32 = nrm_off;
+    if (has_n) {
+        try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34962}}", .{ bv_off, uv_off - nrm_off });
+        view_index += 1;
+        bv_off = uv_off;
+    }
+    if (has_t) {
+        try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34962}}", .{ bv_off, idx_off - uv_off });
+        view_index += 1;
+        bv_off = idx_off;
+    }
+    try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34963}}", .{ bv_off, bin.getWritten().len - bv_off });
+    try js.print("],\"buffers\":[{{\"byteLength\":{d}}}]}}", .{bin.getWritten().len});
+    const json_bytes = jaw.toArrayList().items;
+
+    // -------- GLB assembly --------
+    const json_pad = (4 - (json_bytes.len % 4)) % 4;
+    const bin_pad = (4 - (bin.getWritten().len % 4)) % 4;
+    const total: u32 = @intCast(12 + 8 + json_bytes.len + json_pad + 8 + bin.getWritten().len + bin_pad);
+    var out: unityz.streams.Writer = .init(arena);
+    try out.writeIntWith(u32, 0x46546c67, .little); // "glTF"
+    try out.writeIntWith(u32, 2, .little);
+    try out.writeIntWith(u32, total, .little);
+    try out.writeIntWith(u32, @intCast(json_bytes.len + json_pad), .little);
+    try out.writeIntWith(u32, 0x4e4f534a, .little); // "JSON"
+    try out.writeBytes(json_bytes);
+    const json_pad_buf = [_]u8{0x20} ** 3;
+    try out.writeBytes(json_pad_buf[0..json_pad]);
+    try out.writeIntWith(u32, @intCast(bin.getWritten().len + bin_pad), .little);
+    try out.writeIntWith(u32, 0x004e4942, .little); // "BIN\0"
+    try out.writeBytes(bin.getWritten());
+    const bin_pad_buf = [_]u8{0} ** 3;
+    try out.writeBytes(bin_pad_buf[0..bin_pad]);
+    return arena.dupe(u8, out.getWritten());
+}
+
+/// Reads one mesh index (u16 or u32 by the mesh's index format).
+fn readIndex(buffer: []const u8, idx_bytes: usize, slot: usize, endian: std.builtin.Endian) u64 {
+    const off = slot * idx_bytes;
+    return if (idx_bytes == 4)
+        std.mem.readInt(u32, buffer[off..][0..4], endian)
+    else
+        std.mem.readInt(u16, buffer[off..][0..2], endian);
+}
+
+fn writeIndex(w: *unityz.streams.Writer, use_u16: bool, idx: u64) !void {
+    if (use_u16) {
+        try w.writeInt(u16, @intCast(idx));
+    } else {
+        try w.writeInt(u32, @intCast(idx));
+    }
 }
 
 fn writeObjFloat(w: *unityz.streams.Writer, v: f64) error{ NonFinite, OutOfMemory }!void {
@@ -6515,6 +6744,7 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     var class_filter: ?i32 = null;
     var json = false;
     var dups_only = false;
+    var trees_path: ?[]const u8 = null;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
@@ -6527,6 +6757,9 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
             json = true;
         } else if (std.mem.eql(u8, rest[i], "--dups")) {
             dups_only = true;
+        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
+            trees_path = rest[i + 1];
+            i += 1;
         } else {
             try stdout.print("unityz: unknown stats option '{s}'\n", .{rest[i]});
             return;
@@ -6540,9 +6773,10 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
 
     if (json) {
-        try statsJson(arena, bytes, class_filter, stdout);
+        try statsJson(arena, bytes, class_filter, injected, basename(path), stdout);
         return;
     }
     switch (unityz.container.sniff(bytes).container) {
@@ -6554,7 +6788,7 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 if (!dups_only) try stdout.print("node {s}:\n", .{n.path});
-                try statsSerializedBytes(arena, n.data, class_filter, dups_only, stdout);
+                try statsSerializedBytes(arena, n.data, class_filter, dups_only, injected, basename(n.path), stdout);
             }
         },
         .webfile => {
@@ -6565,13 +6799,54 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
                 if (!dups_only) try stdout.print("entry {s}:\n", .{e.path});
-                try statsSerializedBytes(arena, e.data, class_filter, dups_only, stdout);
+                try statsSerializedBytes(arena, e.data, class_filter, dups_only, injected, basename(e.path), stdout);
             }
         },
-        .serialized => try statsSerializedBytes(arena, bytes, class_filter, dups_only, stdout),
+        .serialized => try statsSerializedBytes(arena, bytes, class_filter, dups_only, injected, basename(path), stdout),
         else => {
             try stdout.print("{s}: stats requires a serialized file, bundle, or webfile\n", .{path});
         },
+    }
+}
+
+/// With injected trees, counts a file's MonoBehaviours by their resolved
+/// script class name (the script the m_Script PPtr points at).
+fn statsScripts(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, injected: *const InjectedTrees, own_basename: []const u8, counts: *std.StringHashMapUnmanaged(usize)) void {
+    for (sf.objects) |*o| {
+        if (o.class_id != 114) continue;
+        const data = sf.objectData(o) orelse continue;
+        if (injectedTreeFor(arena, injected, sf, own_basename, 114, data)) |tree| {
+            var r = unityz.streams.Reader.init(data);
+            r.endian = sf.endian;
+            const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+            const script = unityz.classes.pptrField(v, "m_Script") orelse continue;
+            const cls = injectedScriptClass(injected, sf, own_basename, script) orelse continue;
+            const gop = counts.getOrPut(arena, cls) catch continue;
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            gop.value_ptr.* += 1;
+        }
+    }
+}
+
+/// Prints the per-script MonoBehaviour breakdown collected by
+/// `statsScripts`, largest first. No-op when nothing decoded.
+fn printStatsScripts(arena: std.mem.Allocator, counts: *const std.StringHashMapUnmanaged(usize), stdout: *Io.Writer) !void {
+    if (counts.count() == 0) return;
+    const Entry = struct { name: []const u8, count: usize };
+    var list: std.ArrayList(Entry) = .empty;
+    var it = counts.iterator();
+    while (it.next()) |e| {
+        try list.append(arena, .{ .name = e.key_ptr.*, .count = e.value_ptr.* });
+    }
+    std.sort.insertion(Entry, list.items, {}, struct {
+        fn lessThan(_: void, a: Entry, b: Entry) bool {
+            if (a.count != b.count) return a.count > b.count;
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+    try stdout.print("MonoBehaviours by script:\n", .{});
+    for (list.items) |e| {
+        try stdout.print("  {d:>6}  {s}\n", .{ e.count, e.name });
     }
 }
 
@@ -6580,11 +6855,12 @@ const ClassStat = struct { class_id: i32, count: u32, bytes: u64 };
 
 /// JSON stats over a serialized file or the serialized nodes of a
 /// bundle/webfile: `{"objects":N,"bytes":B,"classes":{...}}`.
-fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, stdout: *Io.Writer) !void {
+fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, injected: ?*const InjectedTrees, own_basename: []const u8, stdout: *Io.Writer) !void {
     var classes: std.ArrayList(ClassStat) = .empty;
     var entries: std.ArrayList(StatEntry) = .empty;
     var total_objects: usize = 0;
     var total_bytes: u64 = 0;
+    var scripts: std.StringHashMapUnmanaged(usize) = .empty;
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
@@ -6594,6 +6870,10 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, st
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 try collectStats(arena, n.data, class_filter, &classes, &total_objects, &total_bytes, &entries);
+                if (injected) |inj| {
+                    const nsf = unityz.serialized.parse(arena, n.data) catch continue;
+                    statsScripts(arena, &nsf, inj, basename(n.path), &scripts);
+                }
             }
         },
         .webfile => {
@@ -6604,9 +6884,19 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, st
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
                 try collectStats(arena, e.data, class_filter, &classes, &total_objects, &total_bytes, &entries);
+                if (injected) |inj| {
+                    const esf = unityz.serialized.parse(arena, e.data) catch continue;
+                    statsScripts(arena, &esf, inj, basename(e.path), &scripts);
+                }
             }
         },
-        .serialized => try collectStats(arena, bytes, class_filter, &classes, &total_objects, &total_bytes, &entries),
+        .serialized => {
+            try collectStats(arena, bytes, class_filter, &classes, &total_objects, &total_bytes, &entries);
+            if (injected) |inj| {
+                const ssf = unityz.serialized.parse(arena, bytes) catch return;
+                statsScripts(arena, &ssf, inj, own_basename, &scripts);
+            }
+        },
         else => {},
     }
 
@@ -6665,7 +6955,20 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, st
         }
         try stdout.print("]}}", .{});
     }
-    try stdout.print("]}}\n", .{});
+    try stdout.writeByte(']');
+    if (scripts.count() != 0) {
+        try stdout.writeAll(",\"scripts\":{");
+        var first = true;
+        var sit = scripts.iterator();
+        while (sit.next()) |e| {
+            if (!first) try stdout.writeByte(',');
+            first = false;
+            try writeJsonString(stdout, e.key_ptr.*);
+            try stdout.print(":{d}", .{e.value_ptr.*});
+        }
+        try stdout.writeByte('}');
+    }
+    try stdout.print("}}\n", .{});
 }
 
 /// One duplicate group in `stats --json`: objects sharing identical
@@ -6715,7 +7018,7 @@ const StatEntry = struct {
     size: u32,
 };
 
-fn statsSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, dups_only: bool, stdout: *Io.Writer) !void {
+fn statsSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, dups_only: bool, injected: ?*const InjectedTrees, own_basename: []const u8, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
@@ -6740,6 +7043,11 @@ fn statsSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, class_filte
             try stdout.print("  {d}  {s} (class {d})  {d} bytes\n", .{ c.count, name, c.class_id, c.bytes });
         }
         try stdout.print("total: {d} objects, {d} bytes\n", .{ total_objects, total_bytes });
+        if (injected) |inj| {
+            var scripts: std.StringHashMapUnmanaged(usize) = .empty;
+            statsScripts(arena, &sf, inj, own_basename, &scripts);
+            try printStatsScripts(arena, &scripts, stdout);
+        }
     }
 
     // duplicate detection: sort by (class, hash), scan adjacent pairs
