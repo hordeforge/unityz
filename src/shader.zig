@@ -180,14 +180,14 @@ pub fn parseParameterBlob(arena: std.mem.Allocator, data: []const u8, offset: us
     const buffer_count = try r.readInt(i32);
     if (buffer_count < 0) return error.Truncated;
     for (0..@as(usize, @intCast(buffer_count))) |_| {
-        const name = trimNul(try r.readAlignedStringBorrow());
+        const name = streams.trimNul(try r.readAlignedStringBorrow());
         _ = try r.readInt(i32); // usedSize
         try cbuffers.append(arena, name);
 
         const param_count = try r.readInt(i32);
         if (param_count < 0) return error.Truncated;
         for (0..@as(usize, @intCast(param_count))) |_| {
-            const member_name = trimNul(try r.readAlignedStringBorrow());
+            const member_name = streams.trimNul(try r.readAlignedStringBorrow());
             _ = try r.readInt(i32); // type
             _ = try r.readInt(i32); // rows
             _ = try r.readInt(i32); // columns
@@ -200,7 +200,7 @@ pub fn parseParameterBlob(arena: std.mem.Allocator, data: []const u8, offset: us
         const struct_count = try r.readInt(i32);
         if (struct_count < 0) return error.Truncated;
         for (0..@as(usize, @intCast(struct_count))) |_| {
-            const struct_name = trimNul(try r.readAlignedStringBorrow());
+            const struct_name = streams.trimNul(try r.readAlignedStringBorrow());
             _ = try r.readInt(i32); // index
             _ = try r.readInt(i32); // arraySize
             _ = try r.readInt(i32); // size
@@ -208,7 +208,7 @@ pub fn parseParameterBlob(arena: std.mem.Allocator, data: []const u8, offset: us
             const s_param_count = try r.readInt(i32);
             if (s_param_count < 0) return error.Truncated;
             for (0..@as(usize, @intCast(s_param_count))) |_| {
-                const m = trimNul(try r.readAlignedStringBorrow());
+                const m = streams.trimNul(try r.readAlignedStringBorrow());
                 _ = try r.readInt(i32); // type
                 _ = try r.readInt(i32); // rows
                 _ = try r.readInt(i32); // columns
@@ -223,7 +223,7 @@ pub fn parseParameterBlob(arena: std.mem.Allocator, data: []const u8, offset: us
     const entry_count = try r.readInt(i32);
     if (entry_count < 0) return error.Truncated;
     for (0..@as(usize, @intCast(entry_count))) |_| {
-        const name = trimNul(try r.readAlignedStringBorrow());
+        const name = streams.trimNul(try r.readAlignedStringBorrow());
         const kind = try r.readInt(i32);
         // Reject the negative case here rather than at the switch below: the
         // @intCast to the u32 field runs first, and is illegal behavior on a
@@ -289,11 +289,6 @@ pub fn isBoneMatrixName(name: []const u8) bool {
         containsIgnoreCase(lower, "blendmatrix");
 }
 
-/// Strips the trailing NUL Unity's 4-byte-aligned strings carry.
-fn trimNul(s: []const u8) []const u8 {
-    return std.mem.trimEnd(u8, s, "\x00");
-}
-
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return false;
     if (needle.len > haystack.len) return false;
@@ -312,20 +307,8 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 // Value-tree access
 // ---------------------------------------------------------------------------
 
-fn fieldOf(v: value.Value, name: []const u8) ?value.Value {
-    return switch (v) {
-        .obj => |fields| blk: {
-            for (fields) |f| {
-                if (std.mem.eql(u8, f.name, name)) break :blk f.value;
-            }
-            break :blk null;
-        },
-        else => null,
-    };
-}
-
 fn intField(v: value.Value, name: []const u8) ?i64 {
-    return (fieldOf(v, name) orelse return null).asInt();
+    return (value.fieldOf(v, name) orelse return null).asInt();
 }
 
 fn asArray(v: value.Value) ?[]const value.Value {
@@ -358,7 +341,7 @@ fn collectPrograms(arena: std.mem.Allocator, pf: value.Value, vertex: *std.Array
 /// platform (the index space is only defined for one tier) or when the blob
 /// cannot be decoded — the caller reports that as undetermined.
 pub fn skinInfo(arena: std.mem.Allocator, v: value.Value) !?SkinInfo {
-    const pf = fieldOf(v, "m_ParsedForm") orelse return null;
+    const pf = value.fieldOf(v, "m_ParsedForm") orelse return null;
 
     // Platform blob resolution and decompression are shared with the
     // decode/verify path; see `openD3d11Blob`.
@@ -781,13 +764,13 @@ pub fn parseParameterBlobFull(arena: std.mem.Allocator, data: []const u8, offset
     if (buffer_count < 0 or @as(usize, @intCast(buffer_count)) > data.len) return error.Truncated;
     const buffers = try arena.alloc(ConstantBuffer, @intCast(buffer_count));
     for (buffers) |*buf| {
-        buf.name = trimNul(try r.readAlignedStringBorrow());
+        buf.name = streams.trimNul(try r.readAlignedStringBorrow());
         buf.used_size = try r.readInt(i32);
         const pcount = try r.readInt(i32);
         if (pcount < 0 or @as(usize, @intCast(pcount)) > data.len) return error.Truncated;
         const params = try arena.alloc(ParamMember, @intCast(pcount));
         for (params) |*p| {
-            p.name = trimNul(try r.readAlignedStringBorrow());
+            p.name = streams.trimNul(try r.readAlignedStringBorrow());
             p.type = try r.readInt(i32);
             p.rows = try r.readInt(i32);
             p.columns = try r.readInt(i32);
@@ -800,7 +783,7 @@ pub fn parseParameterBlobFull(arena: std.mem.Allocator, data: []const u8, offset
         if (scount < 0 or @as(usize, @intCast(scount)) > data.len) return error.Truncated;
         const structs = try arena.alloc(StructParam, @intCast(scount));
         for (structs) |*s| {
-            s.name = trimNul(try r.readAlignedStringBorrow());
+            s.name = streams.trimNul(try r.readAlignedStringBorrow());
             s.index = try r.readInt(i32);
             s.array_size = try r.readInt(i32);
             s.size = try r.readInt(i32);
@@ -808,7 +791,7 @@ pub fn parseParameterBlobFull(arena: std.mem.Allocator, data: []const u8, offset
             if (spcount < 0 or @as(usize, @intCast(spcount)) > data.len) return error.Truncated;
             const sp = try arena.alloc(ParamMember, @intCast(spcount));
             for (sp) |*m| {
-                m.name = trimNul(try r.readAlignedStringBorrow());
+                m.name = streams.trimNul(try r.readAlignedStringBorrow());
                 m.type = try r.readInt(i32);
                 m.rows = try r.readInt(i32);
                 m.columns = try r.readInt(i32);
@@ -825,7 +808,7 @@ pub fn parseParameterBlobFull(arena: std.mem.Allocator, data: []const u8, offset
     if (entry_count < 0 or @as(usize, @intCast(entry_count)) > data.len) return error.Truncated;
     const entries = try arena.alloc(ParamEntry, @intCast(entry_count));
     for (entries) |*e| {
-        e.name = trimNul(try r.readAlignedStringBorrow());
+        e.name = streams.trimNul(try r.readAlignedStringBorrow());
         e.kind = try r.readInt(i32);
         e.index = 0;
         e.sampler_index = 0;
@@ -1179,7 +1162,7 @@ pub const D3d11Blob = struct {
 /// Returns null when there is no single-tier d3d11 platform or the blob is too
 /// short to hold a record table.
 pub fn openD3d11Blob(arena: std.mem.Allocator, v: value.Value) !?D3d11Blob {
-    const platforms = asArray((fieldOf(v, "platforms") orelse fieldOf(v, "m_Platforms")) orelse return null) orelse return null;
+    const platforms = asArray((value.fieldOf(v, "platforms") orelse value.fieldOf(v, "m_Platforms")) orelse return null) orelse return null;
     var plat_index: ?usize = null;
     for (platforms, 0..) |p, i| {
         if (p.asInt()) |pi| {
@@ -1190,10 +1173,10 @@ pub fn openD3d11Blob(arena: std.mem.Allocator, v: value.Value) !?D3d11Blob {
         }
     }
     const idx = plat_index orelse return null;
-    const offsets = asArray((fieldOf(v, "offsets") orelse fieldOf(v, "m_Offsets")) orelse return null) orelse return null;
-    const comp_lens = asArray((fieldOf(v, "compressedLengths") orelse fieldOf(v, "m_CompressedLengths")) orelse return null) orelse return null;
-    const decomp_lens = asArray((fieldOf(v, "decompressedLengths") orelse fieldOf(v, "m_DecompressedLengths")) orelse return null) orelse return null;
-    const blob = switch ((fieldOf(v, "compressedBlob") orelse fieldOf(v, "m_CompressedBlob") orelse fieldOf(v, "m_Script")) orelse return null) {
+    const offsets = asArray((value.fieldOf(v, "offsets") orelse value.fieldOf(v, "m_Offsets")) orelse return null) orelse return null;
+    const comp_lens = asArray((value.fieldOf(v, "compressedLengths") orelse value.fieldOf(v, "m_CompressedLengths")) orelse return null) orelse return null;
+    const decomp_lens = asArray((value.fieldOf(v, "decompressedLengths") orelse value.fieldOf(v, "m_DecompressedLengths")) orelse return null) orelse return null;
+    const blob = switch ((value.fieldOf(v, "compressedBlob") orelse value.fieldOf(v, "m_CompressedBlob") orelse value.fieldOf(v, "m_Script")) orelse return null) {
         .bytes => |b| b,
         else => return null,
     };
@@ -1221,17 +1204,17 @@ pub fn openD3d11Blob(arena: std.mem.Allocator, v: value.Value) !?D3d11Blob {
 /// Collects every d3d11 sub-program blob index (all stages) and its parameter
 /// blob indices from `m_ParsedForm`.
 fn collectCodeParams(arena: std.mem.Allocator, pf: value.Value, codes: *std.ArrayList(u32), code_types: *std.ArrayList(u32), params: *std.ArrayList(u32)) !void {
-    const sub_shaders = asArray(fieldOf(pf, "m_SubShaders") orelse return) orelse return;
+    const sub_shaders = asArray(value.fieldOf(pf, "m_SubShaders") orelse return) orelse return;
     for (sub_shaders) |sub| {
-        const passes = asArray(fieldOf(sub, "m_Passes") orelse continue) orelse continue;
+        const passes = asArray(value.fieldOf(sub, "m_Passes") orelse continue) orelse continue;
         for (passes) |pass| {
             if (pass != .obj) continue;
             for (pass.obj) |f| {
                 if (f.value != .obj) continue;
                 const prog = f.value;
-                if (fieldOf(prog, "m_PlayerSubPrograms") == null) continue;
-                const groups = asArray(fieldOf(prog, "m_PlayerSubPrograms").?) orelse continue;
-                const pgroups = if (fieldOf(prog, "m_ParameterBlobIndices")) |pi| (asArray(pi) orelse &.{}) else &.{};
+                if (value.fieldOf(prog, "m_PlayerSubPrograms") == null) continue;
+                const groups = asArray(value.fieldOf(prog, "m_PlayerSubPrograms").?) orelse continue;
+                const pgroups = if (value.fieldOf(prog, "m_ParameterBlobIndices")) |pi| (asArray(pi) orelse &.{}) else &.{};
                 for (groups, 0..) |group, gi| {
                     const subs = asArray(group) orelse continue;
                     const parr = if (gi < pgroups.len) (asArray(pgroups[gi]) orelse &.{}) else &.{};
@@ -1328,8 +1311,8 @@ pub fn decodeParamRecord(arena: std.mem.Allocator, data: []const u8, rec: Record
 /// unreferenced record that still parses as one of the two kinds.
 pub fn decodeShader(arena: std.mem.Allocator, v: value.Value) !?ShaderBlob {
     const blob = (try openD3d11Blob(arena, v)) orelse return null;
-    const pf = fieldOf(v, "m_ParsedForm") orelse return null;
-    const name = trimNul(stringField(pf, "m_Name") orelse "");
+    const pf = value.fieldOf(v, "m_ParsedForm") orelse return null;
+    const name = streams.trimNul(stringField(pf, "m_Name") orelse "");
 
     var codes: std.ArrayList(u32) = .empty;
     defer codes.deinit(arena);
@@ -1394,7 +1377,7 @@ pub fn decodeShader(arena: std.mem.Allocator, v: value.Value) !?ShaderBlob {
 }
 
 fn stringField(v: value.Value, name: []const u8) ?[]const u8 {
-    return switch (fieldOf(v, name) orelse return null) {
+    return switch (value.fieldOf(v, name) orelse return null) {
         .string => |s| s,
         else => null,
     };

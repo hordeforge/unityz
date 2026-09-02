@@ -131,8 +131,8 @@ fn readLegacyNode(
     node.name = try r.readAlignedStringBorrow();
     // Some Unity writers include the NUL in the aligned length; trim it so
     // comparisons against known type names work.
-    node.type_name = trimNul(node.type_name);
-    node.name = trimNul(node.name);
+    node.type_name = streams.trimNul(node.type_name);
+    node.name = streams.trimNul(node.name);
     node.byte_size = try r.readInt(i32);
 
     if (encoding == .legacy_v2) _ = try r.readInt(i32); // variable_count
@@ -342,11 +342,6 @@ fn resolveBlobString(buffer: []const u8, offset: u32) ParseError![]const u8 {
     const rest = buffer[offset..];
     const end = std.mem.indexOfScalar(u8, rest, 0) orelse return error.Corrupt;
     return rest[0..end];
-}
-
-fn trimNul(s: []const u8) []const u8 {
-    if (s.len > 0 and s[s.len - 1] == 0) return s[0 .. s.len - 1];
-    return s;
 }
 
 /// Unity's global common-string table (blob TypeTrees). Offsets are
