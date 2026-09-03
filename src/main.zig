@@ -8194,10 +8194,6 @@ fn readHex4(text: []const u8, pos: *usize) !u16 {
     return v;
 }
 
-fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value {
-    return parseJsonValueAlloc(text, pos, depth, std.heap.page_allocator);
-}
-
 fn parseJsonValueAlloc(text: []const u8, pos: *usize, depth: u32, allocator: std.mem.Allocator) !unityz.value.Value {
     if (depth > max_json_depth) return error.TooDeep;
     skipWs(text, pos);
@@ -8805,13 +8801,6 @@ fn findGo(gos: []const GoInfo, path_id: i64) ?*const GoInfo {
     return null;
 }
 
-fn isBone(bones: []const i64, path_id: i64) bool {
-    for (bones) |b| {
-        if (b == path_id) return true;
-    }
-    return false;
-}
-
 /// Traversal depth limit for `printHierarchyNode`. Children lists are
 /// file-supplied and may be cyclic or nest beyond any scene graph, so the
 /// recursion must terminate: the bound stops it the way `max_json_depth`
@@ -8822,7 +8811,7 @@ fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, bones: []const
     if (depth > max_hierarchy_depth) return error.TooDeep;
     const tn = findNode(nodes, path_id) orelse return;
     const go = findGo(gos, tn.go);
-    const bone = isBone(bones, path_id);
+    const bone = std.mem.indexOfScalar(i64, bones, path_id) != null;
     if (json) {
         try stdout.writeAll("{\"name\":");
         try writeJsonString(stdout, if (go) |g| g.name else "");
