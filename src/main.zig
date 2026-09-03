@@ -4670,6 +4670,9 @@ const VerifyFailure = struct { path_id: i64, message: []const u8, node: ?[]const
 const VerifyReport = struct {
     checked: usize = 0,
     failed: usize = 0,
+    /// Objects skipped because the file has no type trees (Mono build)
+    /// and no --trees file supplied a decode tree.
+    skipped: usize = 0,
     failures: std.ArrayList(VerifyFailure) = .empty,
 };
 
@@ -4688,7 +4691,7 @@ fn recordFailure(report: *VerifyReport, arena: std.mem.Allocator, node: ?[]const
 /// Prints a verify report as one JSON object when `--json` is set.
 fn emitVerifyReport(json: bool, report: *const VerifyReport, stdout: *Io.Writer) !void {
     if (!json) return;
-    try stdout.print("{{\"checked\":{d},\"failed\":{d},\"failures\":", .{ report.checked, report.failed });
+    try stdout.print("{{\"checked\":{d},\"failed\":{d},\"skipped\":{d},\"failures\":", .{ report.checked, report.failed, report.skipped });
     try stdout.writeByte('[');
     for (report.failures.items, 0..) |f, idx| {
         if (idx != 0) try stdout.writeByte(',');
@@ -4966,9 +4969,12 @@ fn verifySerializedBytesSidecars(arena: std.mem.Allocator, bytes: []const u8, no
         // they are held by `report` and must outlive the per-object reset.
         failed += try scanStreamingRefs(arena, v, node, o.path_id, bytes.len, sidecars, report, stdout, json);
     }
-    if (!json) try stdout.print("  {d} object(s) checked, {d} failed\n", .{ checked, failed });
-    if (typeless_skipped != 0) {
-        try stdout.print("  {d} object(s) skipped: this file has no type trees (Mono build); pass --trees <file.json> to decode them\n", .{typeless_skipped});
+    report.skipped = typeless_skipped;
+    if (!json) {
+        try stdout.print("  {d} object(s) checked, {d} failed\n", .{ checked, failed });
+        if (typeless_skipped != 0) {
+            try stdout.print("  {d} object(s) skipped: this file has no type trees (Mono build); pass --trees <file.json> to decode them\n", .{typeless_skipped});
+        }
     }
 }
 
@@ -8980,6 +8986,29 @@ fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, bones: []const
     for (tn.children.items) |c| {
         try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, stdout);
     }
+}
+
+test "emitVerifyReport JSON carries checked, failed, and skipped" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var json: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(a, &json);
+    var report: VerifyReport = .{
+        .checked = 3,
+        .failed = 1,
+        .skipped = 2,
+    };
+    try recordFailure(&report, a, null, 7, "read failed: {s}", .{"Corrupt"});
+    try emitVerifyReport(true, &report, &aw.writer);
+    const out = aw.toArrayList().items;
+    // recordFailure bumps `failed` itself, so the report ends at 2.
+    try std.testing.expectEqualStrings("{\"checked\":3,\"failed\":2,\"skipped\":2,\"failures\":[{\"path_id\":7,\"error\":\"read failed: Corrupt\"}]}\n", out);
+    // text mode emits nothing on stdout (the report is printed separately)
+    var text: std.ArrayList(u8) = .empty;
+    var tw = std.Io.Writer.Allocating.fromArrayList(a, &text);
+    try emitVerifyReport(false, &report, &tw.writer);
+    try std.testing.expectEqual(@as(usize, 0), tw.toArrayList().items.len);
 }
 
 test "parseCommand recognizes known subcommands" {
