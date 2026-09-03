@@ -1281,7 +1281,10 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
                 try stdout.print("  sample {d} ({s}): decode failed: {s}\n", .{ si, s.name, @errorName(err) });
                 continue;
             };
-            const wav = wavPcm16(arena, std.mem.sliceAsBytes(pcm), @intCast(s.channels), s.frequency, 16) catch continue;
+            const wav = wavPcm16(arena, std.mem.sliceAsBytes(pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
+                try stdout.print("  sample {d} ({s}): WAV wrapping failed: {s}\n", .{ si, s.name, @errorName(err) });
+                continue;
+            };
             var name_buf: [192]u8 = undefined;
             const name = if (bank.samples.len == 1)
                 try std.fmt.bufPrint(&name_buf, "audio_{s}.wav", .{if (s.name.len != 0) sanitizeComponent(try arena.dupe(u8, s.name)) else "sample"})
@@ -1294,7 +1297,11 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
     } else if (bank.mode == 15) {
         var oggd: usize = 0;
         for (bank.samples, 0..) |s, si| {
-            const ogg = unityz.vorbis.rebuildOgg(arena, bytes, bank.data_start, s) catch null orelse {
+            const ogg_res = unityz.vorbis.rebuildOgg(arena, bytes, bank.data_start, s) catch |err| {
+                try stdout.print("  sample {d} ({s}): vorbis rebuild failed: {s}\n", .{ si, s.name, @errorName(err) });
+                continue;
+            };
+            const ogg = ogg_res orelse {
                 if (s.vorbis_crc != null) {
                     try stdout.print("  sample {d} ({s}): vorbis setup CRC not in the known-headers table, kept as bank data\n", .{ si, s.name });
                 }
@@ -1823,7 +1830,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     // wrap raw PCM in a WAV container
                     const bits: u16 = @intCast(if (ac.bits_per_sample == 0) 16 else ac.bits_per_sample);
                     const ch: u16 = @intCast(if (ac.channels == 0) 1 else ac.channels);
-                    wav_buf.appendSlice(arena, wavPcm16(arena, audio, ch, ac.frequency, bits) catch continue) catch continue;
+                    wav_buf.appendSlice(arena, wavPcm16(arena, audio, ch, ac.frequency, bits) catch |err| {
+                        try stdout.print("  audio {d}: WAV wrapping failed: {s}\n", .{ o.path_id, @errorName(err) });
+                        continue;
+                    }) catch continue;
                     ext = "wav";
                     audio = wav_buf.items;
                 }
@@ -1857,7 +1867,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                                     skipped += 1;
                                     continue;
                                 };
-                                const wav = wavPcm16(arena, std.mem.sliceAsBytes(pcm), @intCast(s.channels), s.frequency, 16) catch continue;
+                                const wav = wavPcm16(arena, std.mem.sliceAsBytes(pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
+                                    try stdout.print("  audio {d}: WAV wrapping failed: {s}\n", .{ o.path_id, @errorName(err) });
+                                    skipped += 1;
+                                    continue;
+                                };
                                 var wav_name_buf: [160]u8 = undefined;
                                 const wav_name = if (bank.samples.len == 1)
                                     try std.fmt.bufPrint(&wav_name_buf, "audio_{d}_{s}.wav", .{ o.path_id, base_name })
@@ -1871,7 +1885,12 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                             // Vorbis: remux the raw packet stream into a
                             // playable Ogg. Unknown setup CRCs stay .fsb.
                             for (bank.samples, 0..) |s, si| {
-                                const ogg = unityz.vorbis.rebuildOgg(arena, audio, bank.data_start, s) catch null orelse {
+                                const ogg_res = unityz.vorbis.rebuildOgg(arena, audio, bank.data_start, s) catch |err| {
+                                    try stdout.print("  audio {d}: FSB5 vorbis rebuild failed: {s}\n", .{ o.path_id, @errorName(err) });
+                                    skipped += 1;
+                                    continue;
+                                };
+                                const ogg = ogg_res orelse {
                                     if (s.vorbis_crc != null) {
                                         try stdout.print("  audio {d}: FSB5 vorbis: setup CRC not in the known-headers table, kept .fsb\n", .{o.path_id});
                                     }
@@ -2001,7 +2020,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 extracted += 1;
                 // GLB (glTF 2.0 binary) alongside the OBJ: self-contained
                 // and material/UV/bone-friendly for modern pipelines.
-                const glb = writeMeshGlb(arena, &sf, v, &mesh) catch null;
+                const glb = writeMeshGlb(arena, &sf, v, &mesh) catch |err| {
+                    try stdout.print("  mesh {d}: GLB conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
+                    skipped += 1;
+                    null;
+                };
                 if (glb) |g| {
                     if (g.len != 0) {
                         var glb_buf: [160]u8 = undefined;
