@@ -8286,8 +8286,6 @@ fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, std
     }
 }
 
-/// The display name of a managed field's type: the resolved class name for
-/// class/valuetype/array signatures, the CLR primitive name otherwise.
 /// Whether `dir_path` has a subdirectory named `name`.
 fn dirHasSubdir(dir_path: []const u8, name: []const u8) bool {
     const io = io_global.io;
@@ -8410,6 +8408,8 @@ fn buildManagedTrees(arena: std.mem.Allocator, path: []const u8, files: *const M
     try stdout.print("wrote {s} ({d} script tree(s), {d} mono-script mapping(s))\n", .{ out_path, trees_written, monos.items.len });
 }
 
+/// The display name of a managed field's type: the resolved class name for
+/// class/valuetype/array signatures, the CLR primitive name otherwise.
 fn managedFieldType(f: unityz.dotnet.Field) []const u8 {    if (f.type_name.len != 0) return f.type_name;
     return unityz.dotnet.elementTypeName(f.elem_type);
 }

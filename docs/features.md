@@ -125,7 +125,12 @@ assemblies sharing a plain class name do not collide). MonoBehaviours
 resolve their script via `m_Script` against the mono-script table; other
 classes resolve by class name.
 
-There is no off-the-shelf generator for this shape, so unityz ships one:
+unityz ships two generators for this shape. The preferred one is in-tree
+and game-specific: `unityz managed <data-dir> --trees <out.json>` builds
+the trees from the Mono build's own assemblies (its `Managed/` folder)
+and the MonoScript objects in its top-level serialized files, so each
+script class resolves to the fields that specific game's assemblies
+declare. For version-generic trees instead,
 `scripts/structsdump-to-trees.py` converts the public AssetRipper
 TypeTreeDumps `StructsDump/release/<version>.dump` into a trees file for
 that exact Unity version:
