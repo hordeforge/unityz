@@ -62,7 +62,11 @@ automatically.
 - Meshes (43) as Wavefront OBJ (vertices, normals, UVs, faces,
   multi-stream vertex layouts included) plus a self-contained glTF/GLB
   (positions, normals, UVs, indices; X mirrored and V flipped to glTF's
-  right-handed, top-left-origin conventions)
+  right-handed, top-left-origin conventions). Skinned meshes export the
+  rig too: JOINTS_0/WEIGHTS_0 accessors plus a glTF skin whose joints sit
+  at their bind world transforms and whose inverseBindMatrices are the
+  raw Unity bind poses, so the rest pose round-trips exactly (verified on
+  a 19-bone creature mesh).
 - TextAssets (49), fonts (128, embedded TTF/OTF + metrics sidecar),
   ComputeShaders (72, DXBC/SPIR-V/GLSL per platform + descriptor JSON)
 - AudioClips (83): OGG/FSB banks, WAV-wrapped PCM, MP3, plus an FSB5
