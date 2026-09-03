@@ -20,6 +20,9 @@ otherwise.
   This machine-readable nested metadata is part of unityz 0.1.1 and later;
   consumers that gate on it can reject an older executable through
   `unityz --version` before opening an artifact.
+- `info` exits non-zero for an unrecognized or malformed input. Directory
+  batches continue through every file but still return failure if any member
+  failed, so a diagnostic line can never be mistaken for successful JSON.
 - `.resources` / `.resS` sidecar files, resolved automatically for
   streamed references.
 - Big-endian bundles (Unity 5.x through 2022.3) parse, reserialize

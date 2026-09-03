@@ -225,16 +225,18 @@ pub fn main(init: std.process.Init) !void {
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, full, batch_arena, .unlimited) catch |err| {
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 try stderr.flush();
+                command_failed_flag = true;
                 continue;
             };
             runCommand(command, full, rest, bytes, stdout) catch |err| {
                 if (err == error.WriteFailed) std.process.exit(141);
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 try stderr.flush();
+                command_failed_flag = true;
             };
         }
         finalFlush(stdout);
-        if (verify_failed_flag) std.process.exit(1);
+        if (verify_failed_flag or command_failed_flag) std.process.exit(1);
         return;
     }
 
@@ -277,8 +279,7 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
                 } else if (std.mem.eql(u8, arg, "--json")) {
                     json = true;
                 } else {
-                    try stdout.print("unityz: unknown info option '{s}'\n", .{arg});
-                    return;
+                    return error.InvalidOption;
                 }
             }
             return cmdInfo(path, bytes, dump, objects, json, stdout);
@@ -306,6 +307,11 @@ const io_global = struct {
 /// Set by `cmdVerify` when any object fails; main() exits non-zero on it
 /// so batch runs keep going and still report failure at the end.
 var verify_failed_flag: bool = false;
+
+/// Set when a batch member cannot be read or a command rejects it. Batch mode
+/// keeps reporting the remaining files, then exits non-zero so diagnostics do
+/// not masquerade as successful machine-readable output.
+var command_failed_flag: bool = false;
 
 /// Output directory for extracted files (`extract --outdir <dir>`);
 /// created when missing.
@@ -4263,12 +4269,8 @@ fn cmdInfo(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json:
         .webfile => return printWebFile(path, bytes, dump, objects, json, stdout),
         .bundle => return printBundle(path, bytes, dump, objects, json, stdout),
         .serialized => return printSerialized(path, bytes, dump, objects, json, stdout),
-        .archive => {
-            try stdout.print("{s}: UnityArchive files are not supported yet\n", .{path});
-        },
-        .unknown => {
-            try stdout.print("{s}: not a recognized Unity asset file\n", .{path});
-        },
+        .archive => return error.UnsupportedArchive,
+        .unknown => return error.UnknownFormat,
     }
 }
 
@@ -4324,14 +4326,12 @@ fn writeContainerEntryJson(arena: std.mem.Allocator, path: []const u8, bytes: []
 }
 
 fn printWebFile(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
+    _ = path;
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-        try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-        return;
-    };
+    const wf = try unityz.webfile.parse(arena, bytes);
     if (json) {
         try stdout.print("{{\"type\":\"WebFile\",\"files\":{d},\"entries\":[", .{wf.entries.len});
         for (wf.entries, 0..) |e, i| {
@@ -4434,14 +4434,12 @@ fn emitShadersJson(arena: std.mem.Allocator, nodes: anytype, stdout: *Io.Writer)
 }
 
 fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
+    _ = path;
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const b = unityz.bundle.parse(arena, bytes) catch |err| {
-        try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
-        return;
-    };
+    const b = try unityz.bundle.parse(arena, bytes);
     if (json) {
         try stdout.print("{{\"type\":\"UnityFS\",\"version\":{d},\"unity\":\"{s}\",\"nodes\":{d},\"blocks\":{d},\"nodes_list\":[", .{ b.version, b.unity_version, b.nodes.len, b.blocks.len });
         for (b.nodes, 0..) |n, i| {
@@ -4478,14 +4476,12 @@ fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, j
 }
 
 fn printSerialized(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
+    _ = path;
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("{s}: serialized file parse failed: {s}\n", .{ path, @errorName(err) });
-        return;
-    };
+    const sf = try unityz.serialized.parse(arena, bytes);
     if (json) {
         try stdout.print("{{\"type\":\"SerializedFile\",\"version\":{d},\"unity\":\"{s}\",\"platform\":{d},\"endian\":\"{s}\",\"type_tree\":{s},\"types\":{d},\"objects\":{d},\"externals\":{d}", .{
             sf.version,                                    sf.unity_version,                             sf.target_platform,
@@ -9023,6 +9019,19 @@ test "parseCommand recognizes known subcommands" {
     try std.testing.expectEqual(Command.hash, parseCommand("hash"));
     try std.testing.expect(parseCommand("bogus") == null);
     try std.testing.expect(parseCommand("--version") == null);
+}
+
+test "info rejects an unrecognized file instead of printing a successful diagnostic" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var output: std.ArrayList(u8) = .empty;
+    var writer = std.Io.Writer.Allocating.fromArrayList(arena_state.allocator(), &output);
+
+    try std.testing.expectError(
+        error.UnknownFormat,
+        cmdInfo("broken.bin", "not a Unity asset", false, false, true, &writer.writer),
+    );
+    try std.testing.expectEqual(0, output.items.len);
 }
 
 test "writeObjFloat matches Python's %.9g" {
