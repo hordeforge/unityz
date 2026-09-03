@@ -93,11 +93,13 @@ describe the code (see the completion notes): the exotic texture formats
 were taken on after an audit against UnityPy's TextureFormat enum, so
 ASTC HDR, the crunch variants, and the raw half/float/16-bit/signed
 family now decode, and later passes closed the rest of the block-format
-gap too (BC6H, PVRTC, ATC, EAC, the 3DS ETC variants, ETC2_RGBA1).
+gap too (BC6H, PVRTC, ATC, EAC, the 3DS ETC variants, ETC2_RGBA1). Audio
+and video conversion followed after real-bank verification: FSB5
+compressed codecs decode to WAV, Vorbis banks remux to playable Ogg, and
+VideoClip streams export to MP4.
 
 AudioClip data is now extracted (container detection, raw PCM wrapped in
-a WAV header) rather than skipped, though nothing is transcoded, so
-audio/movie *conversion* remains out. The other four non-goals still
+a WAV header) rather than skipped. The other four non-goals still
 hold: class database download/caching, asset bundle encryption variants,
 asset bundle building from scratch (`bundle.rebuild`/`webfile.rebuild`
 rewrite a parsed container, they do not author one), and .NET assembly
