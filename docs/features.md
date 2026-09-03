@@ -13,6 +13,10 @@ otherwise.
 - Asset bundles: UnityFS (modern), UnityWeb / UnityRaw (legacy), WebFile
   (`UnityWebData1.0`, gzip-wrapped included), and the rare UnityArchive
   container is detected but not yet parsed (no real sample exists).
+- `info --json` reports the metadata of every SerializedFile embedded in a
+  bundle or WebFile: its format and Unity versions, platform, endianness,
+  type-tree state, counts, and present class IDs. This is distinct from the
+  outer UnityFS header's Unity string, which is commonly only `5.x.x`.
 - `.resources` / `.resS` sidecar files, resolved automatically for
   streamed references.
 - Big-endian bundles (Unity 5.x through 2022.3) parse, reserialize
@@ -243,3 +247,14 @@ Animators, MonoScripts. UnityPy shells out to ffmpeg for audio
 conversion; unityz decodes in pure Zig. UnityPy only writes PNG; unityz
 adds TGA, BMP, and raw RGBA. UnityPy raises `NotImplementedError` on
 UnityArchive files; unityz detects the container.
+
+UnityPy still carries one creation-side facility that unityz does not:
+UnityPy bundles a release-indexed database of built-in engine-class type
+trees and can return a requested class tree for a Unity version. unityz can
+read and reserialize trees present in a file and can inject trees derived
+from AssetRipper dumps or managed assemblies, but it does not ship that
+versioned database or expose a command to select and export one built-in
+class tree. It also edits existing SerializedFiles and containers rather than
+creating a new object table or bundle from an empty input. Those are concrete
+gaps for callers that author brand-new Unity objects; they do not limit
+reading, extraction, verification, diffing, or in-place edits.
