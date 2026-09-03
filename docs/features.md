@@ -65,8 +65,11 @@ automatically.
   right-handed, top-left-origin conventions). Skinned meshes export the
   rig too: JOINTS_0/WEIGHTS_0 accessors plus a glTF skin whose joints sit
   at their bind world transforms and whose inverseBindMatrices are the
-  raw Unity bind poses, so the rest pose round-trips exactly (verified on
-  a 19-bone creature mesh).
+  raw Unity bind poses, so the rest pose round-trips exactly. Skin data
+  comes from either storage Unity used: vertex channels 12/13 (2019+,
+  verified on a 19-bone creature mesh) or the per-vertex m_Skin /
+  m_BoneWeights array (5.x, verified on The Forest: 257 of 1325 meshes,
+  rest pose ~5e-7).
 - SkinnedMeshRenderers (137) export the bound character as one GLB whose
   joints carry the armature's real names (each m_Bones Transform resolves
   to its GameObject name; the per-Mesh export keeps generic Bone0..N

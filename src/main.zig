@@ -3070,6 +3070,36 @@ fn meshU32(
     };
 }
 
+/// Looks up one field of a legacy per-vertex skin entry by trying the
+/// naming variants Unity used across versions for the four weights and
+/// bone indices. 5.x `m_Skin` entries name them `weight[0]` /
+/// `boneIndex[0]`; older `m_BoneWeights` builds drop the brackets or add
+/// an `m_` prefix. `kind` selects the field family (0 = weight float,
+/// 1 = bone index int).
+fn legacySkinValue(entry: unityz.value.Value, kind: u8, k: usize) ?unityz.value.Value {
+    if (entry != .obj) return null;
+    const base = if (kind == 0) "weight" else "boneIndex";
+    var nb: [24]u8 = undefined;
+    const bracket = std.fmt.bufPrint(&nb, "{s}[{d}]", .{ base, k }) catch return null;
+    if (unityz.classes.fieldOf(entry, bracket)) |fv| return fv;
+    const plain = std.fmt.bufPrint(&nb, "{s}{d}", .{ base, k }) catch return null;
+    if (unityz.classes.fieldOf(entry, plain)) |fv| return fv;
+    const mpref = std.fmt.bufPrint(&nb, "m_{s}{d}", .{ base, k }) catch return null;
+    return unityz.classes.fieldOf(entry, mpref);
+}
+
+fn legacySkinWeight(entry: unityz.value.Value, k: usize) ?f32 {
+    const fv = legacySkinValue(entry, 0, k) orelse return null;
+    return @floatCast(fv.asFloat() orelse return null);
+}
+
+fn legacySkinJoint(entry: unityz.value.Value, k: usize) ?u32 {
+    const fv = legacySkinValue(entry, 1, k) orelse return null;
+    const iv = fv.asInt() orelse return null;
+    if (iv < 0 or iv > std.math.maxInt(u32)) return null;
+    return @intCast(iv);
+}
+
 /// Inverts a 4x4 matrix (row-major `m[r*4+c]`) by Gauss-Jordan on [M|I].
 /// Returns null when singular.
 fn mat4Inverse(m: [16]f32) ?[16]f32 {
@@ -3374,9 +3404,10 @@ fn writeMeshGlb(
 
     // -------- skin detection --------
     // Unity 2019+ keeps per-vertex skin data in vertex channels 12 (blend
-    // weights, float4) and 13 (blend indices, UInt32 x4) with the bone
-    // count in m_BindPose. Older builds carry m_BoneWeights instead (not
-    // supported here: report the mesh unskinned).
+    // weights, float4) and 13 (blend indices, UInt32 x4); 5.x-era builds
+    // carry a per-vertex m_Skin / m_BoneWeights array of
+    // {weight[0..3], boneIndex[0..3]} objects instead. Either source
+    // works; the bone count comes from m_BindPose either way.
     const bind_poses = blk: {
         if (unityz.classes.fieldOf(v, "m_BindPose")) |bp| {
             if (bp == .array) break :blk bp.array;
@@ -3385,17 +3416,40 @@ fn writeMeshGlb(
     };
     const wch = mesh.channel(12);
     const ich = mesh.channel(13);
+    const channel_skin = wch != null and wch.?.format == 0 and wch.?.dimension >= 4 and ich != null and ich.?.dimension >= 4;
+    const legacy_skin = blk: {
+        if (channel_skin) break :blk &.{};
+        const arr = blk2: {
+            if (unityz.classes.fieldOf(v, "m_Skin")) |sv| {
+                if (sv == .array) break :blk2 sv.array;
+            }
+            if (unityz.classes.fieldOf(v, "m_BoneWeights")) |bw| {
+                if (bw == .array) break :blk2 bw.array;
+            }
+            break :blk2 &.{};
+        };
+        // a valid legacy skin has exactly one entry per vertex, each with
+        // the weight fields
+        if (arr.len != vcount) break :blk &.{};
+        if (arr.len == 0) break :blk &.{};
+        if (legacySkinWeight(arr[0], 0) == null) break :blk &.{};
+        break :blk arr;
+    };
     var n_bones: usize = bind_poses.len;
-    var has_skin = n_bones > 0 and wch != null and wch.?.format == 0 and wch.?.dimension >= 4 and ich != null and ich.?.dimension >= 4;
+    var has_skin = n_bones > 0 and (channel_skin or legacy_skin.len != 0);
     if (has_skin) {
         // every joint index must fit u16 (glTF JOINTS_0 has no u32 form)
         outer: for (0..vcount) |vi| {
             for (0..4) |k| {
-                const ji = meshU32(mesh, 13, vi, k, sf.endian) orelse {
+                const ji = if (legacy_skin.len != 0)
+                    legacySkinJoint(legacy_skin[vi], k)
+                else
+                    meshU32(mesh, 13, vi, k, sf.endian);
+                const jj = ji orelse {
                     has_skin = false;
                     break :outer;
                 };
-                if (ji >= 0x10000) {
+                if (jj >= 0x10000) {
                     has_skin = false;
                     break :outer;
                 }
@@ -3523,7 +3577,11 @@ fn writeMeshGlb(
     if (has_skin) {
         for (0..vcount) |vi| {
             for (0..4) |k| {
-                try bin.writeFloat(f32, @as(f32, meshF32(mesh, 12, vi, k, sf.endian) orelse 0));
+                const w = if (legacy_skin.len != 0)
+                    legacySkinWeight(legacy_skin[vi], k) orelse 0
+                else
+                    meshF32(mesh, 12, vi, k, sf.endian) orelse 0;
+                try bin.writeFloat(f32, w);
             }
         }
     }
@@ -3531,7 +3589,11 @@ fn writeMeshGlb(
     if (has_skin) {
         for (0..vcount) |vi| {
             for (0..4) |k| {
-                try bin.writeInt(u16, @intCast(meshU32(mesh, 13, vi, k, sf.endian) orelse 0));
+                const j = if (legacy_skin.len != 0)
+                    legacySkinJoint(legacy_skin[vi], k) orelse 0
+                else
+                    meshU32(mesh, 13, vi, k, sf.endian) orelse 0;
+                try bin.writeInt(u16, @intCast(j));
             }
         }
     }
