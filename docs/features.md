@@ -67,6 +67,11 @@ automatically.
   at their bind world transforms and whose inverseBindMatrices are the
   raw Unity bind poses, so the rest pose round-trips exactly (verified on
   a 19-bone creature mesh).
+- SkinnedMeshRenderers (137) export the bound character as one GLB whose
+  joints carry the armature's real names (each m_Bones Transform resolves
+  to its GameObject name; the per-Mesh export keeps generic Bone0..N
+  joints), so a rigged character drops straight into a DCC tool with its
+  skeleton intact.
 - TextAssets (49), fonts (128, embedded TTF/OTF + metrics sidecar),
   ComputeShaders (72, DXBC/SPIR-V/GLSL per platform + descriptor JSON)
 - AudioClips (83): OGG/FSB banks, WAV-wrapped PCM, MP3, plus an FSB5

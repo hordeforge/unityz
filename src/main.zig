@@ -1979,13 +1979,66 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 extracted += 1;
                 // GLB (glTF 2.0 binary) alongside the OBJ: self-contained
                 // and material/UV/bone-friendly for modern pipelines.
-                const glb = writeMeshGlb(arena, &sf, v, &mesh) catch null;
+                const glb = writeMeshGlb(arena, &sf, v, &mesh, null) catch null;
                 if (glb) |g| {
                     if (g.len != 0) {
                         var glb_buf: [160]u8 = undefined;
                         const glb_name = sanitizeComponent(try std.fmt.bufPrint(&glb_buf, "{s}.glb", .{name[0 .. name.len - 4]}));
                         try extractFile(subdir, glb_name, g);
                         try stdout.print("extracted {s} ({d} bytes, glTF binary)\n", .{ glb_name, g.len });
+                        extracted += 1;
+                    }
+                }
+            },
+            137 => { // SkinnedMeshRenderer -> character GLB with named armature
+                // A skinned character is the renderer, its Mesh, and the
+                // m_Bones Transform chain. Resolve the mesh and name each
+                // joint from its Transform's GameObject, so the GLB's
+                // skeleton carries real bone names (the per-Mesh export at
+                // class 43 keeps generic Bone0..N joints).
+                const renderer_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const mesh_path = if (unityz.classes.fieldOf(v, "m_Mesh")) |mv| pptrPathId(mv) orelse null else null;
+                if (mesh_path == null or mesh_path.? == 0) continue;
+                const mval = readObjectValue(arena, &sf, mesh_path.?, basename(path), injected) orelse continue;
+                const mesh = unityz.classes.Mesh.fromValue(mval);
+                var names: std.ArrayList([]const u8) = .empty;
+                if (unityz.classes.fieldOf(v, "m_Bones")) |b| {
+                    if (b == .array) {
+                        for (b.array) |bone| {
+                            var nm: []const u8 = "";
+                            if (pptrPathId(bone)) |bid| {
+                                if (bid != 0) {
+                                    if (readObjectValue(arena, &sf, bid, basename(path), injected)) |tv| {
+                                        if (unityz.classes.fieldOf(tv, "m_GameObject")) |gv| {
+                                            if (pptrPathId(gv)) |gid| {
+                                                if (gid != 0) {
+                                                    if (readObjectValue(arena, &sf, gid, basename(path), injected)) |gov| {
+                                                        nm = std.mem.trimEnd(u8, unityz.classes.stringField(gov, "m_Name") orelse "", "\x00");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            try names.append(arena, nm);
+                        }
+                    }
+                }
+                const glb = writeMeshGlb(arena, &sf, mval, &mesh, names.items) catch null;
+                if (glb) |g| {
+                    if (g.len != 0) {
+                        var name_buf: [192]u8 = undefined;
+                        const base = if (renderer_name.len != 0) renderer_name else std.mem.trimEnd(u8, mesh.name, "\x00");
+                        const clipped = if (base.len > 140) base[0..140] else base;
+                        const full = if (clipped.len != 0)
+                            try std.fmt.bufPrint(&name_buf, "character_{d}_{s}.glb", .{ o.path_id, clipped })
+                        else
+                            try std.fmt.bufPrint(&name_buf, "character_{d}.glb", .{o.path_id});
+                        const name = sanitizeComponent(full);
+                        try extractFile(subdir, name, g);
+                        try stdout.print("extracted {s} ({d} bytes, glTF binary, {d} named bones)\n", .{ name, g.len, names.items.len });
+                        try manifest.append(arena, .{ .path_id = o.path_id, .class_id = 137, .name = renderer_name, .subdir = subdir });
                         extracted += 1;
                     }
                 }
@@ -3302,6 +3355,7 @@ fn writeMeshGlb(
     sf: *const unityz.serialized.SerializedFile,
     v: unityz.value.Value,
     mesh: *const unityz.classes.Mesh,
+    bone_names: ?[]const []const u8,
 ) ![]const u8 {
     if (unityz.classes.intField(v, "m_MeshCompression") orelse 0 != 0) return &.{};
     const vch = mesh.channel(0) orelse return &.{};
@@ -3507,9 +3561,16 @@ fn writeMeshGlb(
     try js.writeAll("}");
     if (has_skin) {
         // joint nodes: each sits at its bone's bind world transform
-        // (row-major inverse bind pose, printed column-major for glTF)
+        // (row-major inverse bind pose, printed column-major for glTF);
+        // named from the armature when the caller resolved m_Bones
         for (joint_matrices, 0..) |jm, bi| {
-            try js.print(",{{\"name\":\"Bone{d}\",\"matrix\":[", .{bi});
+            const jname = if (bone_names != null and bi < bone_names.?.len and bone_names.?[bi].len != 0) bone_names.?[bi] else blk: {
+                var nb: [24]u8 = undefined;
+                break :blk std.fmt.bufPrint(&nb, "Bone{d}", .{bi}) catch "Bone";
+            };
+            try js.print(",{{\"name\":", .{});
+            try writeJsonString(js, jname);
+            try js.writeAll(",\"matrix\":[");
             for (0..4) |c| {
                 for (0..4) |r| {
                     if (c != 0 or r != 0) try js.writeAll(",");
