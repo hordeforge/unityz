@@ -43,6 +43,8 @@ pub const Field = struct {
     generic_arg: []const u8 = "",
     /// The resolved second type argument (Dictionary<K,V> values).
     generic_arg2: []const u8 = "",
+    /// 1-based Field-table row (for custom-attribute lookups).
+    row: u32 = 0,
 
     pub fn isPublic(self: Field) bool {
         return (self.flags & 0x6) == 0x6;
@@ -81,6 +83,11 @@ pub const Assembly = struct {
     /// AssemblyDef, which this reader skips).
     name: []const u8 = "",
     type_defs: []const TypeDef,
+    /// Per field-row (1-based) custom-attribute marks: whether the field
+    /// carries [SerializeField] (private fields Unity serializes anyway)
+    /// or [NonSerialized]/[HideInInspector] (public fields Unity skips).
+    field_serialized: []const bool = &.{},
+    field_nonserialized: []const bool = &.{},
 };
 
 /// ELEMENT_TYPE_* constants used by field signatures.
@@ -177,8 +184,9 @@ const Heaps = struct {
     blob: []const u8 = &.{},
     /// heap index widths: bit 0 = strings 4-byte, bit 2 = blob 4-byte
     heap_sizes: u8 = 0,
-    /// table row-count widths (2 or 4), set from the #~ row counts
-    table_sizes: [64]u8 = [_]u8{0} ** 64,
+    /// per-table row counts from the #~ stream mask; coded-index widths are
+    /// decided from these, exactly like tableRowSize does
+    table_counts: [64]u32 = [_]u32{0} ** 64,
     valid_mask: u64 = 0,
 };
 
@@ -218,12 +226,23 @@ fn readBlob(r: *streams.Reader, heaps: *const Heaps) Error![]const u8 {
 // #~ table stream
 // ---------------------------------------------------------------------------
 
+/// ECMA-335 metadata table numbers (II.22). Pointer tables (FieldPtr etc.)
+/// are absent from optimized `#~` streams but listed for completeness.
 const tables = struct {
+    pub const module: u32 = 0x00;
     pub const typeref: u32 = 0x01;
     pub const typedef: u32 = 0x02;
     pub const field: u32 = 0x04;
-    pub const assemblyref: u32 = 0x20;
+    pub const methoddef: u32 = 0x06;
+    pub const param: u32 = 0x08;
+    pub const memberref: u32 = 0x0a;
+    pub const customattr: u32 = 0x0c;
+    pub const property: u32 = 0x17;
+    pub const moduleref: u32 = 0x1a;
     pub const typespec: u32 = 0x1b;
+    pub const assembly: u32 = 0x20;
+    pub const assemblyref: u32 = 0x23;
+    pub const genericparam: u32 = 0x2a;
 };
 
 const TableData = struct {
@@ -252,7 +271,7 @@ fn parseTableStream(bytes: []const u8, heaps: *Heaps) Error!TableData {
         }
     }
     for (counts, 0..) |c, i| {
-        heaps.table_sizes[i] = if (c < 0x10000) 2 else 4;
+        heaps.table_counts[i] = c;
     }
 
     var out: TableData = .{ .bytes = bytes };
@@ -269,29 +288,94 @@ fn parseTableStream(bytes: []const u8, heaps: *Heaps) Error!TableData {
     return out;
 }
 
+/// Byte width of one row of metadata table `t`. Every column's width is
+/// decided by the largest row count of the tables it indexes (ECMA-335
+/// II.24.2.4): heap indices are 4 bytes when `heap_sizes` says so, plain
+/// table indices are 4 bytes when the target table has >= 2^16 rows, and
+/// coded indices are 4 bytes when the largest tagged table has >= 2^(16-tags)
+/// rows. Getting any of these wrong shifts every later table's offset.
 fn tableRowSize(t: u32, counts: [64]u32, heaps: *const Heaps) u32 {
     const sz = heaps.heap_sizes;
-    const s2: u32 = if ((sz & 1) != 0) 4 else 2; // strings
-    const b2: u32 = if ((sz & 4) != 0) 4 else 2; // blob
-    const g2: u32 = if ((sz & 2) != 0) 4 else 2; // guid
+    const s2: u32 = if ((sz & 1) != 0) 4 else 2; // string heap
+    const b2: u32 = if ((sz & 4) != 0) 4 else 2; // blob heap
+    const g2: u32 = if ((sz & 2) != 0) 4 else 2; // guid heap
+    // largest tagged-table row count per coded index
+    const type_def_or_ref = maxCount(counts, &.{ 0x02, 0x01, 0x1b });
+    const type_or_method_def = maxCount(counts, &.{ 0x02, tables.methoddef });
+    const method_def_or_ref = maxCount(counts, &.{ tables.methoddef, tables.memberref });
+    const resolution_scope = maxCount(counts, &.{ 0x00, 0x1a, 0x23, 0x01 });
+    const member_ref_parent = maxCount(counts, &.{ 0x02, 0x01, 0x1a, tables.methoddef, 0x1b });
+    const has_constant = maxCount(counts, &.{ 0x04, 0x08, 0x17 });
+    const has_custom_attr = maxCount(counts, &.{ 0x06, 0x04, 0x01, 0x02, 0x08, 0x09, 0x0a, 0x00, 0x0e, 0x17, 0x14, 0x11, 0x1a, 0x1b, 0x20, 0x23, 0x26, 0x27, 0x28, 0x2a, 0x2c, 0x2b });
+    const has_field_marshal = maxCount(counts, &.{ 0x04, 0x08 });
+    const has_decl_security = maxCount(counts, &.{ 0x02, tables.methoddef, 0x20 });
+    const has_semantics = maxCount(counts, &.{ 0x14, 0x17 });
+    const member_forwarded = maxCount(counts, &.{ 0x04, tables.methoddef });
+    const implementation = maxCount(counts, &.{ 0x26, 0x23, 0x27 });
     return switch (t) {
-        0x00 => 2 + s2 + 3 * g2, // Module: generation, name, mvid, encid, encbaseid
-        tables.typeref => 2 * s2 + codedSize(resolutionScopeMax(counts), 2),
-        // FieldList / MethodList are plain table indices, 2 bytes when the
-        // target table has fewer than 2^16 rows (the common case).
-        tables.typedef => 4 + 2 * s2 + codedSize(typedefOrRefMax(counts), 2) + idxWidth(counts[tables.field]) + idxWidth(counts[0x06]),
-        tables.field => 2 + s2 + b2,
-        tables.assemblyref => 8 + 4 + b2 + s2 + s2 + b2,
-        else => 0,
+        0x00 => 2 + s2 + 3 * g2, // Module
+        0x01 => 2 * s2 + codedSize(resolution_scope, 2), // TypeRef
+        0x02 => 4 + 2 * s2 + codedSize(type_def_or_ref, 2) + idxWidth(counts[0x04]) + idxWidth(counts[tables.methoddef]), // TypeDef
+        0x03 => idxWidth(counts[0x04]), // FieldPtr
+        0x04 => 2 + s2 + b2, // Field
+        0x05 => idxWidth(counts[tables.methoddef]), // MethodPtr
+        0x06 => 4 + 2 + 2 + s2 + b2 + idxWidth(counts[0x08]), // MethodDef: RVA, impl flags, flags, name, sig, param list
+        0x07 => idxWidth(counts[0x08]), // ParamPtr
+        // Param has only three columns (flags, sequence, name): the
+        // parameter types live in the method's signature blob, not here.
+        0x08 => 2 + 2 + s2,
+        0x09 => idxWidth(counts[0x02]) + codedSize(type_def_or_ref, 2), // InterfaceImpl
+        0x0a => codedSize(member_ref_parent, 3) + s2 + b2, // MemberRef
+        0x0b => 2 + codedSize(has_constant, 2) + b2, // Constant
+        0x0c => codedSize(has_custom_attr, 5) + codedSize(method_def_or_ref, 3) + b2, // CustomAttribute; Type tag needs 3 bits (MethodDef=2, MemberRef=3)
+        0x0d => codedSize(has_field_marshal, 2) + b2, // FieldMarshal
+        0x0e => 2 + codedSize(has_decl_security, 2) + b2, // DeclSecurity
+        0x0f => 2 + 4 + idxWidth(counts[0x02]), // ClassLayout
+        0x10 => 4 + idxWidth(counts[0x04]), // FieldLayout
+        0x11 => b2, // StandAloneSig
+        0x12 => idxWidth(counts[0x02]) + idxWidth(counts[0x14]), // EventMap
+        0x13 => idxWidth(counts[0x14]), // EventPtr
+        0x14 => 2 + s2 + codedSize(type_def_or_ref, 2), // Event
+        0x15 => idxWidth(counts[0x02]) + idxWidth(counts[0x17]), // PropertyMap
+        0x16 => idxWidth(counts[0x17]), // PropertyPtr
+        0x17 => 2 + s2 + b2, // Property (its Type is a blob index)
+        0x18 => 2 + idxWidth(counts[tables.methoddef]) + codedSize(has_semantics, 1), // MethodSemantics
+        0x19 => idxWidth(counts[0x02]) + 2 * codedSize(method_def_or_ref, 1), // MethodImpl
+        0x1a => s2, // ModuleRef
+        0x1b => b2, // TypeSpec
+        0x1c => 2 + codedSize(member_forwarded, 1) + s2 + idxWidth(counts[0x1a]), // ImplMap
+        0x1d => 4 + idxWidth(counts[0x04]), // FieldRva
+        0x1e => 8, // ENCLog
+        0x1f => 4, // ENCMap
+        0x20 => 4 + 8 + 4 + b2 + s2 + s2, // Assembly: hashalg, 4 version u16s, flags, public key, name, culture
+        0x21 => 4, // AssemblyProcessor
+        0x22 => 12, // AssemblyOS
+        0x23 => 8 + 4 + b2 + s2 + s2 + b2, // AssemblyRef: 4 version u16s, flags, public key/token, name, culture, hash
+        0x24 => 4 + idxWidth(counts[0x23]), // AssemblyRefProcessor
+        0x25 => 12 + idxWidth(counts[0x23]), // AssemblyRefOS
+        0x26 => 4 + s2 + b2, // File
+        0x27 => 4 + 4 + 2 * s2 + codedSize(implementation, 2), // ExportedType
+        0x28 => 4 + 4 + s2 + codedSize(implementation, 2), // ManifestResource
+        0x29 => 2 * idxWidth(counts[0x02]), // NestedClass
+        0x2a => 2 + 2 + codedSize(type_or_method_def, 2) + s2, // GenericParam
+        0x2b => codedSize(method_def_or_ref, 1) + b2, // MethodSpec
+        0x2c => idxWidth(counts[0x2a]) + codedSize(type_def_or_ref, 2), // GenericParamConstraint
+        else => 0, // reserved table numbers never appear in a valid mask
     };
 }
 
+fn maxCount(counts: [64]u32, comptime ts: []const u32) u32 {
+    var mx: u32 = 0;
+    inline for (ts) |t| mx = @max(mx, counts[t]);
+    return mx;
+}
+
 fn resolutionScopeMax(counts: [64]u32) u32 {
-    return @max(@max(counts[0x00], counts[0x1a]), @max(counts[tables.assemblyref], counts[tables.typeref]));
+    return maxCount(counts, &.{ 0x00, 0x1a, 0x23, 0x01 });
 }
 
 fn typedefOrRefMax(counts: [64]u32) u32 {
-    return @max(@max(counts[tables.typedef], counts[tables.typeref]), counts[tables.typespec]);
+    return maxCount(counts, &.{ 0x02, 0x01, 0x1b });
 }
 
 /// Plain table index width: 2 bytes when the table has fewer than 2^16 rows.
@@ -311,10 +395,11 @@ fn rowReader(td: *const TableData, t: u32, row: u32) streams.Reader {
 }
 
 /// Reads a coded index: `tag_bits` low bits tag which table, rest is the
-/// 1-based row number.
+/// 1-based row number. The width is 4 bytes when any tagged table has >=
+/// 2^(16-tag_bits) rows (ECMA-335 II.24.2.6), matching tableRowSize.
 fn readCoded(r: *streams.Reader, tag_bits: u8, tag_tables: []const u32, heaps: *const Heaps) Error!u32 {
     var max: u32 = 0;
-    for (tag_tables) |t| max = @max(max, heaps.table_sizes[t]);
+    for (tag_tables) |t| max = @max(max, heaps.table_counts[t]);
     const size: usize = if (max >= (@as(u32, 1) << @as(u5, @intCast(16 - tag_bits)))) 4 else 2;
     const raw: u32 = if (size == 4) try r.readInt(u32) else try r.readInt(u16);
     return raw;
@@ -379,7 +464,7 @@ fn typeSpecBlob(td: *const TableData, heaps: *const Heaps, row: u32) Error![]con
 }
 
 fn resolutionScopeMaxFromHeaps(heaps: *const Heaps) u32 {
-    return @max(@max(heaps.table_sizes[0x00], heaps.table_sizes[0x1a]), @max(heaps.table_sizes[tables.assemblyref], heaps.table_sizes[tables.typeref]));
+    return @max(@max(heaps.table_counts[0x00], heaps.table_counts[0x1a]), @max(heaps.table_counts[tables.assemblyref], heaps.table_counts[tables.typeref]));
 }
 
 /// Reads one type from a signature cursor and names it. Handles primitives,
@@ -527,6 +612,8 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
     const n_typedefs = table_data.row_counts[tables.typedef];
     const type_defs = try arena.alloc(TypeDef, n_typedefs);
     for (type_defs) |*d| d.* = .{ .name = "", .namespace = "", .flags = 0, .fields = &.{} };
+    const method_starts = try arena.alloc(u32, n_typedefs + 1);
+    @memset(method_starts, 0);
 
     var i: u32 = 0;
     while (i < n_typedefs) : (i += 1) {
@@ -536,6 +623,7 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
         const tns = try readString(&rr, &heaps);
         const extends = try readCoded(&rr, 2, &.{ tables.typedef, tables.typeref, tables.typespec }, &heaps);
         const field_list = if (idxWidth(table_data.row_counts[tables.field]) == 4) try rr.readInt(u32) else try rr.readInt(u16);
+        const method_list = if (idxWidth(table_data.row_counts[tables.methoddef]) == 4) try rr.readInt(u32) else try rr.readInt(u16);
         const type_defs_count = table_data.row_counts[tables.typedef];
         const next_field_list = if (i + 1 < type_defs_count) blk: {
             var nr = rowReader(&table_data, tables.typedef, i + 2);
@@ -552,6 +640,7 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
             .base_name = null,
             .extends_coded = extends,
         };
+        method_starts[i] = method_list;
 
         // fields: rows [field_list, next_field_list)
         if (field_list == 0 or field_list > table_data.row_counts[tables.field]) continue;
@@ -568,8 +657,17 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
             fields[fi] = parseFieldSig(arena, sig_blob, &table_data, &heaps) catch .{ .name = fname, .flags = fflags, .elem_type = 0 };
             fields[fi].name = fname;
             fields[fi].flags = fflags;
+            fields[fi].row = field_list + fi;
         }
         type_defs[i].fields = fields;
+    }
+
+    if (n_typedefs > 0) {
+        // the sentinel: the first method row past the last type's range
+        var nr = rowReader(&table_data, tables.typedef, n_typedefs);
+        const s_width: usize = if ((heaps.heap_sizes & 1) != 0) 4 else 2;
+        try nr.skip(4 + 2 * s_width + @as(usize, codedSize(typedefOrRefMax(table_data.row_counts), 2)) + @as(usize, idxWidth(table_data.row_counts[tables.field])));
+        method_starts[n_typedefs] = if (idxWidth(table_data.row_counts[tables.methoddef]) == 4) try nr.readInt(u32) else try nr.readInt(u16);
     }
 
     // resolve base names (TypeDef rows may reference other TypeDefs)
@@ -596,7 +694,101 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
         }
     }
 
-    return .{ .name = name, .type_defs = type_defs };
+    // custom-attribute marks: [SerializeField] / [NonSerialized] /
+    // [HideInInspector] per field row, read from the CustomAttribute table
+    const n_fields = table_data.row_counts[tables.field];
+    const serialized_rows = try arena.alloc(bool, n_fields);
+    const nonserialized_rows = try arena.alloc(bool, n_fields);
+    @memset(serialized_rows, false);
+    @memset(nonserialized_rows, false);
+    if (n_typedefs > 0 and table_data.row_counts[tables.customattr] > 0) {
+        var ci: u32 = 0;
+        while (ci < table_data.row_counts[tables.customattr]) : (ci += 1) {
+            var cr = rowReader(&table_data, tables.customattr, ci + 1);
+            const parent = try readCoded(&cr, 5, &hasCustomAttrTagTables(), &heaps);
+            if ((parent & 0x1f) != 1) continue; // not a Field parent
+            const frow = parent >> 5;
+            if (frow == 0 or frow > n_fields) continue;
+            const typ = try readCoded(&cr, 3, &.{ tables.methoddef, tables.memberref }, &heaps);
+            const attr = try resolveAttributeName(arena, typ, &table_data, &heaps, method_starts, n_typedefs);
+            if (attr) |a| {
+                if (std.mem.eql(u8, a, "UnityEngine.SerializeFieldAttribute") or std.mem.eql(u8, a, "UnityEngine.SerializeField")) {
+                    serialized_rows[frow - 1] = true;
+                } else if (std.mem.eql(u8, a, "System.NonSerializedAttribute") or std.mem.eql(u8, a, "UnityEngine.HideInInspector")) {
+                    nonserialized_rows[frow - 1] = true;
+                }
+            }
+        }
+    }
+    return .{ .name = name, .type_defs = type_defs, .field_serialized = serialized_rows, .field_nonserialized = nonserialized_rows };
+}
+
+/// The tables tagged by the HasCustomAttribute coded index (5 bits), for
+/// sizing. The 22-entry list follows ECMA-335 II.24.2.6.
+fn hasCustomAttrTagTables() [22]u32 {
+    return .{ 0x06, 0x04, 0x01, 0x02, 0x08, 0x09, 0x0a, 0x00, 0x0e, 0x17, 0x14, 0x11, 0x1a, 0x1b, 0x20, 0x23, 0x26, 0x27, 0x28, 0x2a, 0x2c, 0x2b };
+}
+
+/// The tables tagged by the MemberRefParent coded index (3 bits).
+fn memberRefParentTagTables() [5]u32 {
+    return .{ tables.typedef, tables.typeref, 0x1a, tables.methoddef, tables.typespec };
+}
+
+/// Resolves a CustomAttributeType coded value to the attribute class's full
+/// name: MethodDef (the .ctor lives in this assembly) or MemberRef (the
+/// .ctor is imported, its class is a TypeRef/TypeDef).
+fn resolveAttributeName(
+    arena: std.mem.Allocator,
+    typ: u32,
+    td: *const TableData,
+    heaps: *const Heaps,
+    method_starts: []const u32,
+    n_typedefs: u32,
+) Error!?[]const u8 {
+    const tag = typ & 0x7;
+    const row = typ >> 3;
+    switch (tag) {
+        2 => { // MethodDef: find the containing TypeDef via method ranges
+            if (row == 0 or row > td.row_counts[tables.methoddef]) return null;
+            var lo: usize = 0;
+            var hi: usize = n_typedefs;
+            while (lo < hi) {
+                const mid = (lo + hi) / 2;
+                if (method_starts[mid] <= row) lo = mid + 1 else hi = mid;
+            }
+            if (lo == 0) return null;
+            const tdi = lo - 1;
+            var r = rowReader(td, tables.typedef, @as(u32, @intCast(tdi)) + 1);
+            try r.skip(4); // flags
+            const tname = try readString(&r, heaps);
+            const tns = try readString(&r, heaps);
+            return if (tns.len != 0) try std.fmt.allocPrint(arena, "{s}.{s}", .{ tns, tname }) else try arena.dupe(u8, tname);
+        },
+        3 => { // MemberRef: its Class names the attribute type
+            if (row == 0 or row > td.row_counts[tables.memberref]) return null;
+            var mr = rowReader(td, tables.memberref, row);
+            const cls = try readCoded(&mr, 3, &memberRefParentTagTables(), heaps);
+            const ct = cls & 0x7;
+            const crow = cls >> 3;
+            if (ct == 0) { // TypeDef
+                if (crow == 0 or crow > td.row_counts[tables.typedef]) return null;
+                var r = rowReader(td, tables.typedef, crow);
+                try r.skip(4);
+                const tname = try readString(&r, heaps);
+                const tns = try readString(&r, heaps);
+                return if (tns.len != 0) try std.fmt.allocPrint(arena, "{s}.{s}", .{ tns, tname }) else try arena.dupe(u8, tname);
+            } else if (ct == 1) { // TypeRef
+                if (crow == 0 or crow > td.row_counts[tables.typeref]) return null;
+                var r = rowReader(td, tables.typeref, crow);
+                try r.skip(codedSize(resolutionScopeMax(td.row_counts), 2));
+                const tname = try readString(&r, heaps);
+                const tns = try readString(&r, heaps);
+                return if (tns.len != 0) try std.fmt.allocPrint(arena, "{s}.{s}", .{ tns, tname }) else try arena.dupe(u8, tname);
+            }
+            return null;
+        },
+        else => return null,
+    }
 }
 
 /// Whether a type derives (transitively) from `UnityEngine.MonoBehaviour`.
@@ -739,11 +931,94 @@ test "parseTableStream sizes rows and offsets" {
     try std.testing.expectEqual(rows_start + 12 + 10 + 36, td.offsets[tables.field]);
 }
 
+/// Row-count profile like Raft's Assembly-CSharp (MethodDef and Field over
+/// 2^14 rows, so every coded index that can tag them is 4 bytes wide).
+fn raftLikeCounts() [64]u32 {
+    var counts: [64]u32 = [_]u32{0} ** 64;
+    counts[0x00] = 1; // Module
+    counts[0x01] = 666; // TypeRef
+    counts[0x02] = 3033; // TypeDef
+    counts[0x04] = 16920; // Field
+    counts[tables.methoddef] = 19512;
+    counts[0x08] = 14625; // Param
+    counts[0x09] = 714; // InterfaceImpl
+    counts[tables.memberref] = 5693;
+    counts[0x0b] = 2643; // Constant
+    counts[tables.customattr] = 7678;
+    return counts;
+}
+
+test "tableRowSize: Param rows have three columns, not four" {
+    // Regression: a phantom MethodDef index made Param rows 10 bytes; the
+    // real width is 8 (flags + sequence + name). 14625 x 2 over-charged
+    // bytes silently shifted every later table (CustomAttribute ended up
+    // 0x7242 bytes late, so its rows read as garbage).
+    const counts = raftLikeCounts();
+    var heaps: Heaps = .{ .heap_sizes = 5 };
+    try std.testing.expectEqual(@as(u32, 8), tableRowSize(0x08, counts, &heaps));
+    try std.testing.expectEqual(@as(u32, 18), tableRowSize(tables.methoddef, counts, &heaps));
+    // CustomAttribute rows must land byte-exact: hasCustomAttr 5-bit coded
+    // (4) + type 3-bit coded (4) + blob index (4).
+    try std.testing.expectEqual(@as(u32, 12), tableRowSize(tables.customattr, counts, &heaps));
+    // Cumulative spans through Constant are content-verified against
+    // Raft's Assembly-CSharp: rows begin 0x90 into the #~ stream and the
+    // CustomAttribute table starts at stream offset 0xc270c, so the span
+    // sum before it is 0xc270c - 0x90.
+    try std.testing.expectEqual(@as(u32, 0xc267c), cumulativeSpanBefore(tables.customattr, counts, &heaps));
+}
+
+test "tableRowSize: CustomAttributeType tag needs 3 bits (tags 2/3/4)" {
+    // With max(methoddef, memberref) between 2^13 and 2^14 rows the type
+    // column is 4 bytes wide: sizing it as a 2-bit coded index (threshold
+    // 2^14) would under-size the row by 2 bytes.
+    var counts: [64]u32 = [_]u32{0} ** 64;
+    counts[0x00] = 1;
+    counts[0x02] = 1000;
+    counts[0x04] = 1000;
+    counts[tables.methoddef] = 10000;
+    counts[0x08] = 1000;
+    counts[tables.customattr] = 500;
+    var heaps: Heaps = .{ .heap_sizes = 5 };
+    // hasCustomAttr (5-bit, threshold 2^11) -> 4; type (3-bit, threshold
+    // 2^13 -> 10000 >= 8192) -> 4; blob -> 4.
+    try std.testing.expectEqual(@as(u32, 12), tableRowSize(tables.customattr, counts, &heaps));
+}
+
+test "readCoded sizes coded indices from row counts, not byte widths" {
+    // The old code compared table_sizes (2 or 4) against the coded-index
+    // threshold, so a tagged table with 16384..65535 rows was misread as a
+    // 2-byte index even though the column is 4 bytes wide.
+    var heaps: Heaps = .{ .heap_sizes = 5 };
+    var buf: [8]u8 = [_]u8{ 0x21, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd };
+    // methoddef = 19512 rows >= 2^(16-5): the HasCustomAttribute parent
+    // column is 4 bytes, so a full u32 must be consumed.
+    heaps.table_counts[tables.methoddef] = 19512;
+    var r = streams.Reader.init(&buf);
+    try std.testing.expectEqual(@as(u32, 0x21), try readCoded(&r, 5, &.{tables.methoddef}, &heaps));
+    // Small table (< 2^(16-5) rows): the same value is a 2-byte index.
+    heaps.table_counts[tables.methoddef] = 100;
+    r = streams.Reader.init(&buf);
+    try std.testing.expectEqual(@as(u32, 0x21), try readCoded(&r, 5, &.{tables.methoddef}, &heaps));
+}
+
+/// Sums the byte spans of every table strictly before `target` (what
+/// parseTableStream adds up to place the target table's first row, not
+/// counting the #~ header that precedes the first table).
+fn cumulativeSpanBefore(target: u32, counts: [64]u32, heaps: *const Heaps) u32 {
+    var off: u32 = 0;
+    var t: u32 = 0;
+    while (t < target) : (t += 1) {
+        if (counts[t] == 0) continue;
+        off += tableRowSize(t, counts, heaps) * counts[t];
+    }
+    return off;
+}
+
 /// The serialized-visible fields of a class, base classes first: Unity
-/// serializes base fields before derived ones, and only public instance
-/// fields (plus [SerializeField] private, not detected here) that are not
-/// static or const.
-pub fn collectFields(arena: std.mem.Allocator, td: TypeDef, type_defs: []const TypeDef) ![]const Field {
+/// serializes base fields before derived ones, and only instance fields
+/// that are public (unless [NonSerialized]) or carry [SerializeField],
+/// never static or const.
+pub fn collectFields(arena: std.mem.Allocator, td: TypeDef, type_defs: []const TypeDef, serialized_rows: []const bool, nonserialized_rows: []const bool) ![]const Field {
     // walk the same-assembly base chain into a stack
     var chain: [64]TypeDef = undefined;
     var n: usize = 0;
@@ -768,8 +1043,14 @@ pub fn collectFields(arena: std.mem.Allocator, td: TypeDef, type_defs: []const T
     while (i > 0) {
         i -= 1;
         for (chain[i].fields) |f| {
-            if (!f.isPublic() or f.isStatic() or f.isLiteral()) continue;
-            try out.append(arena, f);
+            if (f.isStatic() or f.isLiteral()) continue;
+            const serialized = f.row != 0 and f.row <= serialized_rows.len and serialized_rows[f.row - 1];
+            const nonserialized = f.row != 0 and f.row <= nonserialized_rows.len and nonserialized_rows[f.row - 1];
+            if (f.isPublic() and !nonserialized) {
+                try out.append(arena, f);
+            } else if (!f.isPublic() and serialized) {
+                try out.append(arena, f);
+            }
         }
     }
     return out.toOwnedSlice(arena);

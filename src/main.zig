@@ -398,7 +398,7 @@ fn parseInjectedTrees(arena: std.mem.Allocator, path: []const u8, stdout: *Io.Wr
         try stdout.print("unityz: cannot read trees file: {s}\n", .{@errorName(err)});
         return null;
     };
-    const v = parseJsonLiteral(text) catch |err| {
+    const v = parseJsonLiteralAlloc(arena, text) catch |err| {
         try stdout.print("unityz: bad trees JSON: {s}\n", .{@errorName(err)});
         return null;
     };
@@ -7903,8 +7903,17 @@ const max_json_depth: u32 = 512;
 /// Minimal JSON literal parser: ints, floats, bools, null, quoted strings,
 /// and nested arrays/objects. Enough for `edit`.
 fn parseJsonLiteral(text: []const u8) !unityz.value.Value {
+    return parseJsonLiteralAlloc(std.heap.page_allocator, text);
+}
+
+/// Parse into a caller-owned allocator. The trees-file path uses the
+/// process arena: the page_allocator variant allocates each JSON element
+/// separately, and a generated multi-hundred-MB trees file (thousands of
+/// inlined MonoBehaviour layouts) would otherwise burn gigabytes of virtual
+/// address space on mmap granularity alone.
+fn parseJsonLiteralAlloc(allocator: std.mem.Allocator, text: []const u8) !unityz.value.Value {
     var pos: usize = 0;
-    const v = try parseJsonValue(text, &pos, 0);
+    const v = try parseJsonValueAlloc(text, &pos, 0, allocator);
     skipWs(text, &pos);
     if (pos != text.len) return error.TrailingInput;
     return v;
@@ -7925,6 +7934,10 @@ fn readHex4(text: []const u8, pos: *usize) !u16 {
 }
 
 fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value {
+    return parseJsonValueAlloc(text, pos, depth, std.heap.page_allocator);
+}
+
+fn parseJsonValueAlloc(text: []const u8, pos: *usize, depth: u32, allocator: std.mem.Allocator) !unityz.value.Value {
     if (depth > max_json_depth) return error.TooDeep;
     skipWs(text, pos);
     if (pos.* >= text.len) return error.UnexpectedEnd;
@@ -7932,7 +7945,7 @@ fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value
     if (c == '"') {
         pos.* += 1;
         var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(std.heap.page_allocator);
+        defer out.deinit(allocator);
         while (pos.* < text.len and text[pos.*] != '"') {
             if (text[pos.*] == '\\') {
                 pos.* += 1;
@@ -7943,14 +7956,14 @@ fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value
                 // `extract --json` export fed back through `edit --patch`
                 // has to decode them to round-trip byte-exactly.
                 switch (text[pos.*]) {
-                    '"' => try out.append(std.heap.page_allocator, '"'),
-                    '\\' => try out.append(std.heap.page_allocator, '\\'),
-                    '/' => try out.append(std.heap.page_allocator, '/'),
-                    'b' => try out.append(std.heap.page_allocator, 0x08),
-                    'f' => try out.append(std.heap.page_allocator, 0x0c),
-                    'n' => try out.append(std.heap.page_allocator, '\n'),
-                    'r' => try out.append(std.heap.page_allocator, '\r'),
-                    't' => try out.append(std.heap.page_allocator, '\t'),
+                    '"' => try out.append(allocator, '"'),
+                    '\\' => try out.append(allocator, '\\'),
+                    '/' => try out.append(allocator, '/'),
+                    'b' => try out.append(allocator, 0x08),
+                    'f' => try out.append(allocator, 0x0c),
+                    'n' => try out.append(allocator, '\n'),
+                    'r' => try out.append(allocator, '\r'),
+                    't' => try out.append(allocator, '\t'),
                     'u' => {
                         var cp: u21 = try readHex4(text, pos);
                         if (cp >= 0xd800 and cp <= 0xdbff) {
@@ -7965,30 +7978,30 @@ fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value
                         }
                         var buf: [4]u8 = undefined;
                         const n = std.unicode.utf8Encode(cp, &buf) catch return error.BadEscape;
-                        try out.appendSlice(std.heap.page_allocator, buf[0..n]);
+                        try out.appendSlice(allocator, buf[0..n]);
                     },
                     else => return error.BadEscape,
                 }
             } else {
-                try out.append(std.heap.page_allocator, text[pos.*]);
+                try out.append(allocator, text[pos.*]);
             }
             pos.* += 1;
         }
         if (pos.* >= text.len) return error.UnterminatedString;
         pos.* += 1;
-        return .{ .string = try out.toOwnedSlice(std.heap.page_allocator) };
+        return .{ .string = try out.toOwnedSlice(allocator) };
     }
     if (c == '[') {
         pos.* += 1;
         var list: std.ArrayList(unityz.value.Value) = .empty;
-        defer list.deinit(std.heap.page_allocator);
+        defer list.deinit(allocator);
         skipWs(text, pos);
         if (pos.* < text.len and text[pos.*] == ']') {
             pos.* += 1;
-            return .{ .array = try list.toOwnedSlice(std.heap.page_allocator) };
+            return .{ .array = try list.toOwnedSlice(allocator) };
         }
         while (true) {
-            try list.append(std.heap.page_allocator, try parseJsonValue(text, pos, depth + 1));
+            try list.append(allocator, try parseJsonValueAlloc(text, pos, depth + 1, allocator));
             skipWs(text, pos);
             if (pos.* >= text.len) return error.UnterminatedArray;
             if (text[pos.*] == ',') {
@@ -8001,26 +8014,26 @@ fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value
             }
             return error.BadArray;
         }
-        return .{ .array = try list.toOwnedSlice(std.heap.page_allocator) };
+        return .{ .array = try list.toOwnedSlice(allocator) };
     }
     if (c == '{') {
         pos.* += 1;
         var list: std.ArrayList(unityz.value.Field) = .empty;
-        defer list.deinit(std.heap.page_allocator);
+        defer list.deinit(allocator);
         skipWs(text, pos);
         if (pos.* < text.len and text[pos.*] == '}') {
             pos.* += 1;
-            return .{ .obj = try list.toOwnedSlice(std.heap.page_allocator) };
+            return .{ .obj = try list.toOwnedSlice(allocator) };
         }
         while (true) {
             skipWs(text, pos);
             if (pos.* >= text.len or text[pos.*] != '"') return error.BadObject;
-            const key = try parseJsonValue(text, pos, depth + 1);
+            const key = try parseJsonValueAlloc(text, pos, depth + 1, allocator);
             skipWs(text, pos);
             if (pos.* >= text.len or text[pos.*] != ':') return error.BadObject;
             pos.* += 1;
-            const val = try parseJsonValue(text, pos, depth + 1);
-            try list.append(std.heap.page_allocator, .{ .name = key.string, .value = val });
+            const val = try parseJsonValueAlloc(text, pos, depth + 1, allocator);
+            try list.append(allocator, .{ .name = key.string, .value = val });
             skipWs(text, pos);
             if (pos.* >= text.len) return error.UnterminatedObject;
             if (text[pos.*] == ',') {
@@ -8033,7 +8046,7 @@ fn parseJsonValue(text: []const u8, pos: *usize, depth: u32) !unityz.value.Value
             }
             return error.BadObject;
         }
-        return .{ .obj = try list.toOwnedSlice(std.heap.page_allocator) };
+        return .{ .obj = try list.toOwnedSlice(allocator) };
     }
     // number or keyword
     const start = pos.*;

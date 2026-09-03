@@ -141,6 +141,15 @@ For 2021.x TerrainData, the derived tree in
 the editor tree minus the stripped base fields, plus a 36-byte
 runtime-only region the editor tree does not serialize.
 
+For Mono games the script trees can be generated from the game itself:
+`managed <dir> --trees out.json` reads every assembly under
+`<dir>/Managed` (pure Zig, no CLR) and emits the MonoBehaviour script
+trees plus the mono-script mapping. Field visibility follows Unity's
+serializer: public instance fields, plus private/protected ones marked
+`[SerializeField]`, base-class fields first; `[NonSerialized]` and
+`[HideInInspector]` public fields are skipped. Known layout limits fall
+back to 4-byte `int` placeholders so byte alignment is preserved.
+
 A missing or malformed trees file prints a diagnostic and continues
 without the trees; a typeless file without `--trees` reports how many
 objects were skipped and why.

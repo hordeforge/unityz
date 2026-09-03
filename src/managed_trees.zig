@@ -168,7 +168,7 @@ pub fn buildTypeMap(arena: std.mem.Allocator, assemblies: []const dotnet.Assembl
             if (isEnum(td)) {
                 info.is_enum = true;
             } else {
-                info.fields = try dotnet.collectFields(arena, td, assembly.type_defs);
+                info.fields = try dotnet.collectFields(arena, td, assembly.type_defs, assembly.field_serialized, assembly.field_nonserialized);
                 info.is_object_derived = isObjectDerived(arena, td, assembly.type_defs);
                 info.is_struct = (td.flags & 0x100) != 0; // ValueType
             }
