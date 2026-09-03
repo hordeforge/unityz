@@ -17,6 +17,9 @@ otherwise.
   bundle or WebFile: its format and Unity versions, platform, endianness,
   type-tree state, counts, and present class IDs. This is distinct from the
   outer UnityFS header's Unity string, which is commonly only `5.x.x`.
+  This machine-readable nested metadata is part of unityz 0.1.1 and later;
+  consumers that gate on it can reject an older executable through
+  `unityz --version` before opening an artifact.
 - `.resources` / `.resS` sidecar files, resolved automatically for
   streamed references.
 - Big-endian bundles (Unity 5.x through 2022.3) parse, reserialize
