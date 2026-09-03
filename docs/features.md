@@ -129,15 +129,15 @@ assemblies sharing a plain class name do not collide). MonoBehaviours
 resolve their script via `m_Script` against the mono-script table; other
 classes resolve by class name.
 
-unityz ships two generators for this shape. The preferred one is in-tree
-and game-specific: `unityz managed <data-dir> --trees <out.json>` builds
-the trees from the Mono build's own assemblies (its `Managed/` folder)
-and the MonoScript objects in its top-level serialized files, so each
-script class resolves to the fields that specific game's assemblies
-declare. For version-generic trees instead,
-`scripts/structsdump-to-trees.py` converts the public AssetRipper
-TypeTreeDumps `StructsDump/release/<version>.dump` into a trees file for
-that exact Unity version:
+unityz ships two generators and a merge tool for this shape. The
+preferred one is in-tree and game-specific: `unityz managed <data-dir>
+--trees <out.json>` builds the trees from the Mono build's own
+assemblies (its `Managed/` folder) and the MonoScript objects in its
+top-level serialized files, so each script class resolves to the fields
+that specific game's assemblies declare. For version-generic trees
+instead, `scripts/structsdump-to-trees.py` converts the public
+AssetRipper TypeTreeDumps `StructsDump/release/<version>.dump` into a
+trees file for that exact Unity version:
 
 ```bash
 curl -sL https://raw.githubusercontent.com/AssetRipper/TypeTreeDumps/main/StructsDump/release/2022.3.62f2.dump -o 2022.3.62f2.dump
@@ -146,9 +146,10 @@ uv run scripts/structsdump-to-trees.py 2022.3.62f2.dump -o trees-2022.3.62f2.jso
 ```
 
 For 2021.x TerrainData, the derived tree in
-`trees/TerrainData-2021.x.json` can be merged into a trees file. It is
-the editor tree minus the stripped base fields, plus a 36-byte
-runtime-only region the editor tree does not serialize.
+`trees/TerrainData-2021.x.json` supplies class 156 (the editor tree minus
+the stripped base fields, plus a 36-byte runtime-only region the editor
+tree does not serialize); add it to any trees file with
+`scripts/merge-trees.py`.
 
 For Mono games the script trees can be generated from the game itself:
 `managed <dir> --trees out.json` reads every assembly under
@@ -215,6 +216,13 @@ hash and optionally decodes matched objects: `--pixels` (per-channel
 pixel diffs for textures/sprites), `--audio` (streamed audio data),
 `--fields` (the exact changed field paths and values).
 
+Whole-file evidence: the real 7DTD bundle (Unity 2022.3.62f2, fully
+typeless) extracts to 8090 files with zero decode failures (260 PNGs,
+7130 JSONs, 7 OBJs, 6 audio files), and Raft (2021.3) data files
+round-trip 38,212/38,213 objects byte-exactly, the two exceptions using
+custom serialization. See the rewrite plan's completion notes for the
+full per-pass evidence.
+
 ## UnityPy parity notes
 
 UnityPy needs an external CLR (pythonnet/Mono.Cecil) to read managed
@@ -225,22 +233,3 @@ Animators, MonoScripts. UnityPy shells out to ffmpeg for audio
 conversion; unityz decodes in pure Zig. UnityPy only writes PNG; unityz
 adds TGA, BMP, and raw RGBA. UnityPy raises `NotImplementedError` on
 UnityArchive files; unityz detects the container.
-
-## Stats
-
-`stats` reports per-class sizes and duplicate-object detection, with
-`--json` for scripts. With `--trees <file.json>`, typeless Mono files also
-get a per-script breakdown: MonoBehaviours are decoded through the injected
-trees and counted by their resolved script class name, so
-`stats <game> --trees trees.json` answers "which scripts does this game
-actually instantiate" (verified on Raft: 74 script classes across
-resources.assets alone).
-
-## Verification summary
-
-The real 7DTD bundle (Unity 2022.3.62f2, fully typeless) extracts to
-8090 files with zero decode failures: 260 PNGs, 7130 JSONs, 7 OBJs, 6
-audio files, and every command handles typeless files. Raft (2021.3)
-data files round-trip 38,212/38,213 objects byte-exactly; the two
-exceptions use custom serialization. See the rewrite plan's completion
-notes for the full per-pass evidence.

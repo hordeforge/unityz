@@ -19,15 +19,16 @@ Nothing in flight.
 
 ## Done
 
-- Managed trees and modern mesh export (PRs #110-#111, #115): `managed
-  --trees` auto-builds MonoBehaviour type trees from a game's assemblies
-  (Raft, Stranded Deep, Green Hell), honoring `[SerializeField]` and
-  `[NonSerialized]` so private serialized fields land in the trees (Raft
-  level0 decode failures drop 814 -> 696); meshes export as glTF/GLB
-  alongside OBJ, skinned meshes carrying the rig (JOINTS_0/WEIGHTS_0, rest
-  pose round-trips to ~1e-7); `scripts/merge-trees.py` merges a version's
-  class trees with a game's managed script trees so typeless Mono games
-  export every built-in class (280 Raft meshes, 33 skinned).
+- Managed trees and modern mesh export (PRs #110-#111, #115-#116):
+  `managed --trees` auto-builds MonoBehaviour type trees from a game's
+  assemblies (Raft, Stranded Deep, Green Hell), honoring
+  `[SerializeField]` and `[NonSerialized]` so private serialized fields
+  land in the trees (Raft level0 decode failures drop 814 -> 696);
+  meshes export as glTF/GLB alongside OBJ, skinned meshes carrying the
+  rig (JOINTS_0/WEIGHTS_0, rest pose round-trips to ~1e-7);
+  `scripts/merge-trees.py` merges a version's class trees with a game's
+  managed script trees so typeless Mono games export every built-in
+  class (280 Raft meshes, 33 skinned).
 - Post-capstone batch (PRs #102-#104): `managed` reads a Mono build's
   assemblies and lists every MonoBehaviour's serialized field layout
   (no external CLR); `edit --patch` accepts `--trees`; extract writes
