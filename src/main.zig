@@ -4282,6 +4282,47 @@ fn dumpSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.
     try dumpObjects(&sf, stdout);
 }
 
+/// Writes one container entry for `info --json`. When the entry is a
+/// SerializedFile, include the metadata callers otherwise only get by first
+/// extracting the node and running `info` a second time. The UnityFS header's
+/// Unity string is commonly the placeholder `5.x.x`; the embedded
+/// SerializedFile version is the engine revision that owns the object layout.
+fn writeContainerEntryJson(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+    try stdout.writeAll("{\"path\":");
+    try writeJsonString(stdout, path);
+    try stdout.print(",\"size\":{d}", .{bytes.len});
+
+    if (unityz.container.sniff(bytes).container == .serialized) {
+        const sf = unityz.serialized.parse(arena, bytes) catch |err| {
+            try stdout.writeAll(",\"serialized_error\":");
+            try writeJsonString(stdout, @errorName(err));
+            try stdout.writeByte('}');
+            return;
+        };
+        try stdout.print(",\"serialized\":{{\"version\":{d},\"unity\":", .{sf.version});
+        try writeJsonString(stdout, sf.unity_version);
+        try stdout.print(",\"platform\":{d},\"endian\":\"{s}\",\"type_tree\":{s},\"types\":{d},\"objects\":{d},\"externals\":{d},\"class_ids\":[", .{
+            sf.target_platform,
+            if (sf.endian == .little) "little" else "big",
+            if (sf.enable_type_tree) "true" else "false",
+            sf.types.len,
+            sf.objects.len,
+            sf.externals.len,
+        });
+        var class_ids: std.AutoHashMapUnmanaged(i32, void) = .empty;
+        var first_class = true;
+        for (sf.objects) |object| {
+            const entry = try class_ids.getOrPut(arena, object.class_id);
+            if (entry.found_existing) continue;
+            if (!first_class) try stdout.writeByte(',');
+            first_class = false;
+            try stdout.print("{d}", .{object.class_id});
+        }
+        try stdout.writeAll("]}");
+    }
+    try stdout.writeByte('}');
+}
+
 fn printWebFile(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
@@ -4295,7 +4336,7 @@ fn printWebFile(path: []const u8, bytes: []const u8, dump: bool, objects: bool, 
         try stdout.print("{{\"type\":\"WebFile\",\"files\":{d},\"entries\":[", .{wf.entries.len});
         for (wf.entries, 0..) |e, i| {
             if (i != 0) try stdout.print(",", .{});
-            try stdout.print("{{\"path\":\"{s}\",\"size\":{d}}}", .{ e.path, e.data.len });
+            try writeContainerEntryJson(arena, e.path, e.data, stdout);
         }
         try stdout.print("]", .{});
         if (objects) {
@@ -4405,7 +4446,7 @@ fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, j
         try stdout.print("{{\"type\":\"UnityFS\",\"version\":{d},\"unity\":\"{s}\",\"nodes\":{d},\"blocks\":{d},\"nodes_list\":[", .{ b.version, b.unity_version, b.nodes.len, b.blocks.len });
         for (b.nodes, 0..) |n, i| {
             if (i != 0) try stdout.print(",", .{});
-            try stdout.print("{{\"path\":\"{s}\",\"size\":{d}}}", .{ n.path, n.data.len });
+            try writeContainerEntryJson(arena, n.path, n.data, stdout);
         }
         try stdout.print("]", .{});
         if (objects) {
@@ -9372,6 +9413,23 @@ fn typelessMonoFixture(a: std.mem.Allocator, payload: []const u8) ![]u8 {
     try out.writeBytes(meta.getWritten());
     try out.writeBytes(payload);
     return a.dupe(u8, out.getWritten());
+}
+
+test "container info JSON includes embedded SerializedFile metadata" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const sf_bytes = try typelessMonoFixture(a, try monoScriptPayload(a));
+    var json: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(a, &json);
+    try writeContainerEntryJson(a, "CAB-\"quoted", sf_bytes, &aw.writer);
+    const actual = aw.toArrayList().items;
+
+    try std.testing.expectEqualStrings(
+        "{\"path\":\"CAB-\\\"quoted\",\"size\":197,\"serialized\":{\"version\":22,\"unity\":\"2020.1.0f1\",\"platform\":3,\"endian\":\"little\",\"type_tree\":false,\"types\":1,\"objects\":1,\"externals\":0,\"class_ids\":[115]}}",
+        actual,
+    );
 }
 
 test "editSerializedPatches decodes a typeless file via injected trees" {
