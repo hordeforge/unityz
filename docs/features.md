@@ -159,6 +159,24 @@ serializer: public instance fields, plus private/protected ones marked
 `[HideInInspector]` public fields are skipped. Known layout limits fall
 back to 4-byte `int` placeholders so byte alignment is preserved.
 
+A typeless file holds built-in objects (Mesh, Texture2D, ...) as well as
+scripts, so full coverage needs both generators' output merged: the
+built-in class trees from the version dump plus the game's script trees.
+
+```bash
+uv run scripts/structsdump-to-trees.py 2021.3.45f2.dump -o class-trees.json
+./zig-out/bin/unityz managed Game/Game_Data --trees script-trees.json
+uv run scripts/merge-trees.py class-trees.json script-trees.json -o trees.json
+```
+
+`scripts/merge-trees.py` keeps the dump's class trees and `__class_ids__`
+and adds the managed file's `__script_trees__`/`__monoscripts__`; later
+files win shared keys, so the managed output goes second (its
+MonoBehaviour tree carries the alignment flags verified against the
+game's own data). Verified on Raft (Unity 2021.3.45f2): 280 of its
+resources.assets meshes decode, 33 of them skinned, and the skinned GLB
+export's rest pose round-trips to ~1e-7 on 100-bone characters.
+
 A missing or malformed trees file prints a diagnostic and continues
 without the trees; a typeless file without `--trees` reports how many
 objects were skipped and why.
