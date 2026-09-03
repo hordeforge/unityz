@@ -2990,6 +2990,113 @@ fn meshF32(
     return readF32(mesh.vertex_data, off + comp * 4, endian);
 }
 
+/// Reads one component of a vertex channel as an unsigned integer, for the
+/// blend-index channel (Unity stores bone indices as UInt8/UInt16/UInt32).
+/// Null when the channel is float or the byte range is out of bounds.
+fn meshU32(
+    mesh: *const unityz.classes.Mesh,
+    channel_index: usize,
+    vertex: usize,
+    comp: usize,
+    endian: std.builtin.Endian,
+) ?u32 {
+    const c = mesh.channel(channel_index) orelse return null;
+    if (comp >= c.dimension) return null;
+    const fs = unityz.classes.Mesh.formatSize(c.format) orelse return null;
+    const off = mesh.channelByteOffset(channel_index, vertex) orelse return null;
+    if (off + (comp + 1) * fs > mesh.vertex_data.len) return null;
+    const b = mesh.vertex_data[off + comp * fs ..];
+    return switch (c.format) {
+        6, 8, 10 => switch (fs) {
+            1 => b[0],
+            2 => std.mem.readInt(u16, b[0..2], endian),
+            else => std.mem.readInt(u32, b[0..4], endian),
+        },
+        // signed variants carry no legal bone index; report null
+        else => null,
+    };
+}
+
+/// Inverts a 4x4 matrix (row-major `m[r*4+c]`) by Gauss-Jordan on [M|I].
+/// Returns null when singular.
+fn mat4Inverse(m: [16]f32) ?[16]f32 {
+    var a: [16]f64 = undefined;
+    var inv: [16]f64 = undefined;
+    for (0..4) |r| {
+        for (0..4) |c| {
+            a[r * 4 + c] = m[r * 4 + c];
+            inv[r * 4 + c] = if (r == c) 1 else 0;
+        }
+    }
+    for (0..4) |col| {
+        // find the pivot row with the largest absolute value in this column
+        var pivot: usize = col;
+        var best = @abs(a[col * 4 + col]);
+        for (col + 1..4) |r| {
+            const v = @abs(a[r * 4 + col]);
+            if (v > best) {
+                best = v;
+                pivot = r;
+            }
+        }
+        if (best < 1e-12) return null;
+        if (pivot != col) {
+            for (0..4) |k| {
+                const t = a[col * 4 + k];
+                a[col * 4 + k] = a[pivot * 4 + k];
+                a[pivot * 4 + k] = t;
+                const u = inv[col * 4 + k];
+                inv[col * 4 + k] = inv[pivot * 4 + k];
+                inv[pivot * 4 + k] = u;
+            }
+        }
+        const d = a[col * 4 + col];
+        for (0..4) |k| {
+            a[col * 4 + k] /= d;
+            inv[col * 4 + k] /= d;
+        }
+        for (0..4) |r| {
+            if (r == col) continue;
+            const f = a[r * 4 + col];
+            if (f == 0) continue;
+            for (0..4) |k| {
+                a[r * 4 + k] -= f * a[col * 4 + k];
+                inv[r * 4 + k] -= f * inv[col * 4 + k];
+            }
+        }
+    }
+    var out: [16]f32 = undefined;
+    for (inv, 0..) |v, i| out[i] = @floatCast(v);
+    return out;
+}
+
+/// Reads one Unity Matrix4x4 (`e00`..`e33` float fields) from a value-tree
+/// object, row-major. Null when any component is missing or non-finite.
+fn bindPoseRowMajor(v: unityz.value.Value) ?[16]f32 {
+    var out: [16]f32 = undefined;
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        const r = i / 4;
+        const c = i % 4;
+        var nb: [8]u8 = undefined;
+        const key = std.fmt.bufPrint(&nb, "e{d}{d}", .{ r, c }) catch return null;
+        const fv = unityz.classes.fieldOf(v, key) orelse return null;
+        const val = fv.asFloat() orelse return null;
+        if (!std.math.isFinite(val)) return null;
+        out[i] = @floatCast(val);
+    }
+    return out;
+}
+
+/// Writes a row-major matrix as glTF's column-major 16-float sequence.
+fn writeMatColMajor(w: *unityz.streams.Writer, row_major: [16]f32) !void {
+    for (0..4) |c| {
+        for (0..4) |r| {
+            try w.writeFloat(f32, row_major[r * 4 + c]);
+        }
+    }
+}
+
 fn fieldStr(v: unityz.value.Value, name: []const u8) []const u8 {
     return unityz.classes.stringField(v, name) orelse "";
 }
@@ -3182,10 +3289,14 @@ fn roundHalfEven(x: f64) f64 {
 }
 
 /// GLB (glTF 2.0 binary) export of a Mesh: positions, normals, UVs, and
-/// triangle indices in one self-contained file. Unity is left-handed with
-/// bottom-left UVs; glTF is right-handed with top-left UVs, so X is
-/// mirrored, the winding reversed, and V flipped (matching the OBJ export's
-/// convention).
+/// triangle indices in one self-contained file, plus a skin (JOINTS_0 /
+/// WEIGHTS_0 / inverseBindMatrices) when the mesh carries bone data. Unity
+/// is left-handed with bottom-left UVs; glTF is right-handed with top-left
+/// UVs, so X is mirrored, the winding reversed, and V flipped (matching the
+/// OBJ export's convention). Skin semantics follow Unity's: m_BindPose rows
+/// are the inverse bone matrices, so each glTF joint node sits at the bone's
+/// bind world transform (bindPose^-1) and inverseBindMatrices hold the raw
+/// bind poses — the per-vertex rest pose then round-trips unchanged.
 fn writeMeshGlb(
     arena: std.mem.Allocator,
     sf: *const unityz.serialized.SerializedFile,
@@ -3207,11 +3318,60 @@ fn writeMeshGlb(
     const has_n = nrm != null and nrm.?.format == 0 and nrm.?.dimension >= 3;
     const has_t = uv != null and uv.?.format == 0 and uv.?.dimension >= 2;
 
+    // -------- skin detection --------
+    // Unity 2019+ keeps per-vertex skin data in vertex channels 12 (blend
+    // weights, float4) and 13 (blend indices, UInt32 x4) with the bone
+    // count in m_BindPose. Older builds carry m_BoneWeights instead (not
+    // supported here: report the mesh unskinned).
+    const bind_poses = blk: {
+        if (unityz.classes.fieldOf(v, "m_BindPose")) |bp| {
+            if (bp == .array) break :blk bp.array;
+        }
+        break :blk &.{};
+    };
+    const wch = mesh.channel(12);
+    const ich = mesh.channel(13);
+    var n_bones: usize = bind_poses.len;
+    var has_skin = n_bones > 0 and wch != null and wch.?.format == 0 and wch.?.dimension >= 4 and ich != null and ich.?.dimension >= 4;
+    if (has_skin) {
+        // every joint index must fit u16 (glTF JOINTS_0 has no u32 form)
+        outer: for (0..vcount) |vi| {
+            for (0..4) |k| {
+                const ji = meshU32(mesh, 13, vi, k, sf.endian) orelse {
+                    has_skin = false;
+                    break :outer;
+                };
+                if (ji >= 0x10000) {
+                    has_skin = false;
+                    break :outer;
+                }
+            }
+        }
+    }
+    // glTF needs a node matrix per joint (the bone's bind world transform =
+    // inverse bind pose); a singular bind pose means no valid skin.
+    var joint_matrices: [][16]f32 = &.{};
+    if (has_skin) {
+        var ok = true;
+        const mats = try arena.alloc([16]f32, n_bones);
+        for (bind_poses, 0..) |bpi, bi| {
+            const rm = bindPoseRowMajor(bpi) orelse {
+                ok = false;
+                break;
+            };
+            mats[bi] = mat4Inverse(rm) orelse {
+                ok = false;
+                break;
+            };
+        }
+        if (ok) joint_matrices = mats else has_skin = false;
+    }
+    if (!has_skin) n_bones = 0;
+
     // -------- BIN chunk: positions, normals, UVs, indices --------
     var bin: unityz.streams.Writer = .init(arena);
     var pos_min = [3]f32{ std.math.inf(f32), std.math.inf(f32), std.math.inf(f32) };
     var pos_max = [3]f32{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
-    const pos_off: u32 = 0;
     for (0..vcount) |i| {
         const x = meshF32(mesh, 0, i, 0, sf.endian) orelse return &.{};
         const y = meshF32(mesh, 0, i, 1, sf.endian) orelse return &.{};
@@ -3304,58 +3464,116 @@ fn writeMeshGlb(
     }
     const idx_count = (bin.getWritten().len - idx_off) / (if (use_u16) @as(usize, 2) else 4);
 
+    // -------- BIN: skin payloads --------
+    const wgt_off: u32 = @intCast(bin.getWritten().len);
+    if (has_skin) {
+        for (0..vcount) |vi| {
+            for (0..4) |k| {
+                try bin.writeFloat(f32, @as(f32, meshF32(mesh, 12, vi, k, sf.endian) orelse 0));
+            }
+        }
+    }
+    const jnt_off: u32 = @intCast(bin.getWritten().len);
+    if (has_skin) {
+        for (0..vcount) |vi| {
+            for (0..4) |k| {
+                try bin.writeInt(u16, @intCast(meshU32(mesh, 13, vi, k, sf.endian) orelse 0));
+            }
+        }
+    }
+    const bp_off: u32 = @intCast(bin.getWritten().len);
+    if (has_skin) {
+        for (bind_poses) |bpi| {
+            const rm = bindPoseRowMajor(bpi) orelse return &.{};
+            try writeMatColMajor(&bin, rm);
+        }
+    }
+
     // -------- JSON chunk --------
+    // Accessor / buffer-view ordinals: 0 = POSITION, then NORMAL, TEXCOORD,
+    // indices, then (when skinned) WEIGHTS, JOINTS, inverseBindMatrices.
+    const n_bools: usize = @as(usize, @intFromBool(has_n)) + @as(usize, @intFromBool(has_t));
+    const idx_acc: usize = 1 + n_bools; // indices accessor
+    const wgt_acc = idx_acc + 1;
+    const jnt_acc = idx_acc + 2;
+    const ib_acc = idx_acc + 3;
     const name = std.mem.trimEnd(u8, mesh.name, "\x00");
     var jsbuf: std.ArrayList(u8) = .empty;
     var jaw = std.Io.Writer.Allocating.fromArrayList(arena, &jsbuf);
     const js = &jaw.writer;
     try js.print("{{\"asset\":{{\"version\":\"2.0\",\"generator\":\"unityz\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0,\"name\":", .{});
     try writeJsonString(js, name);
-    try js.writeAll("}],\"meshes\":[{\"name\":");
+    if (has_skin) try js.writeAll(",\"skin\":0");
+    try js.writeAll("}");
+    if (has_skin) {
+        // joint nodes: each sits at its bone's bind world transform
+        // (row-major inverse bind pose, printed column-major for glTF)
+        for (joint_matrices, 0..) |jm, bi| {
+            try js.print(",{{\"name\":\"Bone{d}\",\"matrix\":[", .{bi});
+            for (0..4) |c| {
+                for (0..4) |r| {
+                    if (c != 0 or r != 0) try js.writeAll(",");
+                    try js.print("{d}", .{jm[r * 4 + c]});
+                }
+            }
+            try js.writeAll("]}");
+        }
+    }
+    try js.writeAll("],\"skins\":[");
+    if (has_skin) {
+        try js.print("{{\"inverseBindMatrices\":{d},\"skeleton\":1,\"joints\":[1", .{ib_acc});
+        var bi: usize = 2;
+        while (bi <= n_bones) : (bi += 1) try js.print(",{d}", .{bi});
+        try js.writeAll("]}");
+    }
+    try js.writeAll("],\"meshes\":[{\"name\":");
     try writeJsonString(js, name);
     try js.writeAll(",\"primitives\":[{\"attributes\":{\"POSITION\":0");
-    var accessor_index: usize = 1;
+    var acc_next: usize = 1;
     if (has_n) {
-        try js.print(",\"NORMAL\":{d}", .{accessor_index});
-        accessor_index += 1;
+        try js.print(",\"NORMAL\":{d}", .{acc_next});
+        acc_next += 1;
     }
     if (has_t) {
-        try js.print(",\"TEXCOORD_0\":{d}", .{accessor_index});
-        accessor_index += 1;
+        try js.print(",\"TEXCOORD_0\":{d}", .{acc_next});
+        acc_next += 1;
     }
-    try js.print("}},\"indices\":{d},\"mode\":4", .{accessor_index});
+    if (has_skin) {
+        try js.print(",\"JOINTS_0\":{d},\"WEIGHTS_0\":{d}", .{ jnt_acc, wgt_acc });
+    }
+    try js.print("}},\"indices\":{d},\"mode\":4", .{idx_acc});
     try js.writeAll("}]}],\"accessors\":[");
     // POSITION
     try js.print("{{\"bufferView\":0,\"componentType\":5126,\"count\":{d},\"type\":\"VEC3\",\"min\":[{d},{d},{d}],\"max\":[{d},{d},{d}]}}", .{ vcount, pos_min[0], pos_min[1], pos_min[2], pos_max[0], pos_max[1], pos_max[2] });
-    var view_index: usize = 1;
-    var view_offset: u32 = pos_off + @as(u32, @intCast(vcount * 12));
     if (has_n) {
-        try js.print(",{{\"bufferView\":{d},\"componentType\":5126,\"count\":{d},\"type\":\"VEC3\"}}", .{ view_index, vcount });
-        view_index += 1;
-        view_offset += @as(u32, @intCast(vcount * 12));
+        try js.print(",{{\"bufferView\":1,\"componentType\":5126,\"count\":{d},\"type\":\"VEC3\"}}", .{vcount});
     }
     if (has_t) {
-        try js.print(",{{\"bufferView\":{d},\"componentType\":5126,\"count\":{d},\"type\":\"VEC2\"}}", .{ view_index, vcount });
-        view_index += 1;
-        view_offset += @as(u32, @intCast(vcount * 8));
+        const bv = 1 + @as(usize, @intFromBool(has_n));
+        try js.print(",{{\"bufferView\":{d},\"componentType\":5126,\"count\":{d},\"type\":\"VEC2\"}}", .{ bv, vcount });
     }
     const idx_component: i32 = if (use_u16) 5123 else 5125;
-    try js.print(",{{\"bufferView\":{d},\"componentType\":{d},\"count\":{d},\"type\":\"SCALAR\"}}", .{ view_index, idx_component, idx_count });
+    try js.print(",{{\"bufferView\":{d},\"componentType\":{d},\"count\":{d},\"type\":\"SCALAR\"}}", .{ idx_acc, idx_component, idx_count });
+    if (has_skin) {
+        try js.print(",{{\"bufferView\":{d},\"componentType\":5126,\"count\":{d},\"type\":\"VEC4\"}}", .{ wgt_acc, vcount });
+        try js.print(",{{\"bufferView\":{d},\"componentType\":5123,\"count\":{d},\"type\":\"VEC4\"}}", .{ jnt_acc, vcount });
+        try js.print(",{{\"bufferView\":{d},\"componentType\":5126,\"count\":{d},\"type\":\"MAT4\"}}", .{ ib_acc, n_bones });
+    }
     try js.writeAll("],\"bufferViews\":[");
     try js.print("{{\"buffer\":0,\"byteOffset\":0,\"byteLength\":{d},\"target\":34962}}", .{nrm_off});
-    view_index = 1;
-    var bv_off: u32 = nrm_off;
     if (has_n) {
-        try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34962}}", .{ bv_off, uv_off - nrm_off });
-        view_index += 1;
-        bv_off = uv_off;
+        try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34962}}", .{ nrm_off, uv_off - nrm_off });
     }
     if (has_t) {
-        try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34962}}", .{ bv_off, idx_off - uv_off });
-        view_index += 1;
-        bv_off = idx_off;
+        try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34962}}", .{ uv_off, idx_off - uv_off });
     }
-    try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34963}}", .{ bv_off, bin.getWritten().len - bv_off });
+    const idx_view_len = (if (has_skin) wgt_off else @as(u32, @intCast(bin.getWritten().len))) - idx_off;
+    try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34963}}", .{ idx_off, idx_view_len });
+    if (has_skin) {
+        try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34962}}", .{ wgt_off, jnt_off - wgt_off });
+        try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34962}}", .{ jnt_off, bp_off - jnt_off });
+        try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d}}}", .{ bp_off, bin.getWritten().len - bp_off });
+    }
     try js.print("],\"buffers\":[{{\"byteLength\":{d}}}]}}", .{bin.getWritten().len});
     const json_bytes = jaw.toArrayList().items;
 
@@ -8419,7 +8637,8 @@ fn buildManagedTrees(arena: std.mem.Allocator, path: []const u8, files: *const M
 
 /// The display name of a managed field's type: the resolved class name for
 /// class/valuetype/array signatures, the CLR primitive name otherwise.
-fn managedFieldType(f: unityz.dotnet.Field) []const u8 {    if (f.type_name.len != 0) return f.type_name;
+fn managedFieldType(f: unityz.dotnet.Field) []const u8 {
+    if (f.type_name.len != 0) return f.type_name;
     return unityz.dotnet.elementTypeName(f.elem_type);
 }
 
