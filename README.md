@@ -40,7 +40,7 @@ shellcheck scripts/*.sh
 - **Look inside any Unity asset** - open a bundle, `.assets` file, or
   sidecar and see its containers, objects, and type trees (`info`, `show`).
 - **Extract everything** - textures and sprites as images, meshes as OBJ
-  and glTF/GLB,
+  and glTF/GLB (skinned rigs included),
   audio as playable files (OGG/FSB/WAV), video cutscenes as MP4, terrain
   heightmaps as PGM, readable ShaderLab for shaders, fonts, and structured
   JSON for most other classes (animations, animator controllers, mixers,
@@ -131,7 +131,8 @@ UnityArchive container is detected but not yet parsed.
 - `src/container.zig` - file type detection by magic/header
 - `src/webfile.zig` - WebFile container parser and rebuilder
 - `src/bundle.zig` - UnityFS bundle parser (with LZ4/LZMA blocks)
-- `src/lz4.zig` - LZ4 block decompression
+- `src/lz4.zig` - LZ4 block decompression and compression (bundle
+  rebuilds re-encode compressed blocks)
 - `src/serialized.zig` - SerializedFile parser (`.assets` and friends)
 - `src/serialized_writer.zig` - SerializedFile rebuild writer
 - `src/typetree.zig` - TypeTree parsing + Unity common-string table
@@ -141,6 +142,8 @@ UnityArchive container is detected but not yet parsed.
 - `src/classes.zig` - typed views for the common classes
 - `src/dotnet.zig` - .NET assembly metadata reader (the `managed`
   command)
+- `src/managed_trees.zig` - MonoBehaviour script trees built from
+  assemblies (`managed --trees`)
 - `src/fsb5.zig` - FSB5 audio bank metadata parser
 - `src/audio.zig` - FSB5 sample decoding to 16-bit PCM, no external tools
 - `src/vorbis.zig` - FSB5 Vorbis to playable Ogg reconstruction, no

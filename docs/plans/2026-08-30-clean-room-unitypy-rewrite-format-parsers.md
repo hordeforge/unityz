@@ -2509,3 +2509,35 @@ splitting the kit-template and README paragraphs.
 the per-class capability wall of text and the "Status" section moved to
 docs/features.md, ROADMAP.md was brought current, and docs/README.md now
 points at features.md.
+
+2026-09-03 (mesh/trees pass, PRs #111-#116): `stats` gained
+`--trees` (per-script MonoBehaviour breakdown), and Mesh extraction
+added self-contained glTF/GLB output alongside OBJ (#111). `managed
+--trees` now honors `[SerializeField]` and `[NonSerialized]` so private
+serialized fields land in the auto-built trees.
+
+The attribute scan surfaced four metadata-reader fixes in src/dotnet.zig:
+Param rows are 8 bytes, not 10 (a phantom MethodDef index column shifted
+every later table's offset); table row sizing now covers every ECMA-335
+table (it returned 0 for ~20 real ones) and the assemblyref constant
+points at 0x23, not 0x20; coded-index widths come from the tagged
+tables' row counts, not their index byte widths; and CustomAttributeType
+decodes with 3 tag bits (its tags are 2/3/4). Verified byte-exact
+against dnfile on Raft's Assembly-CSharp (5349 field attributes, 3634
+[SerializeField] marks); level0 class-114 decode failures drop 814 to
+696. The --trees JSON loader also parses through the caller's arena: the
+page allocator burned gigabytes of virtual address space on generated
+multi-hundred-MB trees files.
+
+Skinned meshes export the rig (JOINTS_0/WEIGHTS_0 plus a glTF skin whose
+joints sit at their bind world transforms, rest pose round-tripping to
+~1e-7), verified on a typed 2022.3 creature and, via class trees, on
+Raft's 100-bone characters (#115).
+
+scripts/merge-trees.py joins a version's built-in class trees with a
+game's managed script trees, so typeless Mono games export every
+built-in class: Raft's resources.assets yields 280 meshes, 33 of them
+skinned (#116). A parallel session's review fixes (#112-#114) and the
+zig fmt normalization that healed CI's formatting check landed in the
+same stretch. README, features.md, and ROADMAP updated; the docs index
+regenerated.
