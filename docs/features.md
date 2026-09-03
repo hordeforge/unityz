@@ -75,8 +75,10 @@ automatically.
   to its GameObject name; the per-Mesh export keeps generic Bone0..N
   joints), so a rigged character drops straight into a DCC tool with its
   skeleton intact.
-- TextAssets (49), fonts (128, embedded TTF/OTF + metrics sidecar),
-  ComputeShaders (72, DXBC/SPIR-V/GLSL per platform + descriptor JSON)
+- TextAssets (49), fonts (128, embedded TTF/OTF + metrics sidecar,
+  including 5.x-era fonts whose layout predates m_ShouldRoundAdvanceValue;
+  verified on The Forest), ComputeShaders (72, DXBC/SPIR-V/GLSL per
+  platform + descriptor JSON)
 - AudioClips (83): OGG/FSB banks, WAV-wrapped PCM, MP3, plus an FSB5
   metadata sidecar (sample rate, channels, loop points, format); FSB5
   banks in pure-Zig codecs (PCM8/16/24/32/FLOAT, GCADPCM, IMA ADPCM) also

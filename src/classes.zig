@@ -968,7 +968,15 @@ pub const Font = struct {
         self.fallback_fonts = try readPPtrArray(&r);
         self.font_rendering_mode = try r.readInt(i32);
         self.use_legacy_bounds_calculation = (try r.readByte()) != 0;
-        self.should_round_advance_value = (try r.readByte()) != 0;
+        // m_ShouldRoundAdvanceValue joined the layout after Unity 2017.1
+        // (absent in 5.x and 2017 dumps, present from 2018.4 on); 5.x-era
+        // fonts end after m_UseLegacyBoundsCalculation, so reading it
+        // unconditionally runs one byte past the object.
+        var parts = std.mem.splitScalar(u8, unity_version, '.');
+        const vmaj = std.fmt.parseInt(u32, parts.next() orelse "2018", 10) catch 2018;
+        if (vmaj >= 2018) {
+            self.should_round_advance_value = (try r.readByte()) != 0;
+        }
         return self;
     }
 };
@@ -2538,6 +2546,56 @@ test "font fromRaw parses the serialized 5.5+ layout" {
     try std.testing.expectEqual(@as(i64, 583), f.fallback_fonts[0].path_id);
     try std.testing.expect(!f.use_legacy_bounds_calculation);
     try std.testing.expect(f.should_round_advance_value);
+}
+
+test "font fromRaw: 5.x fonts end before m_ShouldRoundAdvanceValue" {
+    // m_ShouldRoundAdvanceValue joined the layout after 2017.1 (absent in
+    // 5.x/2017 dumps, present from 2018.4). A 5.6 font's serialized body
+    // ends after the m_UseLegacyBoundsCalculation bool, so parsing it with
+    // the modern layout reads one byte past the object.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var tmp: [8]u8 = undefined;
+    const putInt = struct {
+        fn put(list: *std.ArrayList(u8), b: []u8, comptime T: type, v: T) !void {
+            std.mem.writeInt(T, b[0..@sizeOf(T)], v, .little);
+            try list.appendSlice(std.testing.allocator, b[0..@sizeOf(T)]);
+        }
+    }.put;
+    // Same body as the modern-layout test, minus the trailing
+    // m_ShouldRoundAdvanceValue byte.
+    try putInt(&buf, &tmp, i32, 8);
+    try buf.appendSlice(std.testing.allocator, "TestFont");
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, 19.5)));
+    try putInt(&buf, &tmp, i32, 0);
+    try putInt(&buf, &tmp, i64, 126);
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, 16)));
+    try putInt(&buf, &tmp, i32, 0);
+    try putInt(&buf, &tmp, i64, 234);
+    try putInt(&buf, &tmp, i32, 0);
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, 1)));
+    try putInt(&buf, &tmp, i32, 0);
+    try putInt(&buf, &tmp, i32, 1);
+    try putInt(&buf, &tmp, i32, -2);
+    try putInt(&buf, &tmp, i32, 0); // m_CharacterRects
+    try putInt(&buf, &tmp, i32, 0); // m_KerningValues
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, 0.1))); // m_PixelScale
+    try putInt(&buf, &tmp, i32, 4); // m_FontData
+    try buf.appendSlice(std.testing.allocator, "OTTO");
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, 11.79))); // m_Ascent
+    try putInt(&buf, &tmp, u32, @bitCast(@as(f32, -2.57))); // m_Descent
+    try putInt(&buf, &tmp, u32, 0); // m_DefaultStyle
+    try putInt(&buf, &tmp, i32, 0); // m_FontNames
+    try putInt(&buf, &tmp, i32, 0); // m_FallbackFonts
+    try putInt(&buf, &tmp, i32, 0); // m_FontRenderingMode
+    try buf.appendSlice(std.testing.allocator, &.{0}); // m_UseLegacyBoundsCalculation only
+
+    const f = try Font.fromRaw(buf.items, .little, "5.6.5p4");
+    try std.testing.expectEqualStrings("TestFont", f.name);
+    try std.testing.expectEqual(@as(i64, 126), f.default_material.?.path_id);
+    try std.testing.expect(!f.should_round_advance_value);
+    // the same body parsed as a modern font needs the extra byte
+    try std.testing.expectError(error.OutOfBounds, Font.fromRaw(buf.items, .little, "2022.3.62f2"));
 }
 
 test "font fromRaw version gate and truncation" {
