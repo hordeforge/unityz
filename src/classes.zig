@@ -2544,8 +2544,10 @@ test "font fromRaw version gate and truncation" {
     // pre-5.5 layouts are rejected, unknown version strings pass
     try std.testing.expectError(error.UnsupportedVersion, Font.fromRaw(&.{}, .little, "5.4.6f1"));
     try std.testing.expectError(error.UnsupportedVersion, Font.fromRaw(&.{}, .little, "4.7.2f1"));
-    _ = Font.fromRaw(&.{}, .little, "5.5.0f1") catch {}; // empty body: reads fail on the first field, but the gate passes
-    _ = Font.fromRaw(&.{}, .little, "2022.3.62f2") catch {};
+    // empty body: the gate passes and the first field read fails out of
+    // bounds - anything else would mean the version gate misfired
+    try std.testing.expectError(error.OutOfBounds, Font.fromRaw(&.{}, .little, "5.5.0f1"));
+    try std.testing.expectError(error.OutOfBounds, Font.fromRaw(&.{}, .little, "2022.3.62f2"));
     // a body cut short mid-object reads out of bounds
     try std.testing.expectError(error.OutOfBounds, Font.fromRaw("\x04\x00\x00\x00TEST", .little, "2022.3.62f2"));
     // a negative character-rect count (corrupt data) is malformed
@@ -2705,8 +2707,10 @@ test "computeShader fromRaw parses the serialized 2017+ layout" {
 test "computeShader fromRaw version gate" {
     try std.testing.expectError(error.UnsupportedVersion, ComputeShader.fromRaw(&.{}, .little, "5.6.7f1"));
     try std.testing.expectError(error.UnsupportedVersion, ComputeShader.fromRaw(&.{}, .little, "2016.4.40f1"));
-    _ = ComputeShader.fromRaw(&.{}, .little, "2017.1.0f1") catch {};
-    _ = ComputeShader.fromRaw(&.{}, .little, "2022.3.62f2") catch {};
+    // empty body: the gate passes and the first field read fails out of
+    // bounds - anything else would mean the version gate misfired
+    try std.testing.expectError(error.OutOfBounds, ComputeShader.fromRaw(&.{}, .little, "2017.1.0f1"));
+    try std.testing.expectError(error.OutOfBounds, ComputeShader.fromRaw(&.{}, .little, "2022.3.62f2"));
     // a negative variant count is malformed
     try std.testing.expectError(error.Malformed, ComputeShader.fromRaw("\x01\x00\x00\x00A\x00\x00\x00\x00\xff\xff\xff\xff", .little, "2022.3.62f2"));
 }
