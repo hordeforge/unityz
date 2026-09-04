@@ -7848,19 +7848,23 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                     return;
                 };
             }
+            const matched = try arena.alloc(bool, entries.len);
+            @memset(matched, false);
             var replacements: std.ArrayList(unityz.bundle.NodeReplacement) = .empty;
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container == .serialized) {
                     // collect the patch entries this node contains
                     const node_sf = unityz.serialized.parse(arena, n.data) catch continue;
                     var node_entries: std.ArrayList(unityz.value.Field) = .empty;
-                    for (entries) |entry| {
+                    for (entries, 0..) |entry, ei| {
                         if (isRawNodeKey(entry.name)) continue;
                         const sel = parseSelector(entry.name) catch continue;
                         if (sel.node) |sn| {
                             if (!std.mem.eql(u8, n.path, sn)) continue;
                         }
-                        if (node_sf.findObject(sel.path_id) != null) try node_entries.append(arena, entry);
+                        if (node_sf.findObject(sel.path_id) == null) continue;
+                        try node_entries.append(arena, entry);
+                        matched[ei] = true;
                     }
                     if (node_entries.items.len == 0) continue;
                     const edited_node = try editSerializedPatches(arena, n.data, node_entries.items, basename(n.path), injected);
@@ -7885,6 +7889,7 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                 failure("unityz: no patch entries found in the bundle\n", .{});
                 return;
             }
+            if (try unmatchedPatchEntry(entries, matched)) return;
             rewritten = try unityz.bundle.rebuild(arena, &b, replacements.items);
         },
         .webfile => {
@@ -7919,18 +7924,22 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                     return;
                 };
             }
+            const matched = try arena.alloc(bool, entries.len);
+            @memset(matched, false);
             var replacements: std.ArrayList(unityz.webfile.EntryReplacement) = .empty;
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container == .serialized) {
                     const entry_sf = unityz.serialized.parse(arena, e.data) catch continue;
                     var entry_entries: std.ArrayList(unityz.value.Field) = .empty;
-                    for (entries) |entry| {
+                    for (entries, 0..) |entry, ei| {
                         if (isRawNodeKey(entry.name)) continue;
                         const sel = parseSelector(entry.name) catch continue;
                         if (sel.node) |sn| {
                             if (!std.mem.eql(u8, e.path, sn)) continue;
                         }
-                        if (entry_sf.findObject(sel.path_id) != null) try entry_entries.append(arena, entry);
+                        if (entry_sf.findObject(sel.path_id) == null) continue;
+                        try entry_entries.append(arena, entry);
+                        matched[ei] = true;
                     }
                     if (entry_entries.items.len == 0) continue;
                     const edited_entry = try editSerializedPatches(arena, e.data, entry_entries.items, basename(e.path), injected);
@@ -7953,6 +7962,7 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                 failure("unityz: no patch entries found in the webfile\n", .{});
                 return;
             }
+            if (try unmatchedPatchEntry(entries, matched)) return;
             rewritten = try unityz.webfile.rebuild(arena, &wf, replacements.items);
         },
         else => return error.UnknownFormat,
@@ -7960,6 +7970,19 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
 
     if (!try writeEditOutput(arena, path, out_path, rewritten, verify, stdout)) return;
     try stdout.print("{d} object(s) patched\n", .{edited_count});
+}
+
+/// A patch is atomic: an object entry that matched no node's object fails the
+/// whole patch before anything is written. Raw-node entries were checked
+/// against the node list up front.
+fn unmatchedPatchEntry(entries: []const unityz.value.Field, matched: []const bool) !bool {
+    var any = false;
+    for (entries, matched) |entry, m| {
+        if (m or isRawNodeKey(entry.name)) continue;
+        failure("unityz: bad patch entry '{s}': no such object; nothing written\n", .{entry.name});
+        any = true;
+    }
+    return any;
 }
 
 /// Verifies (when asked) and writes edit output to `out_path` or, without

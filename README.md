@@ -123,8 +123,9 @@ Without trees, a typeless file reports how many objects were skipped.
 `edit` sets fields by dotted-indexed path, byte-array fields take base64
 values, `--verify` round-trip-checks the result before writing, and
 `--trees` makes typeless files editable. `edit --patch <file>` applies a
-JSON patch atomically. Edits reserialize byte-exactly; rebuilt bundles
-keep their compression.
+JSON patch atomically. An entry whose object does not exist fails the
+whole patch and nothing is written. Edits reserialize byte-exactly;
+rebuilt bundles keep their compression.
 
 ## What it is
 
