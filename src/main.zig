@@ -77,6 +77,8 @@ const usage =
     \\                  and report pixel diffs; --audio to compare matched
     \\                  AudioClip streams;
     \\                  --fields for the exact changed field paths;
+    \\                  --trees <file.json> decodes typeless Mono
+    \\                  objects for --fields, as in extract;
     \\                  all three also run per matched file pair
     \\                  when both arguments are directories)
     \\  hash <path>      Print per-object content fingerprints
@@ -5640,7 +5642,7 @@ fn diag(json: bool, stdout: *Io.Writer, comptime fmt: []const u8, args: anytype)
 /// Compares two directories file-by-file by content hash, reporting
 /// unchanged/changed/new/deleted files and totals. UnityPy has no tree
 /// comparison.
-fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool, pixels: bool, audio: bool, fields: bool, class_filter: ?i32, stdout: *Io.Writer) !void {
+fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool, pixels: bool, audio: bool, fields: bool, class_filter: ?i32, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     const DirFile = struct { name: []const u8, hash: u64, size: u64 };
     var files_a: std.ArrayList(DirFile) = .empty;
     var files_b: std.ArrayList(DirFile) = .empty;
@@ -5750,7 +5752,7 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
                     }
                     if (fields and fa.hash != fb.hash) {
                         try diag_out.print("  fields in {s}:\n", .{fa.name});
-                        try fieldsPass(arena_state.allocator(), data_a, data_b, class_filter, diag_out);
+                        try fieldsPass(arena_state.allocator(), data_a, data_b, class_filter, fa.name, injected, diag_out);
                     }
                     if (json) try err_writer.flush();
                 }
@@ -6141,7 +6143,7 @@ const FieldDiff = struct {
 /// The `--fields` pass for one matched file pair: every object whose bytes
 /// changed gets its exact changed field paths printed, as the single-file
 /// diff does.
-fn fieldsPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, class_filter: ?i32, out: *Io.Writer) !void {
+fn fieldsPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, class_filter: ?i32, own_basename: []const u8, injected: ?*const InjectedTrees, out: *Io.Writer) !void {
     var a_list: std.ArrayList(Fp) = .empty;
     var b_list: std.ArrayList(Fp) = .empty;
     try collectFingerprints(arena, a_bytes, class_filter, null, &a_list);
@@ -6155,13 +6157,13 @@ fn fieldsPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8
     for (a_list.items) |fa| {
         const fb = b_by_key.get(.{ .path_id = fa.path_id, .node = fa.node }) orelse continue;
         if (fb.hash == fa.hash and fb.size == fa.size) continue;
-        try diffObjectFields(arena, a_bytes, b_bytes, fa, null, out);
+        try diffObjectFields(arena, a_bytes, b_bytes, fa, own_basename, injected, null, out);
     }
 }
 
-fn diffObjectFields(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, collect: ?*std.ArrayList(FieldDiff), stdout: *Io.Writer) !void {
-    const va = try findObjectValue(arena, a_bytes, fa);
-    const vb = try findObjectValue(arena, b_bytes, fa);
+fn diffObjectFields(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, own_basename: []const u8, injected: ?*const InjectedTrees, collect: ?*std.ArrayList(FieldDiff), stdout: *Io.Writer) !void {
+    const va = try findObjectValue(arena, a_bytes, fa, own_basename, injected);
+    const vb = try findObjectValue(arena, b_bytes, fa, own_basename, injected);
     if (va == null or vb == null) return;
     var path_buf: [256]u8 = undefined;
     var reported: usize = 0;
@@ -6277,7 +6279,7 @@ fn truncateLeaf(s: []const u8) []const u8 {
 
 /// Reads an object's value tree from a file (container-aware), or null
 /// when absent or unreadable.
-fn findObjectValue(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?unityz.value.Value {
+fn findObjectValue(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, own_basename: []const u8, injected: ?*const InjectedTrees) !?unityz.value.Value {
     var out: ?unityz.value.Value = null;
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
@@ -6287,7 +6289,7 @@ fn findObjectValue(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?unityz
                 if (fa.node) |sn| {
                     if (!std.mem.eql(u8, n.path, sn)) continue;
                 }
-                out = try findObjectValueInSerialized(arena, n.data, fa.path_id);
+                out = try findObjectValueInSerialized(arena, n.data, fa.path_id, basename(n.path), injected);
                 if (out != null) return out;
             }
         },
@@ -6298,20 +6300,20 @@ fn findObjectValue(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?unityz
                 if (fa.node) |sn| {
                     if (!std.mem.eql(u8, e.path, sn)) continue;
                 }
-                out = try findObjectValueInSerialized(arena, e.data, fa.path_id);
+                out = try findObjectValueInSerialized(arena, e.data, fa.path_id, basename(e.path), injected);
                 if (out != null) return out;
             }
         },
         .serialized => {
             if (fa.node != null) return null;
-            out = try findObjectValueInSerialized(arena, bytes, fa.path_id);
+            out = try findObjectValueInSerialized(arena, bytes, fa.path_id, own_basename, injected);
         },
         else => {},
     }
     return out;
 }
 
-fn findObjectValueInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64) !?unityz.value.Value {
+fn findObjectValueInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, own_basename: []const u8, injected: ?*const InjectedTrees) !?unityz.value.Value {
     const sf = unityz.serialized.parse(arena, bytes) catch return null;
     const o = for (sf.objects) |*oo| {
         if (oo.path_id == path_id) break oo;
@@ -6319,8 +6321,12 @@ fn findObjectValueInSerialized(arena: std.mem.Allocator, bytes: []const u8, path
     const data = sf.objectData(o) orelse return null;
     const ti = o.type_index orelse return null;
     if (ti >= sf.types.len) return null;
-    const tree = sf.types[ti].type_tree;
-    if (tree.roots.len == 0) return null;
+    var tree: *const unityz.typetree.TypeTree = &sf.types[ti].type_tree;
+    // Mono builds strip the trees; `--trees` supplies them, as in `show`.
+    if (tree.roots.len == 0) {
+        const inj = injected orelse return null;
+        tree = injectedTreeFor(arena, inj, &sf, own_basename, o.class_id, data) orelse return null;
+    }
     var r = unityz.streams.Reader.init(data);
     r.endian = sf.endian;
     return unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch null;
@@ -6530,6 +6536,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var json = false;
     var pixels = false;
     var audio = false;
+    var trees_path: ?[]const u8 = null;
     var fields = false;
     var class_filter: ?i32 = null;
     var i: usize = 1;
@@ -6542,6 +6549,9 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             audio = true;
         } else if (std.mem.eql(u8, rest[i], "--fields")) {
             fields = true;
+        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
+            trees_path = rest[i + 1];
+            i += 1;
         } else if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
                 return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
@@ -6558,14 +6568,14 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         return;
     };
     const stat_b = std.Io.Dir.cwd().statFile(io, rest[0], .{}) catch return failure("unityz: {s}: FileNotFound\n", .{rest[0]});
-    if (stat_a.kind == .directory or stat_b.kind == .directory) {
-        return diffDirectories(io, path, rest[0], json, pixels, audio, fields, class_filter, stdout);
-    }
-    const other_bytes = std.Io.Dir.cwd().readFileAlloc(io, rest[0], std.heap.page_allocator, .unlimited) catch |err| return failure("unityz: {s}: {s}\n", .{ rest[0], @errorName(err) });
-
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+    if (stat_a.kind == .directory or stat_b.kind == .directory) {
+        return diffDirectories(io, path, rest[0], json, pixels, audio, fields, class_filter, injected, stdout);
+    }
+    const other_bytes = std.Io.Dir.cwd().readFileAlloc(io, rest[0], std.heap.page_allocator, .unlimited) catch |err| return failure("unityz: {s}: {s}\n", .{ rest[0], @errorName(err) });
 
     const kind_a = unityz.container.sniff(bytes).container;
     const kind_b = unityz.container.sniff(other_bytes).container;
@@ -6620,7 +6630,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                     }
                     reported += 1;
                 }
-                if (fields) try diffObjectFields(arena, bytes, other_bytes, fa, if (json) &field_diffs else null, stdout);
+                if (fields) try diffObjectFields(arena, bytes, other_bytes, fa, basename(path), injected, if (json) &field_diffs else null, stdout);
             } else {
                 unchanged += 1;
             }
@@ -9993,7 +10003,7 @@ test "diffDirectories visits every matched file, not only the first" {
     const dir_b = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/b", .{&tmp.sub_path});
     var out: std.ArrayList(u8) = .empty;
     var aw = std.Io.Writer.Allocating.fromArrayList(a, &out);
-    try diffDirectories(io, dir_a, dir_b, true, false, false, false, null, &aw.writer);
+    try diffDirectories(io, dir_a, dir_b, true, false, false, false, null, null, &aw.writer);
     const json = aw.toArrayList().items;
     try std.testing.expect(std.mem.indexOf(u8, json, "\"unchanged\":1,\"changed\":2,\"only_a\":0,\"only_b\":1") != null);
 }
@@ -10035,4 +10045,39 @@ test "verify --path-id fails when the object does not exist" {
     try runCommand(.verify, "typeless.assets", &.{ "--path-id", "1", "--json" }, sf_bytes, &aw2.writer);
     try std.testing.expect(!verify_failed_flag);
     try std.testing.expect(std.mem.indexOf(u8, aw2.toArrayList().items, "\"skipped\":1") != null);
+}
+
+test "diff --fields decodes typeless objects through injected trees" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const payload_a = try monoScriptPayload(a);
+    const payload_b = try a.dupe(u8, payload_a);
+    // "Test" -> "Tost": same length, so only m_Name changes.
+    payload_b[5] = 'o';
+    const file_a = try typelessMonoFixture(a, payload_a);
+    const file_b = try typelessMonoFixture(a, payload_b);
+
+    var inj: InjectedTrees = .{};
+    try inj.class_ids.put(a, 115, "MonoScript");
+    const tp = try a.create(unityz.typetree.TypeTree);
+    tp.* = try unityz.typetree.fromFlatNodes(a, try monoScriptFlatNodes(a));
+    try inj.trees.put(a, "MonoScript", tp);
+
+    const fa: Fp = .{ .path_id = 1, .class_id = 115, .hash = 0, .size = 0 };
+    var out: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(a, &out);
+
+    // Without trees the objects cannot be decoded, so no field is reported.
+    var none: std.ArrayList(FieldDiff) = .empty;
+    try diffObjectFields(a, file_a, file_b, fa, "typeless.assets", null, &none, &aw.writer);
+    try std.testing.expectEqual(0, none.items.len);
+
+    var diffs: std.ArrayList(FieldDiff) = .empty;
+    try diffObjectFields(a, file_a, file_b, fa, "typeless.assets", &inj, &diffs, &aw.writer);
+    try std.testing.expectEqual(1, diffs.items.len);
+    try std.testing.expectEqualStrings("m_Name", diffs.items[0].path);
+    try std.testing.expectEqualStrings("\"Test\"", diffs.items[0].old);
+    try std.testing.expectEqualStrings("\"Tost\"", diffs.items[0].new);
 }
