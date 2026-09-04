@@ -25,7 +25,8 @@
 //!   block_count          u32
 //!   blocks[block_count]  10 bytes each:
 //!                         uncompressed_size u32, compressed_size u32,
-//!                         flags u16 (bit 0 = compressed with header type)
+//!                         flags u16 (low 6 bits: the block's compression
+//!                         type)
 //!   node_count           u32
 //!   nodes[node_count]:
 //!                         offset i64, size i64, flags u32,
@@ -34,10 +35,10 @@
 //! [block data: concatenated blocks]
 //! ```
 //!
-//! A block's flag bit 0 means "compressed with the header's compression
-//! type"; when clear the block is stored raw. Some writers store an
-//! explicit per-block compression type in the low 6 bits instead; both
-//! readings are honored (the explicit type wins only when bit 0 is clear).
+//! Each block's compression type comes from the low 6 bits of its own
+//! flags, independent of the header's compression type; bit 0 carries no
+//! type for the decoder and is ignored. A raw block stores its payload
+//! with compressed_size equal to uncompressed_size.
 //!
 //! Node data slices borrow from the concatenated decompressed block stream,
 //! which `Bundle` owns.
