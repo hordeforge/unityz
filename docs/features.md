@@ -39,6 +39,12 @@ Objects reserialize byte-exactly (formats 2-22) and can be edited in
 place. All parsers are fuzz-clean across thousands of mutated inputs;
 crashes found by fuzzing were real and shipped with regression tests.
 
+`hierarchy --json` returns one object per SerializedFile with `node`,
+`hierarchy`, and `skipped_children`. A Transform child whose Transform or
+GameObject cannot be decoded is counted and omitted; it cannot leave a
+dangling comma that makes the rest of the JSON unparseable. Unrecognized,
+malformed, and invalid-option inputs return non-zero just as `info` does.
+
 ## Texture decoding
 
 Decodes to RGBA8, exports as PNG by default, or TGA / BMP / raw RGBA8

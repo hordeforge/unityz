@@ -8461,6 +8461,7 @@ fn skipWs(text: []const u8, pos: *usize) void {
 /// classes, and local position. UnityPy's CLI has no scene-structure
 /// view.
 fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+    _ = path;
     var json = false;
     var trees_path: ?[]const u8 = null;
     var i: usize = 0;
@@ -8472,8 +8473,7 @@ fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, s
             trees_path = rest[i + 1];
             i += 1;
         } else {
-            try stdout.print("unityz: unknown hierarchy option '{s}'\n", .{arg});
-            return;
+            return error.InvalidOption;
         }
     }
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -8482,27 +8482,21 @@ fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, s
     const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
-            const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
-                return;
-            };
+            const b = try unityz.bundle.parse(arena, bytes);
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 try printHierarchy(arena, n.data, n.path, json, injected, stdout);
             }
         },
         .webfile => {
-            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-                return;
-            };
+            const wf = try unityz.webfile.parse(arena, bytes);
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
                 try printHierarchy(arena, e.data, e.path, json, injected, stdout);
             }
         },
         .serialized => try printHierarchy(arena, bytes, null, json, injected, stdout),
-        else => try stdout.print("{s}: hierarchy requires a serialized file, bundle, or webfile\n", .{path}),
+        else => return error.UnknownFormat,
     }
 }
 
@@ -8809,20 +8803,21 @@ fn managedFieldType(f: unityz.dotnet.Field) []const u8 {
 }
 
 fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, json: bool, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
-    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
-        return;
-    };
-    if (node) |n| {
-        if (json) {
+    const sf = try unityz.serialized.parse(arena, bytes);
+    if (json) {
+        if (node) |n| {
             try stdout.print("{{\"node\":", .{});
             try writeJsonString(stdout, n);
-            try stdout.print(",\"hierarchy\":[", .{});
         } else {
-            try stdout.print("hierarchy of {s}:\n", .{n});
+            try stdout.writeAll("{\"node\":null");
         }
-    } else if (!json) {
-        try stdout.print("hierarchy:\n", .{});
+        try stdout.print(",\"hierarchy\":[", .{});
+    } else {
+        if (node) |n| {
+            try stdout.print("hierarchy of {s}:\n", .{n});
+        } else {
+            try stdout.print("hierarchy:\n", .{});
+        }
     }
 
     var nodes: std.ArrayList(TEntry) = .empty;
@@ -8898,17 +8893,25 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
     }
 
     var roots_printed: usize = 0;
+    var skipped_children: usize = 0;
     for (nodes.items) |*e| {
-        if (e.node.father == 0) {
+        if (e.node.father == 0 and hierarchyNodeReadable(nodes.items, gos.items, e.path_id)) {
             if (json and roots_printed != 0) try stdout.writeByte(',');
             roots_printed += 1;
-            try printHierarchyNode(nodes.items, gos.items, bones.items, e.path_id, 0, json, stdout);
+            try printHierarchyNode(
+                nodes.items,
+                gos.items,
+                bones.items,
+                e.path_id,
+                0,
+                json,
+                &skipped_children,
+                stdout,
+            );
         }
     }
     if (json) {
-        try stdout.print("]", .{});
-        if (node != null) try stdout.writeByte('}');
-        try stdout.writeByte('\n');
+        try stdout.print("],\"skipped_children\":{d}}}\n", .{skipped_children});
     } else {
         try stdout.writeByte('\n');
     }
@@ -8928,6 +8931,11 @@ fn findGo(gos: []const GoInfo, path_id: i64) ?*const GoInfo {
     return null;
 }
 
+fn hierarchyNodeReadable(nodes: []const TEntry, gos: []const GoInfo, path_id: i64) bool {
+    const node = findNode(nodes, path_id) orelse return false;
+    return findGo(gos, node.go) != null;
+}
+
 fn isBone(bones: []const i64, path_id: i64) bool {
     for (bones) |b| {
         if (b == path_id) return true;
@@ -8941,7 +8949,16 @@ fn isBone(bones: []const i64, path_id: i64) bool {
 /// and `typetree.max_depth` bound their parsers.
 const max_hierarchy_depth: usize = 512;
 
-fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, bones: []const i64, path_id: i64, depth: usize, json: bool, stdout: *Io.Writer) !void {
+fn printHierarchyNode(
+    nodes: []const TEntry,
+    gos: []const GoInfo,
+    bones: []const i64,
+    path_id: i64,
+    depth: usize,
+    json: bool,
+    skipped_children: *usize,
+    stdout: *Io.Writer,
+) !void {
     if (depth > max_hierarchy_depth) return error.TooDeep;
     const tn = findNode(nodes, path_id) orelse return;
     const go = findGo(gos, tn.go);
@@ -8958,9 +8975,15 @@ fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, bones: []const
         }
         try stdout.print("],\"bone\":{}", .{bone});
         try stdout.writeAll(",\"children\":[");
-        for (tn.children.items, 0..) |c, i| {
-            if (i != 0) try stdout.writeByte(',');
-            try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, stdout);
+        var printed: usize = 0;
+        for (tn.children.items) |c| {
+            if (!hierarchyNodeReadable(nodes, gos, c)) {
+                skipped_children.* += 1;
+                continue;
+            }
+            if (printed != 0) try stdout.writeByte(',');
+            printed += 1;
+            try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, skipped_children, stdout);
         }
         try stdout.writeAll("]}");
         return;
@@ -8980,8 +9003,35 @@ fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, bones: []const
     }
     try stdout.print("  pos({d}, {d}, {d})\n", .{ tn.pos[0], tn.pos[1], tn.pos[2] });
     for (tn.children.items) |c| {
-        try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, stdout);
+        if (!hierarchyNodeReadable(nodes, gos, c)) {
+            skipped_children.* += 1;
+            continue;
+        }
+        try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, skipped_children, stdout);
     }
+}
+
+test "hierarchy JSON counts an unreadable child without leaving a dangling comma" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var children: std.ArrayList(i64) = .empty;
+    try children.append(arena, 999);
+    const nodes = [_]TEntry{.{ .path_id = 10, .node = .{ .go = 20, .children = children } }};
+    const gos = [_]GoInfo{.{ .path_id = 20, .name = "root" }};
+    var output: std.ArrayList(u8) = .empty;
+    var writer = std.Io.Writer.Allocating.fromArrayList(arena, &output);
+    var skipped: usize = 0;
+
+    try printHierarchyNode(&nodes, &gos, &.{}, 10, 0, true, &skipped, &writer.writer);
+    try writer.writer.flush();
+    const rendered = writer.toArrayList();
+
+    try std.testing.expectEqualStrings(
+        "{\"name\":\"root\",\"transform\":10,\"gameObject\":20,\"position\":[0,0,0],\"components\":[],\"bone\":false,\"children\":[]}",
+        rendered.items,
+    );
+    try std.testing.expectEqual(1, skipped);
 }
 
 test "emitVerifyReport JSON carries checked, failed, and skipped" {
