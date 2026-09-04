@@ -172,6 +172,25 @@ UnityArchive container is detected but not yet parsed.
 - `src/vendor/lzham/` - vendored LZHAM decompressor (MIT)
 - `build.zig`, `build.zig.zon` - package metadata and build steps
 
+## Releases
+
+Releases are tag-driven. Bump `.version` in `build.zig.zon` (its one
+canonical home; `unityz --version` reads it at build time), move the
+`[Unreleased]` notes in `CHANGELOG.md` under a `## [X.Y.Z] - date` heading,
+merge that to `main`, then push the matching tag:
+
+```bash
+git tag v0.1.3
+git push origin v0.1.3
+```
+
+The release workflow rejects a tag that disagrees with `build.zig.zon` or
+has no changelog section, creates the GitHub Release with that section as
+its notes, then re-runs the tests on the tagged tree and attaches a
+ReleaseSafe build for each platform CI covers (Linux x86_64, macOS arm64)
+with a SHA-256 checksum. Other targets build from source with
+`zig build -Dtarget=...`.
+
 ## Docs
 
 - [docs/features.md](docs/features.md) - the full capability reference

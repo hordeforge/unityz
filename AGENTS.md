@@ -279,3 +279,12 @@ pass `--publish` ad hoc when the repository has configured a default;
 `--no-publish` remains available to keep one specific pass local.
 
 <!-- END project-kit session workflow -->
+
+## Releases
+
+Tag-driven, per the hordeforge repository standard: bump `.version` in
+`build.zig.zon`, give `CHANGELOG.md` a `## [X.Y.Z] - date` section (move the
+`[Unreleased]` notes there), merge to `main`, push the `vX.Y.Z` tag. Every
+behavior-changing PR adds a line under `[Unreleased]` in the same change.
+`.github/workflows/release.yml` gates the tag against both files and
+publishes the binaries; see the README "Releases" section.
