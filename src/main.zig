@@ -244,6 +244,9 @@ pub fn main(init: std.process.Init) !void {
         var batch_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
         defer batch_arena_state.deinit();
         const batch_arena = batch_arena_state.allocator();
+        const json_batch = for (rest) |r| {
+            if (std.mem.eql(u8, r, "--json")) break true;
+        } else false;
         var it = dir.iterate();
         while (try it.next(io)) |entry| {
             defer _ = batch_arena_state.reset(.retain_capacity);
@@ -255,7 +258,15 @@ pub fn main(init: std.process.Init) !void {
                 command_failed_flag = true;
                 continue;
             };
-            runCommand(command, full, rest, bytes, stdout) catch |err| {
+            // In --json batch mode each file's output is captured and wrapped
+            // with its path, so consumers can tell which file produced which
+            // document; plain mode streams through untouched.
+            var captured: std.ArrayList(u8) = .empty;
+            var capture = std.Io.Writer.Allocating.fromArrayList(batch_arena, &captured);
+            const file_out: *Io.Writer = if (json_batch) &capture.writer else stdout;
+            const result = runCommand(command, full, rest, bytes, file_out);
+            if (json_batch) try writeBatchJson(stdout, full, capture.toArrayList().items, result);
+            result catch |err| {
                 if (err == error.Usage) std.process.exit(2);
                 if (err == error.WriteFailed) std.process.exit(141);
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
@@ -801,9 +812,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 if (json_mode) try writeManifest(arena, manifest.items, stdout);
             }
         },
-        else => {
-            try stdout.print("unityz: {s}: nothing to extract from this file type\n", .{path});
-        },
+        else => return error.UnknownFormat,
     }
 }
 
@@ -5524,11 +5533,7 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
             return;
         },
-        .unknown => {
-            try diag(json, stdout, "{s}: not a recognized Unity asset file\n", .{path});
-            if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
-            return;
-        },
+        .unknown => return error.UnknownFormat,
     }
 
     if (json) {
@@ -5767,6 +5772,33 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
 }
 
 /// Prints `s` as a JSON string literal (quoted, escaped).
+/// One batch-mode `--json` line: `{"file":"<path>","results":[...]}` holding
+/// every document the command emitted for that file (each emitter writes one
+/// document per line; a non-JSON line is kept as a JSON string), plus
+/// `"error"` when the command failed on it.
+fn writeBatchJson(stdout: *Io.Writer, file: []const u8, output: []const u8, result: anyerror!void) !void {
+    try stdout.print("{{\"file\":", .{});
+    try writeJsonString(stdout, file);
+    try stdout.print(",\"results\":[", .{});
+    var first = true;
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (!first) try stdout.print(",", .{});
+        first = false;
+        if (line[0] == '{' or line[0] == '[') {
+            try stdout.print("{s}", .{line});
+        } else {
+            try writeJsonString(stdout, line);
+        }
+    }
+    try stdout.print("]", .{});
+    result catch |err| {
+        try stdout.print(",\"error\":\"{s}\"", .{@errorName(err)});
+    };
+    try stdout.print("}}\n", .{});
+}
+
 fn writeJsonString(stdout: *Io.Writer, s: []const u8) !void {
     try stdout.writeByte('"');
     for (s) |c| {
@@ -5873,9 +5905,7 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
             try hashSerializedBytes(arena, bytes, null, if (path_filter) |pf| pf.path_id else null, class_filter, json, &entries, stdout);
         },
-        else => {
-            try diag(json, stdout, "{s}: hash requires a serialized file, bundle, or webfile\n", .{path});
-        },
+        else => return error.UnknownFormat,
     }
     if (json) {
         // one array across all nodes/entries (per-node arrays were not
@@ -6941,10 +6971,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
             mergeShowResult(try showSerializedBytes(arena, bytes, sel.path_id, raw, shader_only, stdout, basename(path), injected), &found, &failed);
         },
-        else => {
-            try stdout.print("{s}: show requires a serialized file, bundle, or webfile\n", .{path});
-            return false;
-        },
+        else => return error.UnknownFormat,
     }
     if (!found) {
         try stdout.print("object {d} not found\n", .{sel.path_id});
@@ -7136,9 +7163,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
         },
         .serialized => try findSerializedBytes(arena, bytes, null, needle, class_filter, exact, any, json, &found, basename(path), injected, stdout),
-        else => {
-            try diag(json, stdout, "{s}: find requires a serialized file, bundle, or webfile\n", .{path});
-        },
+        else => return error.UnknownFormat,
     }
     if (json) {
         try stdout.print("[", .{});
@@ -7297,8 +7322,7 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
         }
     }
     if (json and dups_only) {
-        try stdout.print("unityz: --dups applies to text output only\n", .{});
-        return;
+        return usageError("unityz: --dups applies to text output only\n", .{});
     }
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -7334,9 +7358,7 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
             }
         },
         .serialized => try statsSerializedBytes(arena, bytes, class_filter, dups_only, injected, basename(path), stdout),
-        else => {
-            try stdout.print("{s}: stats requires a serialized file, bundle, or webfile\n", .{path});
-        },
+        else => return error.UnknownFormat,
     }
 }
 
@@ -7428,7 +7450,7 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, in
                 statsScripts(arena, &ssf, inj, own_basename, &scripts);
             }
         },
-        else => {},
+        else => return error.UnknownFormat,
     }
 
     // duplicate detection: sort by (class, hash, size) and group identical
@@ -7895,10 +7917,7 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
             }
             rewritten = try unityz.webfile.rebuild(arena, &wf, replacements.items);
         },
-        else => {
-            try stdout.print("unityz: {s}: edit requires a serialized file, bundle, or webfile\n", .{path});
-            return;
-        },
+        else => return error.UnknownFormat,
     }
 
     if (!try writeEditOutput(arena, path, out_path, rewritten, verify, stdout)) return;
@@ -8149,10 +8168,7 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                 return;
             }
         },
-        else => {
-            try stdout.print("unityz: {s}: edit requires a serialized file, bundle, or webfile\n", .{path});
-            return;
-        },
+        else => return error.UnknownFormat,
     }
 
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
@@ -9956,4 +9972,18 @@ test "diffDirectories visits every matched file, not only the first" {
     try diffDirectories(io, dir_a, dir_b, true, false, false, false, null, &aw.writer);
     const json = aw.toArrayList().items;
     try std.testing.expect(std.mem.indexOf(u8, json, "\"unchanged\":1,\"changed\":2,\"only_a\":0,\"only_b\":1") != null);
+}
+
+test "writeBatchJson wraps a file's documents and its failure" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var buf: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena_state.allocator(), &buf);
+    try writeBatchJson(&aw.writer, "dir/a\"b", "{\"objects\":1}\n[1,2]\nextracted x\n\n", {});
+    try writeBatchJson(&aw.writer, "dir/c", "", error.UnknownFormat);
+    try std.testing.expectEqualStrings(
+        "{\"file\":\"dir/a\\\"b\",\"results\":[{\"objects\":1},[1,2],\"extracted x\"]}\n" ++
+            "{\"file\":\"dir/c\",\"results\":[],\"error\":\"UnknownFormat\"}\n",
+        aw.toArrayList().items,
+    );
 }
