@@ -1019,12 +1019,34 @@ fn resolveSidecar(sidecars: []const Sidecar, stream_path: []const u8, offset: u6
     const base = basename(stream_path);
     for (sidecars) |sc| {
         if (!std.mem.eql(u8, basename(sc.path), base)) continue;
-        const start: usize = @intCast(offset);
-        const end = start + @as(usize, @intCast(size));
+        // Offsets and sizes come from parsed data; an out-of-range value
+        // must degrade to an empty range, not wrap into an in-bounds slice.
+        const start: usize = std.math.cast(usize, offset) orelse return &.{};
+        const size_: usize = std.math.cast(usize, size) orelse return &.{};
+        const end: usize = std.math.add(usize, start, size_) catch return &.{};
         if (end <= sc.data.len) return sc.data[start..end];
         return &.{};
     }
     return &.{};
+}
+
+test "resolveSidecar rejects wrapping ranges" {
+    const data = [_]u8{0} ** 200;
+    const sidecars = [_]Sidecar{.{ .path = "x.resS", .data = &data }};
+    // A negative offset/size reaches here as a wrapped near-top-of-range
+    // value; the summed range must degrade to empty, not slice out of
+    // bounds (the slice would panic).
+    const wrapped = resolveSidecar(&sidecars, "a/x.resS", std.math.maxInt(u64) - 99, 100);
+    try std.testing.expectEqual(@as(usize, 0), wrapped.len);
+    const big_size = resolveSidecar(&sidecars, "a/x.resS", 1, std.math.maxInt(u64));
+    try std.testing.expectEqual(@as(usize, 0), big_size.len);
+    // A legitimate range still resolves to the matching bytes.
+    const ok = resolveSidecar(&sidecars, "a/x.resS", 10, 5);
+    try std.testing.expectEqual(@as(usize, 5), ok.len);
+    try std.testing.expectEqualSlices(u8, data[10..15], ok);
+    // No matching basename stays empty.
+    const nomatch = resolveSidecar(&sidecars, "a/other.resS", 0, 10);
+    try std.testing.expectEqual(@as(usize, 0), nomatch.len);
 }
 
 /// Loads the sibling `.resS`/`.resource` files next to a bare serialized
