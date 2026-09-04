@@ -30,7 +30,7 @@ const usage =
     \\                  png); --outdir <dir> to write into, created if
     \\                  missing, and a directory batch writes each
     \\                  file's output under <outdir>/<file name>/;
-    \\                  missing; --trees <file.json> supplies the class
+    \\                  --trees <file.json> supplies the class
     \\                  trees Mono builds omit, making typeless files
     \\                  decodable; --summary dry-run per-class report
     \\                  without writing anything; MonoScripts consolidate
