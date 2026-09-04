@@ -251,7 +251,9 @@ resources.assets alone).
 ## Verification
 
 `verify` round-trips every object and checks that each streamed
-reference resolves: a `m_StreamData`/`m_Resource` range must fit inside
+reference resolves. A `--path-id` that matches no object is reported as a
+failure (exit 1), so a script cannot mistake a typo for a clean object.
+Streamed references: a `m_StreamData`/`m_Resource` range must fit inside
 the sibling sidecar node it points into, so an edit that breaks a
 reference is caught at verify time. `diff` compares files by content
 hash and optionally decodes matched objects: `--pixels` (per-channel
