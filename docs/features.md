@@ -142,13 +142,13 @@ synthesized and the setup header (codebooks + modes) comes from a
 CRC-keyed table of FMOD encoder configurations, byte-identical to
 Fmod5Sharp's reconstruction.
 
-`unityz fsb bank.fsb --json` is the automation contract. It parses the bank,
-decodes or rebuilds every sample in memory, writes nothing, and reports the
-codec, sample count, rate, channels, duration, loop points, and per-sample
-`decodable` result. Vorbis samples also report the setup CRC and whether the
-embedded setup-header catalogue contains it. The top-level `valid` is false,
-and the process exits non-zero, if any sample cannot be reconstructed; malformed
-banks and failed extraction likewise return non-zero.
+`unityz fsb bank.fsb --json` is the automation contract in unityz 0.1.2 and
+later. It parses the bank, decodes or rebuilds every sample in memory, writes
+nothing, and reports the codec, sample count, rate, channels, duration, loop
+points, and per-sample `decodable` result. Vorbis samples also report the setup
+CRC and whether the embedded setup-header catalogue contains it. The top-level
+`valid` is false, and the process exits non-zero, if any sample cannot be
+reconstructed; malformed banks and failed extraction likewise return non-zero.
 
 ## Typeless files (`--trees`)
 
