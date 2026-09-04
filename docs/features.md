@@ -44,6 +44,9 @@ crashes found by fuzzing were real and shipped with regression tests.
 GameObject cannot be decoded is counted and omitted; it cannot leave a
 dangling comma that makes the rest of the JSON unparseable. Unrecognized,
 malformed, and invalid-option inputs return non-zero just as `info` does.
+Every hierarchy node also carries the number omitted from its own subtree, so
+a caller can mark only the affected prefab as partial while retaining the
+file-level total.
 
 ## Texture decoding
 

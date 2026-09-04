@@ -8992,6 +8992,7 @@ fn printHierarchyNode(
     stdout: *Io.Writer,
 ) !void {
     if (depth > max_hierarchy_depth) return error.TooDeep;
+    const skipped_before = skipped_children.*;
     const tn = findNode(nodes, path_id) orelse return;
     const go = findGo(gos, tn.go);
     const bone = std.mem.indexOfScalar(i64, bones, path_id) != null;
@@ -9017,7 +9018,7 @@ fn printHierarchyNode(
             printed += 1;
             try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, skipped_children, stdout);
         }
-        try stdout.writeAll("]}");
+        try stdout.print("],\"skipped_children\":{d}}}", .{skipped_children.* - skipped_before});
         return;
     }
     for (0..depth) |_| try stdout.writeAll("  ");
@@ -9060,7 +9061,38 @@ test "hierarchy JSON counts an unreadable child without leaving a dangling comma
     const rendered = writer.toArrayList();
 
     try std.testing.expectEqualStrings(
-        "{\"name\":\"root\",\"transform\":10,\"gameObject\":20,\"position\":[0,0,0],\"components\":[],\"bone\":false,\"children\":[]}",
+        "{\"name\":\"root\",\"transform\":10,\"gameObject\":20,\"position\":[0,0,0],\"components\":[],\"bone\":false,\"children\":[],\"skipped_children\":1}",
+        rendered.items,
+    );
+    try std.testing.expectEqual(1, skipped);
+}
+
+test "hierarchy JSON reports subtree skips on the affected branch" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var root_children: std.ArrayList(i64) = .empty;
+    try root_children.append(arena, 11);
+    var child_children: std.ArrayList(i64) = .empty;
+    try child_children.append(arena, 999);
+    const nodes = [_]TEntry{
+        .{ .path_id = 10, .node = .{ .go = 20, .children = root_children } },
+        .{ .path_id = 11, .node = .{ .go = 21, .children = child_children } },
+    };
+    const gos = [_]GoInfo{
+        .{ .path_id = 20, .name = "root" },
+        .{ .path_id = 21, .name = "child" },
+    };
+    var output: std.ArrayList(u8) = .empty;
+    var writer = std.Io.Writer.Allocating.fromArrayList(arena, &output);
+    var skipped: usize = 0;
+
+    try printHierarchyNode(&nodes, &gos, &.{}, 10, 0, true, &skipped, &writer.writer);
+    try writer.writer.flush();
+    const rendered = writer.toArrayList();
+
+    try std.testing.expectEqualStrings(
+        "{\"name\":\"root\",\"transform\":10,\"gameObject\":20,\"position\":[0,0,0],\"components\":[],\"bone\":false,\"children\":[{\"name\":\"child\",\"transform\":11,\"gameObject\":21,\"position\":[0,0,0],\"components\":[],\"bone\":false,\"children\":[],\"skipped_children\":1}],\"skipped_children\":1}",
         rendered.items,
     );
     try std.testing.expectEqual(1, skipped);
