@@ -25,7 +25,9 @@ const usage =
     \\                 (--raw raw bytes; --json value trees as JSON, plus
     \\                  a manifest.json index; --class N / --path-id N
     \\                  filters, N may be node:path-id; --name <substring>
-    \\                  name filter; --recursive for bundles/webfiles;
+    \\                  name filter; bundles and webfiles extract the
+    \\                  assets inside their nodes as well as the raw
+    \\                  nodes (--recursive is accepted as a no-op);
     \\                  --format png|tga|bmp|raw image output (default
     \\                  png); --outdir <dir> to write into, created if
     \\                  missing, and a directory batch writes each
@@ -656,7 +658,9 @@ fn injectedTreeFor(
 
 fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     var raw = false;
-    var recursive = false;
+    // Bundles and webfiles extract the assets inside their serialized nodes
+    // by default; the flag that used to enable it is kept as a no-op.
+    var recursive = true;
     var json_mode = false;
     var summary_mode = false;
     var class_filter: ?i32 = null;
@@ -4441,7 +4445,7 @@ fn cmdInfo(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json:
 /// Used for the recursive bundle/webfile dumps.
 fn dumpSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("  (node parse failed: {s})\n", .{@errorName(err)});
+        failure("  (node parse failed: {s})\n", .{@errorName(err)});
         return;
     };
     try dumpObjects(&sf, stdout);
@@ -4762,7 +4766,7 @@ fn dumpContainerEntries(
 
 fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
+        failure("  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
     };
     try stdout.print("objects by id:\n", .{});
@@ -4913,7 +4917,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                     try recordFailure(&report, arena, null, -1, "bundle parse failed: {s}", .{@errorName(err)});
                     try emitVerifyReport(json, &report, stdout);
                 } else {
-                    try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                    failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
                 }
                 verify_failed_flag = true;
                 return;
@@ -4944,7 +4948,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                     try recordFailure(&report, arena, null, -1, "webfile parse failed: {s}", .{@errorName(err)});
                     try emitVerifyReport(json, &report, stdout);
                 } else {
-                    try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                    failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
                 }
                 verify_failed_flag = true;
                 return;
@@ -5031,7 +5035,7 @@ fn verifySerializedBytesSidecars(arena: std.mem.Allocator, bytes: []const u8, no
         if (json) {
             try recordFailure(report, arena, node, -1, "serialized parse failed: {s}", .{@errorName(err)});
         } else {
-            try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
+            failure("  serialized parse failed: {s}\n", .{@errorName(err)});
             report.failed += 1;
         }
         return;
@@ -5543,7 +5547,7 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         .serialized => try skinSerializedBytes(arena, bytes, null, &shaders, &failures, basename(path), injected),
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try diag(json, stdout, "{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
                 if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
                 return;
             };
@@ -5554,7 +5558,7 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try diag(json, stdout, "{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
                 if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
                 return;
             };
@@ -5564,7 +5568,7 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
         },
         .archive => {
-            try diag(json, stdout, "{s}: UnityArchive files are not supported yet\n", .{path});
+            failure("{s}: UnityArchive files are not supported yet\n", .{path});
             if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
             return;
         },
@@ -5641,14 +5645,6 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
 /// Routes a diagnostic to stderr while `--json` is in effect, so the
 /// document a script parses off stdout stays well-formed; without `--json`
 /// it stays on stdout with the rest of the human-readable report.
-fn diag(json: bool, stdout: *Io.Writer, comptime fmt: []const u8, args: anytype) !void {
-    if (!json) return stdout.print(fmt, args);
-    var buf: [512]u8 = undefined;
-    var w: Io.File.Writer = .init(.stderr(), io_global.io, &buf);
-    w.interface.print(fmt, args) catch return;
-    w.interface.flush() catch {};
-}
-
 /// Reports a per-file failure on stderr, keeping it out of the stdout
 /// stream that carries the command's (possibly JSON) result.
 /// Compares two directories file-by-file by content hash, reporting
@@ -5900,7 +5896,7 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try diag(json, stdout, "{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
                 if (json) try stdout.print("[]\n", .{});
                 return;
             };
@@ -5916,7 +5912,7 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try diag(json, stdout, "{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
                 if (json) try stdout.print("[]\n", .{});
                 return;
             };
@@ -5933,9 +5929,7 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         .serialized => {
             if (path_filter) |pf| {
                 if (pf.node != null) {
-                    try diag(json, stdout, "unityz: node selector not valid for a serialized file\n", .{});
-                    if (json) try stdout.print("[]\n", .{});
-                    return;
+                    return usageError("unityz: node selector not valid for a serialized file\n", .{});
                 }
             }
             try hashSerializedBytes(arena, bytes, null, if (path_filter) |pf| pf.path_id else null, class_filter, json, &entries, stdout);
@@ -5967,7 +5961,7 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
 
 fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, path_filter: ?i64, class_filter: ?i32, json: bool, entries: *std.ArrayList(Fp), stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try diag(json, stdout, "  serialized parse failed: {s}\n", .{@errorName(err)});
+        failure("  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
     };
     for (sf.objects) |*o| {
@@ -6986,7 +6980,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
                 return false;
             };
             for (b.nodes) |n| {
@@ -6999,7 +6993,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
                 return false;
             };
             for (wf.entries) |e| {
@@ -7044,7 +7038,7 @@ fn mergeShowResult(result: ShowResult, found: *bool, failed: *bool) void {
 /// sub-program records; with `shader_only`, non-Shader objects are not found.
 fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, raw: bool, shader_only: bool, stdout: *Io.Writer, own_name: []const u8, injected: ?*const InjectedTrees) !ShowResult {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
+        failure("  serialized parse failed: {s}\n", .{@errorName(err)});
         return .failed;
     };
     for (sf.objects) |*o| {
@@ -7187,7 +7181,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try diag(json, stdout, "{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
                 if (json) try stdout.print("[]\n", .{});
                 return;
             };
@@ -7198,7 +7192,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try diag(json, stdout, "{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
                 if (json) try stdout.print("[]\n", .{});
                 return;
             };
@@ -7275,7 +7269,7 @@ fn anyStringEquals(v: unityz.value.Value, needle: []const u8) bool {
 
 fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, needle: []const u8, class_filter: ?i32, exact: bool, any: bool, json: bool, found: *std.ArrayList(FindMatch), own_name: []const u8, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try diag(json, stdout, "  serialized parse failed: {s}\n", .{@errorName(err)});
+        failure("  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
     };
     var matches: usize = 0;
@@ -7382,7 +7376,7 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
                 return;
             };
             for (b.nodes) |n| {
@@ -7393,7 +7387,7 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
                 return;
             };
             for (wf.entries) |e| {
@@ -7462,7 +7456,7 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, in
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try stdout.print("  bundle parse failed: {s}\n", .{@errorName(err)});
+                failure("  bundle parse failed: {s}\n", .{@errorName(err)});
                 return;
             };
             for (b.nodes) |n| {
@@ -7476,7 +7470,7 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, in
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try stdout.print("  webfile parse failed: {s}\n", .{@errorName(err)});
+                failure("  webfile parse failed: {s}\n", .{@errorName(err)});
                 return;
             };
             for (wf.entries) |e| {
@@ -7618,7 +7612,7 @@ const StatEntry = struct {
 
 fn statsSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, dups_only: bool, injected: ?*const InjectedTrees, own_basename: []const u8, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
+        failure("  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
     };
 
