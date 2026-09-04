@@ -154,9 +154,9 @@ reconstructed; malformed banks and failed extraction likewise return non-zero.
 
 Mono builds strip the class type trees from serialized files, leaving
 typeless objects undecodable. `--trees <file.json>` supplies them:
-`extract`, `show`, `verify`, `find`, `skin`, `hierarchy`, and `edit`
-decode with the injected trees, and `verify` round-trips them
-byte-exactly.
+`extract`, `show`, `verify`, `find`, `skin`, `hierarchy`, `stats`, `edit`,
+and `diff --fields` decode with the injected trees, and `verify`
+round-trips them byte-exactly.
 
 `show` returns non-zero when the requested object is absent or its value tree
 does not decode. When an object has no usable type tree, its diagnostic names

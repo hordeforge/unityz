@@ -95,7 +95,8 @@ read or check failures exit 1, always with the diagnostic on stderr. See
 
 Mono builds strip class type trees, leaving typeless objects
 undecodable. `--trees <file.json>` supplies them, and `extract`, `show`,
-`verify`, `find`, `skin`, `hierarchy`, and `edit` all decode with the
+`verify`, `find`, `skin`, `hierarchy`, `stats`, `edit`, and `diff --fields`
+all decode with the
 injected trees.
 
 The trees JSON shape is what `TypeTreeGeneratorAPI.get_nodes_as_json()`
