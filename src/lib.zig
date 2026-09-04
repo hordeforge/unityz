@@ -20,8 +20,8 @@
 
 const std = @import("std");
 
-/// unityz version, kept in sync with `build.zig.zon`.
-pub const version: std.SemanticVersion = .{ .major = 0, .minor = 1, .patch = 1 };
+/// unityz version, parsed from `build.zig.zon` at build time.
+pub const version: std.SemanticVersion = std.SemanticVersion.parse(@import("build_options").version) catch unreachable;
 
 /// Endian-aware binary reader/writer primitives.
 pub const streams = @import("streams.zig");
