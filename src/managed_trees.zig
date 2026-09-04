@@ -451,7 +451,32 @@ pub fn buildScriptTree(
         try out.append(arena, h);
     }
     try appendFields(&out, arena, 1, 0, budget, script_fields, types, warnings);
-    return out.toOwnedSlice(arena);
+    const nodes = try out.toOwnedSlice(arena);
+    markSmallRunAlignment(nodes);
+    return nodes;
+}
+
+/// Unity packs consecutive sub-4-byte fields (bool/char/byte/short runs)
+/// and pads only after the run's last member, before the next value that
+/// needs 4-byte alignment (a string, int, PPtr, or nested record). Real
+/// type trees mark that last member with the 0x4000 align flag. Without
+/// the flag the reader stops right after the small field and skips the
+/// wire padding, misreading everything that follows (every pre-2019
+/// MonoBehaviour whose fields end a small run decoded as Corrupt).
+fn markSmallRunAlignment(nodes: []typetree.Node) void {
+    const is_small = struct {
+        fn f(t: []const u8) bool {
+            return std.mem.eql(u8, t, "bool") or std.mem.eql(u8, t, "char") or
+                std.mem.eql(u8, t, "UInt8") or std.mem.eql(u8, t, "SInt8") or
+                std.mem.eql(u8, t, "UInt16") or std.mem.eql(u8, t, "SInt16");
+        }
+    }.f;
+    for (nodes, 0..) |*node, i| {
+        if (!is_small(node.type_name)) continue;
+        if (i + 1 >= nodes.len) continue; // object-final field: no pad follows
+        if (is_small(nodes[i + 1].type_name)) continue; // packed with the next
+        node.meta_flags |= align_flag;
+    }
 }
 
 /// The flat tree for the "MonoBehaviour" class: the header only (used to
@@ -498,4 +523,38 @@ pub fn writeJsonString(w: anytype, s: []const u8) !void {
         }
     }
     try w.writeByte('"');
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "markSmallRunAlignment flags the run end before aligned data" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var list: std.ArrayList(typetree.Node) = .empty;
+    const n = struct {
+        fn add(l: *std.ArrayList(typetree.Node), al: std.mem.Allocator, t: []const u8) !void {
+            try l.append(al, .{ .level = 1, .type_name = t, .name = "", .meta_flags = 0 });
+        }
+    };
+    // bool, bool, string  -> the two bools pack; nothing aligns before the
+    // string (2 bytes then pad is written after the run's last member)
+    try n.add(&list, a, "bool");
+    try n.add(&list, a, "bool");
+    try n.add(&list, a, "string");
+    // bool, int -> the bool's pad lands before the int
+    try n.add(&list, a, "bool");
+    try n.add(&list, a, "int");
+    // char at the very end of the object: no pad stored, no flag
+    try n.add(&list, a, "char");
+    const nodes = try list.toOwnedSlice(a);
+    markSmallRunAlignment(nodes);
+    try std.testing.expectEqual(@as(i32, 0), nodes[0].meta_flags); // packed: followed by another bool
+    try std.testing.expectEqual(@as(i32, 0x4000), nodes[1].meta_flags); // run end: pads before the string
+    try std.testing.expectEqual(@as(i32, 0), nodes[2].meta_flags); // string, not small
+    try std.testing.expectEqual(@as(i32, 0x4000), nodes[3].meta_flags); // bool before int
+    try std.testing.expectEqual(@as(i32, 0), nodes[4].meta_flags); // int
+    try std.testing.expectEqual(@as(i32, 0), nodes[5].meta_flags); // final char, no pad
 }

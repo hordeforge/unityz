@@ -13,6 +13,16 @@ otherwise.
 - Asset bundles: UnityFS (modern), UnityWeb / UnityRaw (legacy), WebFile
   (`UnityWebData1.0`, gzip-wrapped included), and the rare UnityArchive
   container is detected but not yet parsed (no real sample exists).
+- `info --json` reports the metadata of every SerializedFile embedded in a
+  bundle or WebFile: its format and Unity versions, platform, endianness,
+  type-tree state, counts, and present class IDs. This is distinct from the
+  outer UnityFS header's Unity string, which is commonly only `5.x.x`.
+  This machine-readable nested metadata is part of unityz 0.1.1 and later;
+  consumers that gate on it can reject an older executable through
+  `unityz --version` before opening an artifact.
+- `info` exits non-zero for an unrecognized or malformed input. Directory
+  batches continue through every file but still return failure if any member
+  failed, so a diagnostic line can never be mistaken for successful JSON.
 - `.resources` / `.resS` sidecar files, resolved automatically for
   streamed references.
 - Big-endian bundles (Unity 5.x through 2022.3) parse, reserialize
@@ -28,6 +38,12 @@ and raw bytes, honoring Unity's alignment and length-prefix rules.
 Objects reserialize byte-exactly (formats 2-22) and can be edited in
 place. All parsers are fuzz-clean across thousands of mutated inputs;
 crashes found by fuzzing were real and shipped with regression tests.
+
+`hierarchy --json` returns one object per SerializedFile with `node`,
+`hierarchy`, and `skipped_children`. A Transform child whose Transform or
+GameObject cannot be decoded is counted and omitted; it cannot leave a
+dangling comma that makes the rest of the JSON unparseable. Unrecognized,
+malformed, and invalid-option inputs return non-zero just as `info` does.
 
 ## Texture decoding
 
@@ -65,10 +81,20 @@ automatically.
   right-handed, top-left-origin conventions). Skinned meshes export the
   rig too: JOINTS_0/WEIGHTS_0 accessors plus a glTF skin whose joints sit
   at their bind world transforms and whose inverseBindMatrices are the
-  raw Unity bind poses, so the rest pose round-trips exactly (verified on
-  a 19-bone creature mesh).
-- TextAssets (49), fonts (128, embedded TTF/OTF + metrics sidecar),
-  ComputeShaders (72, DXBC/SPIR-V/GLSL per platform + descriptor JSON)
+  raw Unity bind poses, so the rest pose round-trips exactly. Skin data
+  comes from either storage Unity used: vertex channels 12/13 (2019+,
+  verified on a 19-bone creature mesh) or the per-vertex m_Skin /
+  m_BoneWeights array (5.x, verified on The Forest: 257 of 1325 meshes,
+  rest pose ~5e-7).
+- SkinnedMeshRenderers (137) export the bound character as one GLB whose
+  joints carry the armature's real names (each m_Bones Transform resolves
+  to its GameObject name; the per-Mesh export keeps generic Bone0..N
+  joints), so a rigged character drops straight into a DCC tool with its
+  skeleton intact.
+- TextAssets (49), fonts (128, embedded TTF/OTF + metrics sidecar,
+  including 5.x-era fonts whose layout predates m_ShouldRoundAdvanceValue;
+  verified on The Forest), ComputeShaders (72, DXBC/SPIR-V/GLSL per
+  platform + descriptor JSON)
 - AudioClips (83): OGG/FSB banks, WAV-wrapped PCM, MP3, plus an FSB5
   metadata sidecar (sample rate, channels, loop points, format); FSB5
   banks in pure-Zig codecs (PCM8/16/24/32/FLOAT, GCADPCM, IMA ADPCM) also
@@ -233,3 +259,14 @@ Animators, MonoScripts. UnityPy shells out to ffmpeg for audio
 conversion; unityz decodes in pure Zig. UnityPy only writes PNG; unityz
 adds TGA, BMP, and raw RGBA. UnityPy raises `NotImplementedError` on
 UnityArchive files; unityz detects the container.
+
+UnityPy still carries one creation-side facility that unityz does not:
+UnityPy bundles a release-indexed database of built-in engine-class type
+trees and can return a requested class tree for a Unity version. unityz can
+read and reserialize trees present in a file and can inject trees derived
+from AssetRipper dumps or managed assemblies, but it does not ship that
+versioned database or expose a command to select and export one built-in
+class tree. It also edits existing SerializedFiles and containers rather than
+creating a new object table or bundle from an empty input. Those are concrete
+gaps for callers that author brand-new Unity objects; they do not limit
+reading, extraction, verification, diffing, or in-place edits.
