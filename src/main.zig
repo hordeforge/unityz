@@ -40,8 +40,10 @@ const usage =
     \\                  rebuilds the bundle)
     \\  verify <path>   Verify every object round-trips byte-exactly
     \\                 (--class N / --path-id N to check a subset,
-    \\                  N may be node:path-id; --json for a machine-readable
-    \\                  report; --trees <file.json> for typeless Mono files,
+    \\                  N may be node:path-id; a --path-id that
+    \\                  matches no object is a failure; --json for a
+    \\                  machine-readable report; --trees <file.json>
+    \\                  for typeless Mono files,
     \\                  as in extract)
     \\  stats <path>    Per-class sizes + duplicate-object detection
     \\                 (--json for a machine-readable summary;
@@ -60,6 +62,7 @@ const usage =
     \\                 writes playable WAV/OGG plus bank.json (pure Zig)
     \\  show <path> <id> Print one object as JSON
     \\                 (--raw for a hex dump of its serialized bytes;
+    \\                  --json is accepted as a no-op, the output is JSON;
     \\                  <id> may be node:path-id to target a container entry;
     \\                  a Shader object also carries a decoded "shaderBlob";
     \\                  --trees <file.json> for typeless Mono files,
@@ -4980,6 +4983,12 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
             return;
         },
     }
+    // A --path-id that matches nothing is a failure, not an empty success:
+    // the caller named one object and it is not there.
+    if (path_filter) |pf| if (report.checked == 0 and report.skipped == 0) {
+        if (!json) try stdout.print("object {d} not found\n", .{pf.path_id});
+        try recordFailure(&report, arena, pf.node, pf.path_id, "object not found", .{});
+    };
     // The exit code is part of the contract in both modes: `--json` is the
     // scripting mode, so it must fail the same way the text mode does.
     if (report.failed != 0) verify_failed_flag = true;
@@ -6934,6 +6943,9 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--raw")) {
             raw = true;
+        } else if (std.mem.eql(u8, rest[i], "--json")) {
+            // show always prints JSON; accept the flag every other command has
+            // so scripts can pass it uniformly.
         } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
             trees_path = rest[i + 1];
             i += 1;
@@ -9998,4 +10010,29 @@ test "writeBatchJson wraps a file's documents and its failure" {
             "{\"file\":\"dir/c\",\"results\":[],\"error\":\"UnknownFormat\"}\n",
         aw.toArrayList().items,
     );
+}
+
+test "verify --path-id fails when the object does not exist" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    io_global.io = std.testing.io;
+    defer verify_failed_flag = false;
+    const sf_bytes = try typelessMonoFixture(a, try monoScriptPayload(a));
+
+    var out: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(a, &out);
+    try runCommand(.verify, "typeless.assets", &.{ "--path-id", "999", "--json" }, sf_bytes, &aw.writer);
+    try std.testing.expect(verify_failed_flag);
+    const missing = aw.toArrayList().items;
+    try std.testing.expect(std.mem.indexOf(u8, missing, "\"failed\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, missing, "object not found") != null);
+
+    // The object that does exist is typeless here, so it is skipped, not failed.
+    verify_failed_flag = false;
+    var out2: std.ArrayList(u8) = .empty;
+    var aw2 = std.Io.Writer.Allocating.fromArrayList(a, &out2);
+    try runCommand(.verify, "typeless.assets", &.{ "--path-id", "1", "--json" }, sf_bytes, &aw2.writer);
+    try std.testing.expect(!verify_failed_flag);
+    try std.testing.expect(std.mem.indexOf(u8, aw2.toArrayList().items, "\"skipped\":1") != null);
 }
