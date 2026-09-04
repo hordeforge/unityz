@@ -73,7 +73,8 @@ Every command accepts a directory and processes all files in it, and
 - `stats` - per-class sizes and duplicate-object detection
 - `find` - name/class search over objects (`--any` searches every string
   field)
-- `show` - one object as JSON, or a hex dump with `--raw`
+- `show` - one object as JSON, or a hex dump with `--raw`; missing or
+  undecodable targets return non-zero
 - `diff` - compare two files or directories by content hash, with
   optional decoded passes: `--pixels` (texture/sprite pixel diffs),
   `--audio` (streamed audio), `--fields` (exact changed field paths)

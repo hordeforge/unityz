@@ -150,6 +150,11 @@ typeless objects undecodable. `--trees <file.json>` supplies them:
 decode with the injected trees, and `verify` round-trips them
 byte-exactly.
 
+`show` returns non-zero when the requested object is absent or its value tree
+does not decode. When an object has no usable type tree, its diagnostic names
+both valid routes: provide `--trees` for JSON or use `--raw` for the serialized
+bytes.
+
 The JSON shape is what `TypeTreeGeneratorAPI.get_nodes_as_json()` emits:
 per-class flat node lists plus `__class_ids__` (built-in class names),
 `__monoscripts__` (script resolution), and `__script_trees__` (the
@@ -263,13 +268,17 @@ conversion; unityz decodes in pure Zig. UnityPy only writes PNG; unityz
 adds TGA, BMP, and raw RGBA. UnityPy raises `NotImplementedError` on
 UnityArchive files; unityz detects the container.
 
-UnityPy still carries one creation-side facility that unityz does not:
-UnityPy bundles a release-indexed database of built-in engine-class type
-trees and can return a requested class tree for a Unity version. unityz can
-read and reserialize trees present in a file and can inject trees derived
-from AssetRipper dumps or managed assemblies, but it does not ship that
-versioned database or expose a command to select and export one built-in
-class tree. It also edits existing SerializedFiles and containers rather than
-creating a new object table or bundle from an empty input. Those are concrete
-gaps for callers that author brand-new Unity objects; they do not limit
-reading, extraction, verification, diffing, or in-place edits.
+UnityPy still carries a release-indexed database of built-in engine-class type
+trees that unityz does not. UnityPy can return a requested class tree for a
+Unity version. unityz can read and reserialize trees present in a file and can
+inject trees derived from AssetRipper dumps or managed assemblies, but it does
+not ship that versioned database or expose a command to select and export one
+built-in class tree.
+
+That missing database affects two routes. A stripped external SerializedFile
+needs caller-supplied `--trees` for decoded JSON, while UnityPy can fall back to
+its bundled tree. A brand-new object needs a version-matched initial tree and
+serialized value; unityz's writer currently rebuilds an existing
+SerializedFile or container instead of starting its first object table from
+empty input. Embedded-tree reading, extraction, verification, diffing, and
+in-place edits use the trees already present and are unaffected.

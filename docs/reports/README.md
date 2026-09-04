@@ -64,6 +64,7 @@ complete.
 ### Bugs
 
 <!-- inventory:bug:start -->
+- [Bug - show exits zero on failure](bugs/2026-09-04-show-exits-zero-on-failure.md) - Resolved
 <!-- inventory:bug:end -->
 
 ### Investigations
