@@ -271,6 +271,11 @@ SerializedFile), and a non-JSON line is kept as a JSON string. A file the
 command could not read or decode adds `"error":"<name>"` with the same
 diagnostic on stderr; the batch continues and exits 1 at the end.
 
+`extract` over a directory writes each file's output under its own
+`<outdir>/<file name>/` subdirectory (or `./<file name>/` without
+`--outdir`). Bundles routinely share node names such as `CAB-...`, so a
+flat layout would let one file overwrite another's exports and manifest.
+
 A file unityz does not recognize as a Unity asset (not a SerializedFile,
 bundle, or WebFile) is an error for every command, so a stray file in a
 data directory shows up as a failure rather than as an empty success.
@@ -282,7 +287,9 @@ without parsing output:
 
 - 0: the command ran; for `verify`, `skin`, and `fsb --json` this also
   means every check passed.
-- 1: an input could not be read or decoded, or a check failed. Batch runs
+- 1: an input could not be read or decoded, or a check failed. For `edit`
+  this covers a missing object, a bad field path or value, a failed
+  rebuild, and a `--verify` round-trip failure: nothing is written. Batch runs
   over a directory keep going and return 1 at the end if any member failed.
 - 2: a usage error: an unknown flag, a missing argument, or a malformed
   id. The diagnostic goes to stderr and nothing is written to stdout, so a
