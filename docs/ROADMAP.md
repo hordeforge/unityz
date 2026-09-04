@@ -19,7 +19,7 @@ Nothing in flight.
 
 ## Done
 
-- CLI automation contract (PRs #139-#144, 2026-09-04): usage errors exit 2
+- CLI automation contract (PRs #139-#151, 2026-09-04): usage errors exit 2
   and every read, decode, or check failure exits 1, always with the
   diagnostic on stderr and nothing on stdout; batch `--json` wraps each
   file's documents as `{"file":...,"results":[...]}`; batch `extract`
@@ -27,7 +27,13 @@ Nothing in flight.
   every matched file (it stopped after the first) and runs `--fields`;
   `diff --trees` decodes typeless Mono objects; `verify --path-id` on a
   missing object fails; `unityz --version` is derived from build.zig.zon
-  so it cannot drift from the package version. See the "Batch mode" and
+  so it cannot drift from the package version. Later PRs in the run
+  add the `trees` command (export a file's embedded type trees as a
+  `--trees` table), make bundles extract their assets by default, keep
+  `fsb` batch output apart, reject `--out` over a directory, make
+  `edit --patch` atomic on a missing object, and fix `managed` exit
+  codes. Handover:
+  [2026-09-04-cli-contract-sweep.md](handovers/2026-09-04-cli-contract-sweep.md). See the "Batch mode" and
   "Exit codes" sections of [features.md](features.md).
 - Managed trees and modern mesh export (PRs #110-#111, #115-#116):
   `managed --trees` auto-builds MonoBehaviour type trees from a game's
