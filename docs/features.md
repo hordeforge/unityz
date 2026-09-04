@@ -13,6 +13,10 @@ otherwise.
 - Asset bundles: UnityFS (modern), UnityWeb / UnityRaw (legacy), WebFile
   (`UnityWebData1.0`, gzip-wrapped included), and the rare UnityArchive
   container is detected but not yet parsed (no real sample exists).
+- `info --objects` lists the object table (path id, class, offset, size,
+  name) of every SerializedFile in the input, and `info --dump` prints every
+  object decoded as one JSON line; `--objects` also adds the table to
+  `--json` output.
 - `info --json` reports the metadata of every SerializedFile embedded in a
   bundle or WebFile: its format and Unity versions, platform, endianness,
   type-tree state, counts, and present class IDs. This is distinct from the
@@ -251,12 +255,20 @@ valid.
 ## Stats
 
 `stats` reports per-class sizes and duplicate-object detection, with
-`--json` for scripts. With `--trees <file.json>`, typeless Mono files also
+`--json` for scripts and `--dups` for only the duplicate report (text mode). With `--trees <file.json>`, typeless Mono files also
 get a per-script breakdown: MonoBehaviours are decoded through the injected
 trees and counted by their resolved script class name, so
 `stats <game> --trees trees.json` answers "which scripts does this game
 actually instantiate" (verified on Raft: 74 script classes across
 resources.assets alone).
+
+## Search
+
+`find <path> <substring>` matches object names case-insensitively;
+`--exact` requires a case-sensitive whole-name match, `--any` matches any
+string field rather than only `m_Name`, `--class <id>` narrows the class,
+and `--json` returns the matches as an array of `{node, path_id, class,
+name}`.
 
 ## Verification
 
@@ -331,10 +343,10 @@ UnityArchive files; unityz detects the container.
 
 UnityPy still carries a release-indexed database of built-in engine-class type
 trees that unityz does not. UnityPy can return a requested class tree for a
-Unity version. unityz can read and reserialize trees present in a file and can
-inject trees derived from AssetRipper dumps or managed assemblies, but it does
-not ship that versioned database or expose a command to select and export one
-built-in class tree.
+Unity version. unityz can read and reserialize trees present in a file,
+export them with `trees` (from the game's own AssetBundles, which keep
+their trees), and inject trees derived from AssetRipper dumps or managed
+assemblies, but it does not ship that versioned database.
 
 That missing database affects two routes. A stripped external SerializedFile
 needs caller-supplied `--trees` for decoded JSON, while UnityPy can fall back to
