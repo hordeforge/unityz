@@ -90,18 +90,23 @@ read or check failures exit 1, always with the diagnostic on stderr. See
 - `managed` - read a Mono build's assemblies and list every
   MonoBehaviour's serialized field layout, straight from the .NET
   metadata with no runtime
+- `trees` - export the type trees embedded in a file as a `--trees` JSON
+  table (`--out <file.json>`), so a game's own AssetBundles, which keep
+  their trees, supply version-exact trees for its stripped `.assets` files
 
 ### Typeless files
 
 Mono builds strip class type trees, leaving typeless objects
 undecodable. `--trees <file.json>` supplies them, and `extract`, `show`,
-`verify`, `find`, `skin`, `hierarchy`, `stats`, `edit`, and `diff --fields`
-all decode with the
-injected trees.
+`verify`, `find`, `skin`, `hierarchy`, `stats`, `edit`, and
+`diff --fields` all decode with the injected trees.
 
 The trees JSON shape is what `TypeTreeGeneratorAPI.get_nodes_as_json()`
-emits. unityz can build one itself: `managed <data-dir> --trees
-<out.json>` derives the script trees from the game's own assemblies (its
+emits. unityz can build one itself three ways. `trees <bundle> --out
+<out.json>` exports the trees a file already carries, and Unity keeps them
+in AssetBundles even when it strips them from the player's `.assets`
+files, so a game's bundles are the closest version-exact source.
+`managed <data-dir> --trees <out.json>` derives the script trees from the game's own assemblies (its
 `Managed/` folder) and the MonoScript objects in its top-level
 serialized files, so the trees match that specific game's layouts. For
 version-generic trees instead, `scripts/structsdump-to-trees.py`
