@@ -253,7 +253,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     finalFlush(stdout);
-    if (verify_failed_flag) std.process.exit(1);
+    if (verify_failed_flag or command_failed_flag) std.process.exit(1);
 }
 
 const Command = enum { info, extract, edit, verify, stats, find, fsb, show, diff, hash, skin, shader, hierarchy, managed };
@@ -290,8 +290,12 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
         .stats => return cmdStats(path, rest, bytes, stdout),
         .find => return cmdFind(path, rest, bytes, stdout),
         .fsb => return cmdFsb(path, rest, bytes, stdout),
-        .show => return cmdShow(path, rest, bytes, stdout, false),
-        .shader => return cmdShow(path, rest, bytes, stdout, true),
+        .show => {
+            if (!try cmdShow(path, rest, bytes, stdout, false)) command_failed_flag = true;
+        },
+        .shader => {
+            if (!try cmdShow(path, rest, bytes, stdout, true)) command_failed_flag = true;
+        },
         .diff => return cmdDiff(path, rest, bytes, stdout),
         .hash => return cmdHash(path, rest, bytes, stdout),
         .skin => return cmdSkin(path, rest, bytes, stdout),
@@ -6804,14 +6808,14 @@ fn parseSelector(text: []const u8) !Selector {
 /// without a type tree). Complementing `find` and `edit`; recurses into
 /// bundle/webfile nodes. `<path-id>` may be `node:path-id` to target a
 /// specific container entry.
-fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer, shader_only: bool) !void {
+fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer, shader_only: bool) !bool {
     if (rest.len < 1) {
         try stdout.print("unityz: show needs: <path-id>\n", .{});
-        return;
+        return false;
     }
     const sel = parseSelector(rest[0]) catch {
         try stdout.print("unityz: invalid path id '{s}'\n", .{rest[0]});
-        return;
+        return false;
     };
     var raw = false;
     var trees_path: ?[]const u8 = null;
@@ -6824,7 +6828,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             i += 1;
         } else {
             try stdout.print("unityz: unknown show option '{s}'\n", .{rest[i]});
-            return;
+            return false;
         }
     }
 
@@ -6834,81 +6838,118 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
 
     var found = false;
+    var failed = false;
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
                 try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
-                return;
+                return false;
             };
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 if (sel.node) |sn| {
                     if (!std.mem.eql(u8, n.path, sn)) continue;
                 }
-                if (try showSerializedBytes(arena, n.data, sel.path_id, raw, shader_only, stdout, basename(n.path), injected)) found = true;
+                mergeShowResult(try showSerializedBytes(arena, n.data, sel.path_id, raw, shader_only, stdout, basename(n.path), injected), &found, &failed);
             }
         },
         .webfile => {
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
                 try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-                return;
+                return false;
             };
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
                 if (sel.node) |sn| {
                     if (!std.mem.eql(u8, e.path, sn)) continue;
                 }
-                if (try showSerializedBytes(arena, e.data, sel.path_id, raw, shader_only, stdout, basename(e.path), injected)) found = true;
+                mergeShowResult(try showSerializedBytes(arena, e.data, sel.path_id, raw, shader_only, stdout, basename(e.path), injected), &found, &failed);
             }
         },
         .serialized => {
             if (sel.node != null) {
                 try stdout.print("unityz: node selector not valid for a serialized file\n", .{});
-                return;
+                return false;
             }
-            found = try showSerializedBytes(arena, bytes, sel.path_id, raw, shader_only, stdout, basename(path), injected);
+            mergeShowResult(try showSerializedBytes(arena, bytes, sel.path_id, raw, shader_only, stdout, basename(path), injected), &found, &failed);
         },
         else => {
             try stdout.print("{s}: show requires a serialized file, bundle, or webfile\n", .{path});
+            return false;
         },
     }
-    if (!found) try stdout.print("object {d} not found\n", .{sel.path_id});
+    if (!found) {
+        try stdout.print("object {d} not found\n", .{sel.path_id});
+        return false;
+    }
+    return !failed;
 }
 
-/// Prints the object with the given path id as JSON, or as a hex dump
-/// with `raw`; true when found. A Shader (class 48) object additionally
-/// carries a decoded `shaderBlob` field describing its sub-program records;
-/// with `shader_only`, non-Shader objects are reported as not found.
-fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, raw: bool, shader_only: bool, stdout: *Io.Writer, own_name: []const u8, injected: ?*const InjectedTrees) !bool {
+const ShowResult = enum { not_found, shown, failed };
+
+fn mergeShowResult(result: ShowResult, found: *bool, failed: *bool) void {
+    switch (result) {
+        .not_found => {},
+        .shown => found.* = true,
+        .failed => {
+            found.* = true;
+            failed.* = true;
+        },
+    }
+}
+
+/// Prints the object with the given path id as JSON, or as a hex dump with
+/// `raw`, and distinguishes shown, absent, and failed objects. A Shader (class
+/// 48) object additionally carries a decoded `shaderBlob` field describing its
+/// sub-program records; with `shader_only`, non-Shader objects are not found.
+fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, raw: bool, shader_only: bool, stdout: *Io.Writer, own_name: []const u8, injected: ?*const InjectedTrees) !ShowResult {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
-        return false;
+        return .failed;
     };
     for (sf.objects) |*o| {
         if (o.path_id != path_id) continue;
         if (raw) {
-            const data = sf.objectData(o) orelse return false;
+            const data = sf.objectData(o) orelse {
+                try stdout.print("object {d}: serialized data range is invalid\n", .{o.path_id});
+                return .failed;
+            };
             try stdout.print("object {d}: {d} bytes\n", .{ o.path_id, data.len });
             try dumpHex(data, stdout);
-            return true;
+            return .shown;
         }
-        if (shader_only and o.class_id != 48) return false;
-        const type_index = o.type_index orelse return false;
-        if (type_index >= sf.types.len) return false;
-        const data = sf.objectData(o) orelse return false;
+        if (shader_only and o.class_id != 48) return .not_found;
+        const type_index = o.type_index orelse {
+            try stdout.print("object {d}: missing type index\n", .{o.path_id});
+            return .failed;
+        };
+        if (type_index >= sf.types.len) {
+            try stdout.print("object {d}: type index is out of range\n", .{o.path_id});
+            return .failed;
+        }
+        const data = sf.objectData(o) orelse {
+            try stdout.print("object {d}: serialized data range is invalid\n", .{o.path_id});
+            return .failed;
+        };
         var tree = sf.types[type_index].type_tree;
         if (tree.roots.len == 0) {
             if (injected) |inj| {
                 if (injectedTreeFor(arena, inj, &sf, own_name, o.class_id, data)) |it| {
                     tree = it.*;
-                } else return false;
-            } else return false;
+                } else {
+                    try stdout.print("object {d}: no matching type tree; supply --trees for JSON or use --raw\n", .{o.path_id});
+                    return .failed;
+                }
+            } else {
+                try stdout.print("object {d}: no type tree; supply --trees for JSON or use --raw\n", .{o.path_id});
+                return .failed;
+            }
         }
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
         const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch |err| {
             try stdout.print("object {d}: read failed: {s}\n", .{ o.path_id, @errorName(err) });
-            return true;
+            return .failed;
         };
         if (o.class_id == 48) {
             if (try unityz.shader.decodeShader(arena, v)) |sb| {
@@ -6926,14 +6967,14 @@ fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64
                     try stdout.writeAll(base);
                     try stdout.print("\n", .{});
                 }
-                return true;
+                return .shown;
             }
         }
         try unityz.value.jsonWrite(v, stdout);
         try stdout.print("\n", .{});
-        return true;
+        return .shown;
     }
-    return false;
+    return .not_found;
 }
 
 /// Prints `data` as a 16-byte-per-line hex dump with an ASCII gutter.
@@ -9146,6 +9187,41 @@ test "info rejects an unrecognized file instead of printing a successful diagnos
         cmdInfo("broken.bin", "not a Unity asset", false, false, true, &writer.writer),
     );
     try std.testing.expectEqual(0, output.items.len);
+}
+
+test "show failures set command status while a raw object succeeds" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const sf_bytes = try typelessMonoFixture(arena, try monoScriptPayload(arena));
+    defer command_failed_flag = false;
+
+    command_failed_flag = false;
+    var missing: std.ArrayList(u8) = .empty;
+    var missing_writer = std.Io.Writer.Allocating.fromArrayList(arena, &missing);
+    try runCommand(.show, "typeless.assets", &.{ "999", "--raw" }, sf_bytes, &missing_writer.writer);
+    try missing_writer.writer.flush();
+    try std.testing.expect(command_failed_flag);
+    try std.testing.expect(std.mem.indexOf(u8, missing_writer.toArrayList().items, "object 999 not found") != null);
+
+    command_failed_flag = false;
+    var typeless: std.ArrayList(u8) = .empty;
+    var typeless_writer = std.Io.Writer.Allocating.fromArrayList(arena, &typeless);
+    try runCommand(.show, "typeless.assets", &.{"1"}, sf_bytes, &typeless_writer.writer);
+    try typeless_writer.writer.flush();
+    try std.testing.expect(command_failed_flag);
+    const typeless_output = typeless_writer.toArrayList().items;
+    try std.testing.expect(std.mem.indexOf(u8, typeless_output, "no type tree") != null);
+    try std.testing.expect(std.mem.indexOf(u8, typeless_output, "--trees") != null);
+    try std.testing.expect(std.mem.indexOf(u8, typeless_output, "--raw") != null);
+
+    command_failed_flag = false;
+    var raw: std.ArrayList(u8) = .empty;
+    var raw_writer = std.Io.Writer.Allocating.fromArrayList(arena, &raw);
+    try runCommand(.show, "typeless.assets", &.{ "1", "--raw" }, sf_bytes, &raw_writer.writer);
+    try raw_writer.writer.flush();
+    try std.testing.expect(!command_failed_flag);
+    try std.testing.expect(std.mem.indexOf(u8, raw_writer.toArrayList().items, "object 1:") != null);
 }
 
 test "writeObjFloat matches Python's %.9g" {
