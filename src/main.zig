@@ -52,10 +52,10 @@ const usage =
     \\                  --exact for a case-sensitive whole-name match;
     \\                  --any to match any string field, not just m_Name;
     \\                  --json for a machine-readable array)
-    \\  fsb <path>     Decode a raw FSB5 audio bank (as carved from FMOD
-    \\                 .bank files) to playable WAV/OGG per sample, plus a
-    \\                 bank.json metadata sidecar (--outdir <dir> to write
-    \\                 into; pure-Zig decode, no external tools)
+    \\  fsb <path>     Inspect or decode a raw FSB5 audio bank (as carved
+    \\                 from FMOD .bank files); --json validates every sample
+    \\                 in memory without writing, while --outdir <dir>
+    \\                 writes playable WAV/OGG plus bank.json (pure Zig)
     \\  show <path> <id> Print one object as JSON
     \\                 (--raw for a hex dump of its serialized bytes;
     \\                  <id> may be node:path-id to target a container entry;
@@ -289,7 +289,9 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
         .verify => return cmdVerify(path, rest, bytes, stdout),
         .stats => return cmdStats(path, rest, bytes, stdout),
         .find => return cmdFind(path, rest, bytes, stdout),
-        .fsb => return cmdFsb(path, rest, bytes, stdout),
+        .fsb => {
+            if (!try cmdFsb(path, rest, bytes, stdout)) command_failed_flag = true;
+        },
         .show => {
             if (!try cmdShow(path, rest, bytes, stdout, false)) command_failed_flag = true;
         },
@@ -1213,55 +1215,96 @@ fn wavPcm16(arena: std.mem.Allocator, pcm: []const u8, channels: u16, rate: u32,
     return wav_buf.items;
 }
 
+const FsbMetadata = struct { json: []u8, valid: bool };
+
+fn fsbSampleDecodes(audio: []const u8, bank: unityz.fsb5.Bank, sample: unityz.fsb5.Sample) bool {
+    const allocator = std.heap.page_allocator;
+    if (unityz.audio.decodable(bank.mode)) {
+        const pcm = unityz.audio.decodeSample(allocator, audio, bank.data_start, sample, bank.mode) catch return false;
+        allocator.free(pcm);
+        return true;
+    }
+    if (bank.mode == 15) {
+        const rebuilt = unityz.vorbis.rebuildOgg(allocator, audio, bank.data_start, sample) catch return false;
+        if (rebuilt) |ogg| {
+            allocator.free(ogg);
+            return true;
+        }
+    }
+    return false;
+}
+
 /// FSB5 bank metadata as a JSON document, or null when the data is not a
-/// well-formed FSB5 bank. Beyond UnityPy: its export converts the audio
-/// but never reports loop points or the header fields.
-fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8) !?[]u8 {
+/// well-formed FSB5 bank. With `validate_audio`, each sample is decoded or
+/// rebuilt in memory and the result is reported without writing files.
+/// Beyond UnityPy: its export converts the audio but never reports loop points
+/// or the header fields.
+fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8, validate_audio: bool) !?FsbMetadata {
     const bank = try unityz.fsb5.parse(arena, audio) orelse return null;
     var out = std.ArrayList(u8).empty;
     var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
     const w = &aw.writer;
     try w.print("{{\"version\":", .{});
-    try w.print("{d},\"mode\":{d},\"codec\":\"{s}\",\"samples\":[", .{ bank.version, bank.mode, unityz.audio.modeName(bank.mode) });
+    try w.print("{d},\"mode\":{d},\"codec\":\"{s}\",\"sampleCount\":{d},\"samples\":[", .{ bank.version, bank.mode, unityz.audio.modeName(bank.mode), bank.num_samples });
+    var valid = true;
     for (bank.samples, 0..) |s, i| {
         if (i != 0) try w.writeByte(',');
         const dur_ms: u64 = if (s.frequency != 0) @as(u64, s.sample_count) * 1000 / s.frequency else 0;
-        try w.print("{{\"name\":\"{s}\",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d},\"durationMs\":{d}", .{ s.name, s.frequency, s.channels, s.data_offset, s.sample_count, dur_ms });
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, s.name);
+        try w.print(",\"frequency\":{d},\"channels\":{d},\"dataOffset\":{d},\"samples\":{d},\"durationMs\":{d}", .{ s.frequency, s.channels, s.data_offset, s.sample_count, dur_ms });
         if (s.loop_start) |ls| {
             try w.print(",\"loopStart\":{d},\"loopEnd\":{d}", .{ ls, s.loop_end orelse 0 });
         }
         if (s.vorbis_crc) |crc| {
-            try w.print(",\"setupCrc\":{d}", .{crc});
+            try w.print(",\"setupCrc\":{d},\"setupKnown\":{s}", .{ crc, if (unityz.vorbis.setupKnown(crc)) "true" else "false" });
+        }
+        if (validate_audio) {
+            const decodable = fsbSampleDecodes(audio, bank, s);
+            valid = valid and decodable;
+            try w.print(",\"decodable\":{s}", .{if (decodable) "true" else "false"});
         }
         try w.writeByte('}');
     }
-    try w.writeAll("]}");
+    if (validate_audio) {
+        try w.print("],\"valid\":{s}}}", .{if (valid) "true" else "false"});
+    } else {
+        try w.writeAll("]}");
+    }
     var list = aw.toArrayList();
-    return try list.toOwnedSlice(arena);
+    return .{ .json = try list.toOwnedSlice(arena), .valid = valid };
 }
 
-/// `fsb <path> [--outdir <dir>]` — decode a raw FSB5 audio bank (as found
-/// inside FMOD `.bank` files) to playable WAV/OGG per sample, plus a
-/// metadata JSON. No external tools: PCM8/16/24/32/FLOAT and the ADPCM
-/// codecs decode in pure Zig; Vorbis banks (mode 15) are remuxed to Ogg
-/// from the crc-keyed setup-header table.
-fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+/// `fsb <path> --json` validates every sample in memory and prints metadata
+/// without writing. `fsb <path> [--outdir <dir>]` decodes a raw FSB5 bank
+/// (as found inside FMOD `.bank` files) to playable WAV/OGG per sample, plus
+/// a metadata JSON. No external tools: PCM8/16/24/32/FLOAT and the ADPCM
+/// codecs decode in pure Zig; Vorbis banks (mode 15) are remuxed to Ogg from
+/// the crc-keyed setup-header table.
+fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !bool {
     var outdir: ?[]const u8 = null;
+    var json = false;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--outdir") and i + 1 < rest.len) {
             outdir = rest[i + 1];
             i += 1;
+        } else if (std.mem.eql(u8, rest[i], "--json")) {
+            json = true;
         } else {
             try stdout.print("unityz: unknown fsb option '{s}'\n", .{rest[i]});
-            return;
+            return false;
         }
+    }
+    if (json and outdir != null) {
+        try stdout.print("unityz: fsb --json is read-only and does not accept --outdir\n", .{});
+        return false;
     }
     if (outdir) |d| {
         const io = io_global.io;
         ensureDirPath(io, d) catch |err| {
             try stdout.print("unityz: {s}: {s}\n", .{ d, @errorName(err) });
-            return;
+            return false;
         };
     }
     extract_outdir = outdir;
@@ -1272,15 +1315,21 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
 
     const bank = unityz.fsb5.parse(arena, bytes) catch |err| {
         try stdout.print("unityz: {s}: FSB5 parse failed: {s}\n", .{ path, @errorName(err) });
-        return;
+        return false;
     } orelse {
         try stdout.print("unityz: {s}: not an FSB5 bank\n", .{path});
-        return;
+        return false;
     };
+    if (json) {
+        const metadata = (try fsb5MetadataJson(arena, bytes, true)).?;
+        try stdout.writeAll(metadata.json);
+        try stdout.writeByte('\n');
+        return metadata.valid;
+    }
     try stdout.print("{s}: FSB5 v{d}, {d} sample(s), {s}\n", .{ path, bank.version, bank.num_samples, unityz.audio.modeName(bank.mode) });
 
-    if (try fsb5MetadataJson(arena, bytes)) |meta| {
-        try extractFile(null, "bank.json", meta);
+    if (try fsb5MetadataJson(arena, bytes, false)) |meta| {
+        try extractFile(null, "bank.json", meta.json);
         try stdout.print("extracted bank.json (metadata)\n", .{});
     }
 
@@ -1304,6 +1353,7 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
             decoded += 1;
         }
         try stdout.print("extracted {d} wav sample(s)\n", .{decoded});
+        return decoded == bank.samples.len;
     } else if (bank.mode == 15) {
         var oggd: usize = 0;
         for (bank.samples, 0..) |s, si| {
@@ -1326,9 +1376,11 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
             oggd += 1;
         }
         try stdout.print("extracted {d} ogg sample(s)\n", .{oggd});
+        return oggd == bank.samples.len;
     } else {
         try stdout.print("bank codec {s} is not decodable in pure Zig; kept as .fsb\n", .{unityz.audio.modeName(bank.mode)});
         try extractFile(null, "bank.fsb", bytes);
+        return false;
     }
 }
 
@@ -1858,10 +1910,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 // loop points, and format - UnityPy's export never surfaces
                 // this (it only converts the audio itself).
                 if (std.mem.startsWith(u8, audio, "FSB5")) {
-                    if (try fsb5MetadataJson(arena, audio)) |meta| {
+                    if (try fsb5MetadataJson(arena, audio, false)) |meta| {
                         var meta_name_buf: [160]u8 = undefined;
                         const meta_name = try std.fmt.bufPrint(&meta_name_buf, "{s}.json", .{name});
-                        try extractFile(subdir, meta_name, meta);
+                        try extractFile(subdir, meta_name, meta.json);
                     }
                     // Codecs that decode in pure Zig (PCM8/16/24/32/FLOAT,
                     // IMA ADPCM) also export as a playable WAV, no external
@@ -9222,6 +9274,58 @@ test "show failures set command status while a raw object succeeds" {
     try raw_writer.writer.flush();
     try std.testing.expect(!command_failed_flag);
     try std.testing.expect(std.mem.indexOf(u8, raw_writer.toArrayList().items, "object 1:") != null);
+}
+
+fn testPcm16Fsb() [72]u8 {
+    var blob = [_]u8{0} ** 72;
+    @memcpy(blob[0..4], "FSB5");
+    std.mem.writeInt(u32, blob[4..8], 1, .little); // version
+    std.mem.writeInt(u32, blob[8..12], 1, .little); // one sample
+    std.mem.writeInt(u32, blob[12..16], 8, .little); // sample headers
+    std.mem.writeInt(u32, blob[20..24], 4, .little); // sample data
+    std.mem.writeInt(u32, blob[24..28], 2, .little); // PCM16
+    const raw = (@as(u64, 8) << 1) | (@as(u64, 2) << 34); // 44100 Hz, mono, two samples
+    std.mem.writeInt(u64, blob[60..68], raw, .little);
+    std.mem.writeInt(i16, blob[68..70], -1234, .little);
+    std.mem.writeInt(i16, blob[70..72], 2345, .little);
+    return blob;
+}
+
+test "fsb json validates samples read-only and sets command failure status" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const bank = testPcm16Fsb();
+    defer command_failed_flag = false;
+
+    command_failed_flag = false;
+    var valid: std.ArrayList(u8) = .empty;
+    var valid_writer = std.Io.Writer.Allocating.fromArrayList(arena, &valid);
+    try runCommand(.fsb, "valid.fsb", &.{"--json"}, &bank, &valid_writer.writer);
+    try valid_writer.writer.flush();
+    try std.testing.expect(!command_failed_flag);
+    const valid_json = valid_writer.toArrayList().items;
+    try std.testing.expect(std.mem.indexOf(u8, valid_json, "\"sampleCount\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, valid_json, "\"decodable\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, valid_json, "\"valid\":true") != null);
+
+    command_failed_flag = false;
+    var corrupt: std.ArrayList(u8) = .empty;
+    var corrupt_writer = std.Io.Writer.Allocating.fromArrayList(arena, &corrupt);
+    try runCommand(.fsb, "truncated-data.fsb", &.{"--json"}, bank[0..68], &corrupt_writer.writer);
+    try corrupt_writer.writer.flush();
+    try std.testing.expect(command_failed_flag);
+    const corrupt_json = corrupt_writer.toArrayList().items;
+    try std.testing.expect(std.mem.indexOf(u8, corrupt_json, "\"decodable\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, corrupt_json, "\"valid\":false") != null);
+
+    command_failed_flag = false;
+    var invalid: std.ArrayList(u8) = .empty;
+    var invalid_writer = std.Io.Writer.Allocating.fromArrayList(arena, &invalid);
+    try runCommand(.fsb, "not-a-bank.fsb", &.{"--json"}, "not an FSB5 bank", &invalid_writer.writer);
+    try invalid_writer.writer.flush();
+    try std.testing.expect(command_failed_flag);
+    try std.testing.expect(std.mem.indexOf(u8, invalid_writer.toArrayList().items, "not an FSB5 bank") != null);
 }
 
 test "writeObjFloat matches Python's %.9g" {

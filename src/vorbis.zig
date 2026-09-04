@@ -59,6 +59,16 @@ fn setupFor(crc: u32) ?struct { header: []const u8, seek_bit: u32 } {
     return .{ .header = blob[off + 12 ..][0..len], .seek_bit = seek_bit };
 }
 
+/// Whether the embedded FMOD setup-header table can reconstruct `crc`.
+pub fn setupKnown(crc: u32) bool {
+    return setupFor(crc) != null;
+}
+
+test "setupKnown distinguishes catalogued setup headers" {
+    try std.testing.expect(setupKnown(headers.crcs[0]));
+    try std.testing.expect(!setupKnown(0));
+}
+
 /// MSB-first bit reader over a byte slice.
 const BitReader = struct {
     data: []const u8,
