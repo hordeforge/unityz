@@ -19,6 +19,16 @@ Nothing in flight.
 
 ## Done
 
+- CLI automation contract (PRs #139-#144, 2026-09-04): usage errors exit 2
+  and every read, decode, or check failure exits 1, always with the
+  diagnostic on stderr and nothing on stdout; batch `--json` wraps each
+  file's documents as `{"file":...,"results":[...]}`; batch `extract`
+  writes each file under its own subdirectory; directory `diff` compares
+  every matched file (it stopped after the first) and runs `--fields`;
+  `diff --trees` decodes typeless Mono objects; `verify --path-id` on a
+  missing object fails; `unityz --version` is derived from build.zig.zon
+  so it cannot drift from the package version. See the "Batch mode" and
+  "Exit codes" sections of [features.md](features.md).
 - Managed trees and modern mesh export (PRs #110-#111, #115-#116):
   `managed --trees` auto-builds MonoBehaviour type trees from a game's
   assemblies (Raft, Stranded Deep, Green Hell), honoring
