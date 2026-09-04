@@ -59,7 +59,9 @@ const usage =
     \\  fsb <path>     Inspect or decode a raw FSB5 audio bank (as carved
     \\                 from FMOD .bank files); --json validates every sample
     \\                 in memory without writing, while --outdir <dir>
-    \\                 writes playable WAV/OGG plus bank.json (pure Zig)
+    \\                 writes playable WAV/OGG plus bank.json (pure Zig;
+    \\                 a directory batch writes each bank under
+    \\                 <outdir>/<file name>/)
     \\  show <path> <id> Print one object as JSON
     \\                 (--raw for a hex dump of its serialized bytes;
     \\                  --json is accepted as a no-op, the output is JSON;
@@ -1352,15 +1354,6 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
     if (json and outdir != null) {
         return usageError("unityz: fsb --json is read-only and does not accept --outdir\n", .{});
     }
-    if (outdir) |d| {
-        const io = io_global.io;
-        ensureDirPath(io, d) catch |err| {
-            failure("unityz: {s}: {s}\n", .{ d, @errorName(err) });
-            return false;
-        };
-    }
-    extract_outdir = outdir;
-
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1378,6 +1371,17 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
         try stdout.writeByte('\n');
         return metadata.valid;
     }
+    // A directory batch writes each bank under its own subdirectory: every
+    // bank emits a bank.json and sample-named files, which would otherwise
+    // overwrite each other.
+    if (batch_mode) outdir = try std.fmt.allocPrint(arena, "{s}/{s}", .{ outdir orelse ".", basename(path) });
+    if (outdir) |d| {
+        ensureDirPath(io_global.io, d) catch |err| {
+            failure("unityz: {s}: {s}\n", .{ d, @errorName(err) });
+            return false;
+        };
+    }
+    extract_outdir = outdir;
     try stdout.print("{s}: FSB5 v{d}, {d} sample(s), {s}\n", .{ path, bank.version, bank.num_samples, unityz.audio.modeName(bank.mode) });
 
     if (try fsb5MetadataJson(arena, bytes, false)) |meta| {

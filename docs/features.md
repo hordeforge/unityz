@@ -273,8 +273,8 @@ SerializedFile), and a non-JSON line is kept as a JSON string. A file the
 command could not read or decode adds `"error":"<name>"` with the same
 diagnostic on stderr; the batch continues and exits 1 at the end.
 
-`extract` over a directory writes each file's output under its own
-`<outdir>/<file name>/` subdirectory (or `./<file name>/` without
+`extract` and `fsb` over a directory write each file's output under its
+own `<outdir>/<file name>/` subdirectory (or `./<file name>/` without
 `--outdir`). Bundles routinely share node names such as `CAB-...`, so a
 flat layout would let one file overwrite another's exports and manifest.
 
