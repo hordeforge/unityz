@@ -288,6 +288,10 @@ own `<outdir>/<file name>/` subdirectory (or `./<file name>/` without
 `--outdir`). Bundles routinely share node names such as `CAB-...`, so a
 flat layout would let one file overwrite another's exports and manifest.
 
+`edit --out` and `trees --out` name one output file, so over a directory
+they are usage errors (exit 2): a batch `edit` rewrites each file in place,
+and a batch `trees` prints one wrapped JSON line per file.
+
 A file unityz does not recognize as a Unity asset (not a SerializedFile,
 bundle, or WebFile) is an error for every command, so a stray file in a
 data directory shows up as a failure rather than as an empty success.

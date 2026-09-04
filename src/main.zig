@@ -8173,6 +8173,9 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var i: usize = if (single_form) 1 else 0;
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--out") and i + 1 < rest.len) {
+            // One output file cannot hold a directory's worth of rewritten files;
+            // a batch edits in place instead.
+            if (batch_mode) return usageError("unityz: edit --out names one file; over a directory, edit in place\n", .{});
             out_path = rest[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, rest[i], "--patch") and i + 1 < rest.len) {
@@ -8673,6 +8676,7 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--out") and i + 1 < rest.len) {
+            if (batch_mode) return usageError("unityz: trees --out names one file; over a directory, read the per-file stdout lines\n", .{});
             out_path = rest[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, rest[i], "--json")) {
