@@ -40,7 +40,8 @@ shellcheck scripts/*.sh
 - **Look inside any Unity asset** - open a bundle, `.assets` file, or
   sidecar and see its containers, objects, and type trees (`info`, `show`).
 - **Extract everything** - textures and sprites as images, meshes as OBJ
-  and glTF/GLB (skinned rigs included),
+  and glTF/GLB (skinned rigs included), straight out of a bundle or a
+  bare `.assets` file,
   audio as playable files (OGG/FSB/WAV), video cutscenes as MP4, terrain
   heightmaps as PGM, readable ShaderLab for shaders, fonts, and structured
   JSON for most other classes (animations, animator controllers, mixers,
@@ -59,20 +60,25 @@ shellcheck scripts/*.sh
   MonoBehaviour's serialized fields (`--trees`, `managed`).
 
 Every command accepts a directory and processes all files in it, and
-`--json` modes cover the machine-readable commands. See
+`--json` modes cover the machine-readable commands. Over a directory,
+`--json` emits one line per file: `{"file":"<path>","results":[...]}`
+holding that file's documents, plus `"error"` when it failed. Usage errors exit 2,
+read or check failures exit 1, always with the diagnostic on stderr. See
 [docs/features.md](docs/features.md) for the full capability reference.
 
 ## Commands
 
-- `info` - what unityz can read from a file
+- `info` - what unityz can read from a file (`--objects` lists the
+  object table, `--dump` prints every object as JSON)
 - `extract` - pull out embedded assets (filters: `--class`, `--path-id`,
   `--name`, `--raw`; `--json` value trees + manifest; `--summary` dry run)
 - `edit` - change fields, patch sidecars, verify before writing
 - `verify` - byte-exact round-trip check of every object, non-zero exit
   on failure
-- `stats` - per-class sizes and duplicate-object detection
-- `find` - name/class search over objects (`--any` searches every string
-  field)
+- `stats` - per-class sizes and duplicate-object detection (`--dups`
+  prints only the duplicate report)
+- `find` - name/class search over objects (`--exact` for a whole-name
+  match, `--any` searches every string field)
 - `show` - one object as JSON, or a hex dump with `--raw`; missing or
   undecodable targets return non-zero
 - `diff` - compare two files or directories by content hash, with
@@ -87,17 +93,23 @@ Every command accepts a directory and processes all files in it, and
 - `managed` - read a Mono build's assemblies and list every
   MonoBehaviour's serialized field layout, straight from the .NET
   metadata with no runtime
+- `trees` - export the type trees embedded in a file as a `--trees` JSON
+  table (`--out <file.json>`), so a game's own AssetBundles, which keep
+  their trees, supply version-exact trees for its stripped `.assets` files
 
 ### Typeless files
 
 Mono builds strip class type trees, leaving typeless objects
 undecodable. `--trees <file.json>` supplies them, and `extract`, `show`,
-`verify`, `find`, `skin`, `hierarchy`, and `edit` all decode with the
-injected trees.
+`verify`, `find`, `skin`, `hierarchy`, `stats`, `edit`, and
+`diff --fields` all decode with the injected trees.
 
 The trees JSON shape is what `TypeTreeGeneratorAPI.get_nodes_as_json()`
-emits. unityz can build one itself: `managed <data-dir> --trees
-<out.json>` derives the script trees from the game's own assemblies (its
+emits. unityz can build one itself three ways. `trees <bundle> --out
+<out.json>` exports the trees a file already carries, and Unity keeps them
+in AssetBundles even when it strips them from the player's `.assets`
+files, so a game's bundles are the closest version-exact source.
+`managed <data-dir> --trees <out.json>` derives the script trees from the game's own assemblies (its
 `Managed/` folder) and the MonoScript objects in its top-level
 serialized files, so the trees match that specific game's layouts. For
 version-generic trees instead, `scripts/structsdump-to-trees.py`
@@ -111,8 +123,9 @@ Without trees, a typeless file reports how many objects were skipped.
 `edit` sets fields by dotted-indexed path, byte-array fields take base64
 values, `--verify` round-trip-checks the result before writing, and
 `--trees` makes typeless files editable. `edit --patch <file>` applies a
-JSON patch atomically. Edits reserialize byte-exactly; rebuilt bundles
-keep their compression.
+JSON patch atomically. An entry whose object does not exist fails the
+whole patch and nothing is written. Edits reserialize byte-exactly;
+rebuilt bundles keep their compression.
 
 ## What it is
 

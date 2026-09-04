@@ -13,6 +13,10 @@ otherwise.
 - Asset bundles: UnityFS (modern), UnityWeb / UnityRaw (legacy), WebFile
   (`UnityWebData1.0`, gzip-wrapped included), and the rare UnityArchive
   container is detected but not yet parsed (no real sample exists).
+- `info --objects` lists the object table (path id, class, offset, size,
+  name) of every SerializedFile in the input, and `info --dump` prints every
+  object decoded as one JSON line; `--objects` also adds the table to
+  `--json` output.
 - `info --json` reports the metadata of every SerializedFile embedded in a
   bundle or WebFile: its format and Unity versions, platform, endianness,
   type-tree state, counts, and present class IDs. This is distinct from the
@@ -154,9 +158,9 @@ reconstructed; malformed banks and failed extraction likewise return non-zero.
 
 Mono builds strip the class type trees from serialized files, leaving
 typeless objects undecodable. `--trees <file.json>` supplies them:
-`extract`, `show`, `verify`, `find`, `skin`, `hierarchy`, and `edit`
-decode with the injected trees, and `verify` round-trips them
-byte-exactly.
+`extract`, `show`, `verify`, `find`, `skin`, `hierarchy`, `stats`, `edit`,
+and `diff --fields` decode with the injected trees, and `verify`
+round-trips them byte-exactly.
 
 `show` returns non-zero when the requested object is absent or its value tree
 does not decode. When an object has no usable type tree, its diagnostic names
@@ -171,6 +175,16 @@ assemblies sharing a plain class name do not collide). MonoBehaviours
 resolve their script via `m_Script` against the mono-script table; other
 classes resolve by class name.
 
+`unityz trees <file> --out <out.json>` writes this shape from the trees a
+file already carries. Unity keeps type trees in AssetBundles but strips
+them from a player's serialized files, so a game's own bundles are the
+closest version-exact source of trees for its typeless `.assets`. Built-in
+classes are keyed by class name; a MonoBehaviour tree is keyed by its
+script's namespace-qualified class, resolved by following `m_Script` to a
+MonoScript object inside the same container, and listed in
+`__monoscripts__`. A MonoBehaviour whose MonoScript lives outside the file
+is skipped and counted on stderr. Without `--out` the table goes to stdout.
+
 unityz ships two generators and a merge tool for this shape. The
 preferred one is in-tree and game-specific: `unityz managed <data-dir>
 --trees <out.json>` builds the trees from the Mono build's own
@@ -184,7 +198,7 @@ trees file for that exact Unity version:
 ```bash
 curl -sL https://raw.githubusercontent.com/AssetRipper/TypeTreeDumps/main/StructsDump/release/2022.3.62f2.dump -o 2022.3.62f2.dump
 uv run scripts/structsdump-to-trees.py 2022.3.62f2.dump -o trees-2022.3.62f2.json
-./zig-out/bin/unityz extract game.unity3d --recursive --trees trees-2022.3.62f2.json
+./zig-out/bin/unityz extract game.unity3d --trees trees-2022.3.62f2.json
 ```
 
 For 2021.x TerrainData, the derived tree in
@@ -241,22 +255,73 @@ valid.
 ## Stats
 
 `stats` reports per-class sizes and duplicate-object detection, with
-`--json` for scripts. With `--trees <file.json>`, typeless Mono files also
+`--json` for scripts and `--dups` for only the duplicate report (text mode). With `--trees <file.json>`, typeless Mono files also
 get a per-script breakdown: MonoBehaviours are decoded through the injected
 trees and counted by their resolved script class name, so
 `stats <game> --trees trees.json` answers "which scripts does this game
 actually instantiate" (verified on Raft: 74 script classes across
 resources.assets alone).
 
+## Search
+
+`find <path> <substring>` matches object names case-insensitively;
+`--exact` requires a case-sensitive whole-name match, `--any` matches any
+string field rather than only `m_Name`, `--class <id>` narrows the class,
+and `--json` returns the matches as an array of `{node, path_id, class,
+name}`.
+
 ## Verification
 
 `verify` round-trips every object and checks that each streamed
-reference resolves: a `m_StreamData`/`m_Resource` range must fit inside
+reference resolves. A `--path-id` that matches no object is reported as a
+failure (exit 1), so a script cannot mistake a typo for a clean object.
+Streamed references: a `m_StreamData`/`m_Resource` range must fit inside
 the sibling sidecar node it points into, so an edit that breaks a
 reference is caught at verify time. `diff` compares files by content
 hash and optionally decodes matched objects: `--pixels` (per-channel
 pixel diffs for textures/sprites), `--audio` (streamed audio data),
 `--fields` (the exact changed field paths and values).
+Directory diffs run the same three passes on every matched file pair.
+
+## Batch mode
+
+Every command accepts a directory and runs over each regular file in it.
+Plain output streams through per file. With `--json`, each file's output
+is wrapped as one line, `{"file":"<path>","results":[<doc>, ...]}`, so a
+consumer can tell which file produced which document without depending on
+directory order. `results` holds every document the command emitted for
+that file (normally one; `hierarchy` and `info` emit one per embedded
+SerializedFile), and a non-JSON line is kept as a JSON string. A file the
+command could not read or decode adds `"error":"<name>"` with the same
+diagnostic on stderr; the batch continues and exits 1 at the end.
+
+`extract` and `fsb` over a directory write each file's output under its
+own `<outdir>/<file name>/` subdirectory (or `./<file name>/` without
+`--outdir`). Bundles routinely share node names such as `CAB-...`, so a
+flat layout would let one file overwrite another's exports and manifest.
+
+`edit --out` and `trees --out` name one output file, so over a directory
+they are usage errors (exit 2): a batch `edit` rewrites each file in place,
+and a batch `trees` prints one wrapped JSON line per file.
+
+A file unityz does not recognize as a Unity asset (not a SerializedFile,
+bundle, or WebFile) is an error for every command, so a stray file in a
+data directory shows up as a failure rather than as an empty success.
+
+## Exit codes
+
+Every command follows one contract, so scripts can branch on the status
+without parsing output:
+
+- 0: the command ran; for `verify`, `skin`, and `fsb --json` this also
+  means every check passed.
+- 1: an input could not be read or decoded, or a check failed. For `edit`
+  this covers a missing object, a bad field path or value, a failed
+  rebuild, and a `--verify` round-trip failure: nothing is written. Batch runs
+  over a directory keep going and return 1 at the end if any member failed.
+- 2: a usage error: an unknown flag, a missing argument, or a malformed
+  id. The diagnostic goes to stderr and nothing is written to stdout, so a
+  bad flag can never be mistaken for a successful machine-readable run.
 
 Whole-file evidence: the real 7DTD bundle (Unity 2022.3.62f2, fully
 typeless) extracts to 8090 files with zero decode failures (260 PNGs,
@@ -278,10 +343,10 @@ UnityArchive files; unityz detects the container.
 
 UnityPy still carries a release-indexed database of built-in engine-class type
 trees that unityz does not. UnityPy can return a requested class tree for a
-Unity version. unityz can read and reserialize trees present in a file and can
-inject trees derived from AssetRipper dumps or managed assemblies, but it does
-not ship that versioned database or expose a command to select and export one
-built-in class tree.
+Unity version. unityz can read and reserialize trees present in a file,
+export them with `trees` (from the game's own AssetBundles, which keep
+their trees), and inject trees derived from AssetRipper dumps or managed
+assemblies, but it does not ship that versioned database.
 
 That missing database affects two routes. A stripped external SerializedFile
 needs caller-supplied `--trees` for decoded JSON, while UnityPy can fall back to

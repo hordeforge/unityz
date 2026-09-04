@@ -20,9 +20,8 @@
 
 const std = @import("std");
 
-/// unityz version, sourced from the package manifest by `build.zig`.
-pub const version = std.SemanticVersion.parse(@import("package_options").version) catch
-    @compileError("build.zig.zon contains an invalid semantic version");
+/// unityz version, parsed from `build.zig.zon` at build time.
+pub const version: std.SemanticVersion = std.SemanticVersion.parse(@import("build_options").version) catch unreachable;
 
 /// Endian-aware binary reader/writer primitives.
 pub const streams = @import("streams.zig");
