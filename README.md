@@ -82,7 +82,8 @@ Every command accepts a directory and processes all files in it, and
 - `skin` - whether every Shader's vertex stage applies bone matrices
 - `hierarchy` - the GameObject/Transform tree of a scene
 - `shader` - a Shader's decoded compiled sub-program blob table
-- `fsb` - decode a raw FSB5 audio bank to playable WAV/OGG
+- `fsb` - inspect a raw FSB5 bank with read-only `--json`, or decode it
+  to playable WAV/OGG with `--outdir`
 - `managed` - read a Mono build's assemblies and list every
   MonoBehaviour's serialized field layout, straight from the .NET
   metadata with no runtime

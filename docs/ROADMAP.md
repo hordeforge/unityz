@@ -43,8 +43,9 @@ Nothing in flight.
   matched objects' decoded pixels, audio streams, and exact field paths;
   `extract` gains TGA/BMP/raw RGBA output, `--name` filtering, and
   structured JSON exports; FSB5 audio decodes to WAV in pure Zig and
-  Vorbis banks remux to a playable Ogg; `find --any`, `info --objects`,
-  and a `hierarchy` command.
+  Vorbis banks remux to a playable Ogg; `fsb --json` validates every sample
+  without writing and returns non-zero on failure; `find --any`,
+  `info --objects`, and a `hierarchy` command.
 - Multi-stream mesh export: Meshes whose vertex channels spread over
   `m_Streams_0_..3_` export an OBJ instead of silently nothing.
 - Serialized format 4 parses and rewrites byte-exactly.
