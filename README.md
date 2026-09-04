@@ -59,7 +59,8 @@ shellcheck scripts/*.sh
   MonoBehaviour's serialized fields (`--trees`, `managed`).
 
 Every command accepts a directory and processes all files in it, and
-`--json` modes cover the machine-readable commands. See
+`--json` modes cover the machine-readable commands. Usage errors exit 2,
+read or check failures exit 1, always with the diagnostic on stderr. See
 [docs/features.md](docs/features.md) for the full capability reference.
 
 ## Commands
