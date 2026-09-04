@@ -1,0 +1,121 @@
+name: release
+
+# Tag-driven releases (hordeforge/.github REPOSITORY_STANDARDS.md, §8):
+# pushing vX.Y.Z gates the tag against build.zig.zon, creates a GitHub
+# Release whose notes are that version's CHANGELOG.md section, then every
+# platform CI already exercises re-runs the suite on the tagged tree, builds
+# the CLI in ReleaseSafe, and uploads its own tarball plus checksum. Only
+# platforms with a runner here are published: a platform absent from CI is
+# asserted, never proven.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      # Actions pinned by full commit SHA (tag in comment) so a moved tag or a
+      # compromised major-version release cannot inject code into the pipeline.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The version has one canonical home, build.zig.zon; `unityz --version`
+      # reads it from there at build time. A tag that disagrees fails here
+      # instead of publishing a binary that reports a version nobody tagged.
+      - name: Check the tag matches build.zig.zon
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          case "$TAG" in v*) ;; *) echo "ERROR: tag '$TAG' does not start with 'v'" >&2; exit 1;; esac
+          SHIPPED="$(sed -n 's/^ *\.version = "\([^"]*\)",.*/\1/p' build.zig.zon | head -1)"
+          if [ -z "$SHIPPED" ]; then
+            echo "ERROR: no .version = \"...\" found in build.zig.zon" >&2
+            exit 1
+          fi
+          if [ "$SHIPPED" != "${TAG#v}" ]; then
+            echo "ERROR: tag $TAG but build.zig.zon ships $SHIPPED; make them match before tagging" >&2
+            exit 1
+          fi
+          echo "ok: tag $TAG matches build.zig.zon ($SHIPPED)"
+
+      # Release notes are this version's own CHANGELOG.md section, so a
+      # release cannot ship without its entry and the notes can never be
+      # boilerplate. A tag with no changelog section fails here.
+      - name: Create the GitHub Release from the changelog section
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          NOTES="$(awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md)"
+          if [ -z "$NOTES" ]; then
+            echo "ERROR: CHANGELOG.md has no ## [$VERSION] section; add one before tagging $TAG" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" --json id -q .id >/dev/null 2>&1; then
+            echo "release $TAG already exists; binaries are re-uploaded below"
+          else
+            gh release create "$TAG" --title "unityz ${VERSION}" --notes "$NOTES"
+          fi
+
+  publish:
+    needs: release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux
+          - os: macos-latest
+            target: aarch64-macos
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - name: Test the tagged tree
+        run: zig build test
+      - name: Build the CLI in ReleaseSafe
+        run: zig build -Doptimize=ReleaseSafe --prefix "$RUNNER_TEMP/unityz"
+      # The binary proves its own version before it ships: what it reports
+      # must be the tag, or the tag gate above was wrong about the source.
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          BIN="$RUNNER_TEMP/unityz/bin/unityz"
+          REPORTED="$("$BIN" --version | awk '{print $2}')"
+          if [ "$REPORTED" != "$VERSION" ]; then
+            echo "ERROR: built binary reports $REPORTED, tag says $VERSION" >&2
+            exit 1
+          fi
+          NAME="unityz-${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/$NAME"
+          cp "$BIN" LICENSE NOTICE README.md CHANGELOG.md "dist/$NAME/"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+          cat "dist/$NAME.tar.gz.sha256"
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/*.tar.gz dist/*.sha256 --clobber
