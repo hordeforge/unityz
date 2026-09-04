@@ -68,15 +68,17 @@ read or check failures exit 1, always with the diagnostic on stderr. See
 
 ## Commands
 
-- `info` - what unityz can read from a file
+- `info` - what unityz can read from a file (`--objects` lists the
+  object table, `--dump` prints every object as JSON)
 - `extract` - pull out embedded assets (filters: `--class`, `--path-id`,
   `--name`, `--raw`; `--json` value trees + manifest; `--summary` dry run)
 - `edit` - change fields, patch sidecars, verify before writing
 - `verify` - byte-exact round-trip check of every object, non-zero exit
   on failure
-- `stats` - per-class sizes and duplicate-object detection
-- `find` - name/class search over objects (`--any` searches every string
-  field)
+- `stats` - per-class sizes and duplicate-object detection (`--dups`
+  prints only the duplicate report)
+- `find` - name/class search over objects (`--exact` for a whole-name
+  match, `--any` searches every string field)
 - `show` - one object as JSON, or a hex dump with `--raw`; missing or
   undecodable targets return non-zero
 - `diff` - compare two files or directories by content hash, with
