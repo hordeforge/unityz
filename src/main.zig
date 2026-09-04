@@ -225,16 +225,18 @@ pub fn main(init: std.process.Init) !void {
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, full, batch_arena, .unlimited) catch |err| {
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 try stderr.flush();
+                command_failed_flag = true;
                 continue;
             };
             runCommand(command, full, rest, bytes, stdout) catch |err| {
                 if (err == error.WriteFailed) std.process.exit(141);
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 try stderr.flush();
+                command_failed_flag = true;
             };
         }
         finalFlush(stdout);
-        if (verify_failed_flag) std.process.exit(1);
+        if (verify_failed_flag or command_failed_flag) std.process.exit(1);
         return;
     }
 
@@ -277,8 +279,7 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
                 } else if (std.mem.eql(u8, arg, "--json")) {
                     json = true;
                 } else {
-                    try stdout.print("unityz: unknown info option '{s}'\n", .{arg});
-                    return;
+                    return error.InvalidOption;
                 }
             }
             return cmdInfo(path, bytes, dump, objects, json, stdout);
@@ -306,6 +307,11 @@ const io_global = struct {
 /// Set by `cmdVerify` when any object fails; main() exits non-zero on it
 /// so batch runs keep going and still report failure at the end.
 var verify_failed_flag: bool = false;
+
+/// Set when a batch member cannot be read or a command rejects it. Batch mode
+/// keeps reporting the remaining files, then exits non-zero so diagnostics do
+/// not masquerade as successful machine-readable output.
+var command_failed_flag: bool = false;
 
 /// Output directory for extracted files (`extract --outdir <dir>`);
 /// created when missing.
@@ -2020,7 +2026,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 extracted += 1;
                 // GLB (glTF 2.0 binary) alongside the OBJ: self-contained
                 // and material/UV/bone-friendly for modern pipelines.
-                if (writeMeshGlb(arena, &sf, v, &mesh)) |g| {
+                if (writeMeshGlb(arena, &sf, v, &mesh, null)) |g| {
                     if (g.len != 0) {
                         var glb_buf: [160]u8 = undefined;
                         const glb_name = sanitizeComponent(try std.fmt.bufPrint(&glb_buf, "{s}.glb", .{name[0 .. name.len - 4]}));
@@ -2031,6 +2037,59 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 } else |err| {
                     try stdout.print("  mesh {d}: GLB conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
+                }
+            },
+            137 => { // SkinnedMeshRenderer -> character GLB with named armature
+                // A skinned character is the renderer, its Mesh, and the
+                // m_Bones Transform chain. Resolve the mesh and name each
+                // joint from its Transform's GameObject, so the GLB's
+                // skeleton carries real bone names (the per-Mesh export at
+                // class 43 keeps generic Bone0..N joints).
+                const renderer_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const mesh_path = if (unityz.classes.fieldOf(v, "m_Mesh")) |mv| pptrPathId(mv) orelse null else null;
+                if (mesh_path == null or mesh_path.? == 0) continue;
+                const mval = readObjectValue(arena, &sf, mesh_path.?, basename(path), injected) orelse continue;
+                const mesh = unityz.classes.Mesh.fromValue(mval);
+                var names: std.ArrayList([]const u8) = .empty;
+                if (unityz.classes.fieldOf(v, "m_Bones")) |b| {
+                    if (b == .array) {
+                        for (b.array) |bone| {
+                            var nm: []const u8 = "";
+                            if (pptrPathId(bone)) |bid| {
+                                if (bid != 0) {
+                                    if (readObjectValue(arena, &sf, bid, basename(path), injected)) |tv| {
+                                        if (unityz.classes.fieldOf(tv, "m_GameObject")) |gv| {
+                                            if (pptrPathId(gv)) |gid| {
+                                                if (gid != 0) {
+                                                    if (readObjectValue(arena, &sf, gid, basename(path), injected)) |gov| {
+                                                        nm = std.mem.trimEnd(u8, unityz.classes.stringField(gov, "m_Name") orelse "", "\x00");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            try names.append(arena, nm);
+                        }
+                    }
+                }
+                const glb = writeMeshGlb(arena, &sf, mval, &mesh, names.items) catch null;
+                if (glb) |g| {
+                    if (g.len != 0) {
+                        var name_buf: [192]u8 = undefined;
+                        const base = if (renderer_name.len != 0) renderer_name else std.mem.trimEnd(u8, mesh.name, "\x00");
+                        const clipped = if (base.len > 140) base[0..140] else base;
+                        const full = if (clipped.len != 0)
+                            try std.fmt.bufPrint(&name_buf, "character_{d}_{s}.glb", .{ o.path_id, clipped })
+                        else
+                            try std.fmt.bufPrint(&name_buf, "character_{d}.glb", .{o.path_id});
+                        const name = sanitizeComponent(full);
+                        try extractFile(subdir, name, g);
+                        try stdout.print("extracted {s} ({d} bytes, glTF binary, {d} named bones)\n", .{ name, g.len, names.items.len });
+                        try manifest.append(arena, .{ .path_id = o.path_id, .class_id = 137, .name = renderer_name, .subdir = subdir });
+                        extracted += 1;
+                    }
                 }
             },
             74 => { // AnimationClip -> curves JSON
@@ -3060,6 +3119,36 @@ fn meshU32(
     };
 }
 
+/// Looks up one field of a legacy per-vertex skin entry by trying the
+/// naming variants Unity used across versions for the four weights and
+/// bone indices. 5.x `m_Skin` entries name them `weight[0]` /
+/// `boneIndex[0]`; older `m_BoneWeights` builds drop the brackets or add
+/// an `m_` prefix. `kind` selects the field family (0 = weight float,
+/// 1 = bone index int).
+fn legacySkinValue(entry: unityz.value.Value, kind: u8, k: usize) ?unityz.value.Value {
+    if (entry != .obj) return null;
+    const base = if (kind == 0) "weight" else "boneIndex";
+    var nb: [24]u8 = undefined;
+    const bracket = std.fmt.bufPrint(&nb, "{s}[{d}]", .{ base, k }) catch return null;
+    if (unityz.classes.fieldOf(entry, bracket)) |fv| return fv;
+    const plain = std.fmt.bufPrint(&nb, "{s}{d}", .{ base, k }) catch return null;
+    if (unityz.classes.fieldOf(entry, plain)) |fv| return fv;
+    const mpref = std.fmt.bufPrint(&nb, "m_{s}{d}", .{ base, k }) catch return null;
+    return unityz.classes.fieldOf(entry, mpref);
+}
+
+fn legacySkinWeight(entry: unityz.value.Value, k: usize) ?f32 {
+    const fv = legacySkinValue(entry, 0, k) orelse return null;
+    return @floatCast(fv.asFloat() orelse return null);
+}
+
+fn legacySkinJoint(entry: unityz.value.Value, k: usize) ?u32 {
+    const fv = legacySkinValue(entry, 1, k) orelse return null;
+    const iv = fv.asInt() orelse return null;
+    if (iv < 0 or iv > std.math.maxInt(u32)) return null;
+    return @intCast(iv);
+}
+
 /// Inverts a 4x4 matrix (row-major `m[r*4+c]`) by Gauss-Jordan on [M|I].
 /// Returns null when singular.
 fn mat4Inverse(m: [16]f32) ?[16]f32 {
@@ -3345,6 +3434,7 @@ fn writeMeshGlb(
     sf: *const unityz.serialized.SerializedFile,
     v: unityz.value.Value,
     mesh: *const unityz.classes.Mesh,
+    bone_names: ?[]const []const u8,
 ) ![]const u8 {
     if (unityz.classes.intField(v, "m_MeshCompression") orelse 0 != 0) return &.{};
     const vch = mesh.channel(0) orelse return &.{};
@@ -3363,9 +3453,10 @@ fn writeMeshGlb(
 
     // -------- skin detection --------
     // Unity 2019+ keeps per-vertex skin data in vertex channels 12 (blend
-    // weights, float4) and 13 (blend indices, UInt32 x4) with the bone
-    // count in m_BindPose. Older builds carry m_BoneWeights instead (not
-    // supported here: report the mesh unskinned).
+    // weights, float4) and 13 (blend indices, UInt32 x4); 5.x-era builds
+    // carry a per-vertex m_Skin / m_BoneWeights array of
+    // {weight[0..3], boneIndex[0..3]} objects instead. Either source
+    // works; the bone count comes from m_BindPose either way.
     const bind_poses = blk: {
         if (unityz.classes.fieldOf(v, "m_BindPose")) |bp| {
             if (bp == .array) break :blk bp.array;
@@ -3374,17 +3465,40 @@ fn writeMeshGlb(
     };
     const wch = mesh.channel(12);
     const ich = mesh.channel(13);
+    const channel_skin = wch != null and wch.?.format == 0 and wch.?.dimension >= 4 and ich != null and ich.?.dimension >= 4;
+    const legacy_skin = blk: {
+        if (channel_skin) break :blk &.{};
+        const arr = blk2: {
+            if (unityz.classes.fieldOf(v, "m_Skin")) |sv| {
+                if (sv == .array) break :blk2 sv.array;
+            }
+            if (unityz.classes.fieldOf(v, "m_BoneWeights")) |bw| {
+                if (bw == .array) break :blk2 bw.array;
+            }
+            break :blk2 &.{};
+        };
+        // a valid legacy skin has exactly one entry per vertex, each with
+        // the weight fields
+        if (arr.len != vcount) break :blk &.{};
+        if (arr.len == 0) break :blk &.{};
+        if (legacySkinWeight(arr[0], 0) == null) break :blk &.{};
+        break :blk arr;
+    };
     var n_bones: usize = bind_poses.len;
-    var has_skin = n_bones > 0 and wch != null and wch.?.format == 0 and wch.?.dimension >= 4 and ich != null and ich.?.dimension >= 4;
+    var has_skin = n_bones > 0 and (channel_skin or legacy_skin.len != 0);
     if (has_skin) {
         // every joint index must fit u16 (glTF JOINTS_0 has no u32 form)
         outer: for (0..vcount) |vi| {
             for (0..4) |k| {
-                const ji = meshU32(mesh, 13, vi, k, sf.endian) orelse {
+                const ji = if (legacy_skin.len != 0)
+                    legacySkinJoint(legacy_skin[vi], k)
+                else
+                    meshU32(mesh, 13, vi, k, sf.endian);
+                const jj = ji orelse {
                     has_skin = false;
                     break :outer;
                 };
-                if (ji >= 0x10000) {
+                if (jj >= 0x10000) {
                     has_skin = false;
                     break :outer;
                 }
@@ -3512,7 +3626,11 @@ fn writeMeshGlb(
     if (has_skin) {
         for (0..vcount) |vi| {
             for (0..4) |k| {
-                try bin.writeFloat(f32, @as(f32, meshF32(mesh, 12, vi, k, sf.endian) orelse 0));
+                const w = if (legacy_skin.len != 0)
+                    legacySkinWeight(legacy_skin[vi], k) orelse 0
+                else
+                    meshF32(mesh, 12, vi, k, sf.endian) orelse 0;
+                try bin.writeFloat(f32, w);
             }
         }
     }
@@ -3520,7 +3638,11 @@ fn writeMeshGlb(
     if (has_skin) {
         for (0..vcount) |vi| {
             for (0..4) |k| {
-                try bin.writeInt(u16, @intCast(meshU32(mesh, 13, vi, k, sf.endian) orelse 0));
+                const j = if (legacy_skin.len != 0)
+                    legacySkinJoint(legacy_skin[vi], k) orelse 0
+                else
+                    meshU32(mesh, 13, vi, k, sf.endian) orelse 0;
+                try bin.writeInt(u16, @intCast(j));
             }
         }
     }
@@ -3550,9 +3672,16 @@ fn writeMeshGlb(
     try js.writeAll("}");
     if (has_skin) {
         // joint nodes: each sits at its bone's bind world transform
-        // (row-major inverse bind pose, printed column-major for glTF)
+        // (row-major inverse bind pose, printed column-major for glTF);
+        // named from the armature when the caller resolved m_Bones
         for (joint_matrices, 0..) |jm, bi| {
-            try js.print(",{{\"name\":\"Bone{d}\",\"matrix\":[", .{bi});
+            const jname = if (bone_names != null and bi < bone_names.?.len and bone_names.?[bi].len != 0) bone_names.?[bi] else blk: {
+                var nb: [24]u8 = undefined;
+                break :blk std.fmt.bufPrint(&nb, "Bone{d}", .{bi}) catch "Bone";
+            };
+            try js.print(",{{\"name\":", .{});
+            try writeJsonString(js, jname);
+            try js.writeAll(",\"matrix\":[");
             for (0..4) |c| {
                 for (0..4) |r| {
                     if (c != 0 or r != 0) try js.writeAll(",");
@@ -4183,12 +4312,8 @@ fn cmdInfo(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json:
         .webfile => return printWebFile(path, bytes, dump, objects, json, stdout),
         .bundle => return printBundle(path, bytes, dump, objects, json, stdout),
         .serialized => return printSerialized(path, bytes, dump, objects, json, stdout),
-        .archive => {
-            try stdout.print("{s}: UnityArchive files are not supported yet\n", .{path});
-        },
-        .unknown => {
-            try stdout.print("{s}: not a recognized Unity asset file\n", .{path});
-        },
+        .archive => return error.UnsupportedArchive,
+        .unknown => return error.UnknownFormat,
     }
 }
 
@@ -4202,20 +4327,59 @@ fn dumpSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.
     try dumpObjects(&sf, stdout);
 }
 
+/// Writes one container entry for `info --json`. When the entry is a
+/// SerializedFile, include the metadata callers otherwise only get by first
+/// extracting the node and running `info` a second time. The UnityFS header's
+/// Unity string is commonly the placeholder `5.x.x`; the embedded
+/// SerializedFile version is the engine revision that owns the object layout.
+fn writeContainerEntryJson(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+    try stdout.writeAll("{\"path\":");
+    try writeJsonString(stdout, path);
+    try stdout.print(",\"size\":{d}", .{bytes.len});
+
+    if (unityz.container.sniff(bytes).container == .serialized) {
+        const sf = unityz.serialized.parse(arena, bytes) catch |err| {
+            try stdout.writeAll(",\"serialized_error\":");
+            try writeJsonString(stdout, @errorName(err));
+            try stdout.writeByte('}');
+            return;
+        };
+        try stdout.print(",\"serialized\":{{\"version\":{d},\"unity\":", .{sf.version});
+        try writeJsonString(stdout, sf.unity_version);
+        try stdout.print(",\"platform\":{d},\"endian\":\"{s}\",\"type_tree\":{s},\"types\":{d},\"objects\":{d},\"externals\":{d},\"class_ids\":[", .{
+            sf.target_platform,
+            if (sf.endian == .little) "little" else "big",
+            if (sf.enable_type_tree) "true" else "false",
+            sf.types.len,
+            sf.objects.len,
+            sf.externals.len,
+        });
+        var class_ids: std.AutoHashMapUnmanaged(i32, void) = .empty;
+        var first_class = true;
+        for (sf.objects) |object| {
+            const entry = try class_ids.getOrPut(arena, object.class_id);
+            if (entry.found_existing) continue;
+            if (!first_class) try stdout.writeByte(',');
+            first_class = false;
+            try stdout.print("{d}", .{object.class_id});
+        }
+        try stdout.writeAll("]}");
+    }
+    try stdout.writeByte('}');
+}
+
 fn printWebFile(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
+    _ = path;
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-        try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-        return;
-    };
+    const wf = try unityz.webfile.parse(arena, bytes);
     if (json) {
         try stdout.print("{{\"type\":\"WebFile\",\"files\":{d},\"entries\":[", .{wf.entries.len});
         for (wf.entries, 0..) |e, i| {
             if (i != 0) try stdout.print(",", .{});
-            try stdout.print("{{\"path\":\"{s}\",\"size\":{d}}}", .{ e.path, e.data.len });
+            try writeContainerEntryJson(arena, e.path, e.data, stdout);
         }
         try stdout.print("]", .{});
         if (objects) {
@@ -4313,19 +4477,17 @@ fn emitShadersJson(arena: std.mem.Allocator, nodes: anytype, stdout: *Io.Writer)
 }
 
 fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
+    _ = path;
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const b = unityz.bundle.parse(arena, bytes) catch |err| {
-        try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
-        return;
-    };
+    const b = try unityz.bundle.parse(arena, bytes);
     if (json) {
         try stdout.print("{{\"type\":\"UnityFS\",\"version\":{d},\"unity\":\"{s}\",\"nodes\":{d},\"blocks\":{d},\"nodes_list\":[", .{ b.version, b.unity_version, b.nodes.len, b.blocks.len });
         for (b.nodes, 0..) |n, i| {
             if (i != 0) try stdout.print(",", .{});
-            try stdout.print("{{\"path\":\"{s}\",\"size\":{d}}}", .{ n.path, n.data.len });
+            try writeContainerEntryJson(arena, n.path, n.data, stdout);
         }
         try stdout.print("]", .{});
         if (objects) {
@@ -4357,14 +4519,12 @@ fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, j
 }
 
 fn printSerialized(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
+    _ = path;
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("{s}: serialized file parse failed: {s}\n", .{ path, @errorName(err) });
-        return;
-    };
+    const sf = try unityz.serialized.parse(arena, bytes);
     if (json) {
         try stdout.print("{{\"type\":\"SerializedFile\",\"version\":{d},\"unity\":\"{s}\",\"platform\":{d},\"endian\":\"{s}\",\"type_tree\":{s},\"types\":{d},\"objects\":{d},\"externals\":{d}", .{
             sf.version,                                    sf.unity_version,                             sf.target_platform,
@@ -4549,6 +4709,9 @@ const VerifyFailure = struct { path_id: i64, message: []const u8, node: ?[]const
 const VerifyReport = struct {
     checked: usize = 0,
     failed: usize = 0,
+    /// Objects skipped because the file has no type trees (Mono build)
+    /// and no --trees file supplied a decode tree.
+    skipped: usize = 0,
     failures: std.ArrayList(VerifyFailure) = .empty,
 };
 
@@ -4567,7 +4730,7 @@ fn recordFailure(report: *VerifyReport, arena: std.mem.Allocator, node: ?[]const
 /// Prints a verify report as one JSON object when `--json` is set.
 fn emitVerifyReport(json: bool, report: *const VerifyReport, stdout: *Io.Writer) !void {
     if (!json) return;
-    try stdout.print("{{\"checked\":{d},\"failed\":{d},\"failures\":", .{ report.checked, report.failed });
+    try stdout.print("{{\"checked\":{d},\"failed\":{d},\"skipped\":{d},\"failures\":", .{ report.checked, report.failed, report.skipped });
     try stdout.writeByte('[');
     for (report.failures.items, 0..) |f, idx| {
         if (idx != 0) try stdout.writeByte(',');
@@ -4845,9 +5008,12 @@ fn verifySerializedBytesSidecars(arena: std.mem.Allocator, bytes: []const u8, no
         // they are held by `report` and must outlive the per-object reset.
         failed += try scanStreamingRefs(arena, v, node, o.path_id, bytes.len, sidecars, report, stdout, json);
     }
-    if (!json) try stdout.print("  {d} object(s) checked, {d} failed\n", .{ checked, failed });
-    if (typeless_skipped != 0) {
-        try stdout.print("  {d} object(s) skipped: this file has no type trees (Mono build); pass --trees <file.json> to decode them\n", .{typeless_skipped});
+    report.skipped = typeless_skipped;
+    if (!json) {
+        try stdout.print("  {d} object(s) checked, {d} failed\n", .{ checked, failed });
+        if (typeless_skipped != 0) {
+            try stdout.print("  {d} object(s) skipped: this file has no type trees (Mono build); pass --trees <file.json> to decode them\n", .{typeless_skipped});
+        }
     }
 }
 
@@ -8334,6 +8500,7 @@ fn skipWs(text: []const u8, pos: *usize) void {
 /// classes, and local position. UnityPy's CLI has no scene-structure
 /// view.
 fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+    _ = path;
     var json = false;
     var trees_path: ?[]const u8 = null;
     var i: usize = 0;
@@ -8345,8 +8512,7 @@ fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, s
             trees_path = rest[i + 1];
             i += 1;
         } else {
-            try stdout.print("unityz: unknown hierarchy option '{s}'\n", .{arg});
-            return;
+            return error.InvalidOption;
         }
     }
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -8355,27 +8521,21 @@ fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, s
     const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
-            const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
-                return;
-            };
+            const b = try unityz.bundle.parse(arena, bytes);
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 try printHierarchy(arena, n.data, n.path, json, injected, stdout);
             }
         },
         .webfile => {
-            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                try stdout.print("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-                return;
-            };
+            const wf = try unityz.webfile.parse(arena, bytes);
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
                 try printHierarchy(arena, e.data, e.path, json, injected, stdout);
             }
         },
         .serialized => try printHierarchy(arena, bytes, null, json, injected, stdout),
-        else => try stdout.print("{s}: hierarchy requires a serialized file, bundle, or webfile\n", .{path}),
+        else => return error.UnknownFormat,
     }
 }
 
@@ -8682,20 +8842,21 @@ fn managedFieldType(f: unityz.dotnet.Field) []const u8 {
 }
 
 fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, json: bool, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
-    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
-        try stdout.print("  serialized parse failed: {s}\n", .{@errorName(err)});
-        return;
-    };
-    if (node) |n| {
-        if (json) {
+    const sf = try unityz.serialized.parse(arena, bytes);
+    if (json) {
+        if (node) |n| {
             try stdout.print("{{\"node\":", .{});
             try writeJsonString(stdout, n);
-            try stdout.print(",\"hierarchy\":[", .{});
         } else {
-            try stdout.print("hierarchy of {s}:\n", .{n});
+            try stdout.writeAll("{\"node\":null");
         }
-    } else if (!json) {
-        try stdout.print("hierarchy:\n", .{});
+        try stdout.print(",\"hierarchy\":[", .{});
+    } else {
+        if (node) |n| {
+            try stdout.print("hierarchy of {s}:\n", .{n});
+        } else {
+            try stdout.print("hierarchy:\n", .{});
+        }
     }
 
     var nodes: std.ArrayList(TEntry) = .empty;
@@ -8771,17 +8932,25 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
     }
 
     var roots_printed: usize = 0;
+    var skipped_children: usize = 0;
     for (nodes.items) |*e| {
-        if (e.node.father == 0) {
+        if (e.node.father == 0 and hierarchyNodeReadable(nodes.items, gos.items, e.path_id)) {
             if (json and roots_printed != 0) try stdout.writeByte(',');
             roots_printed += 1;
-            try printHierarchyNode(nodes.items, gos.items, bones.items, e.path_id, 0, json, stdout);
+            try printHierarchyNode(
+                nodes.items,
+                gos.items,
+                bones.items,
+                e.path_id,
+                0,
+                json,
+                &skipped_children,
+                stdout,
+            );
         }
     }
     if (json) {
-        try stdout.print("]", .{});
-        if (node != null) try stdout.writeByte('}');
-        try stdout.writeByte('\n');
+        try stdout.print("],\"skipped_children\":{d}}}\n", .{skipped_children});
     } else {
         try stdout.writeByte('\n');
     }
@@ -8801,13 +8970,28 @@ fn findGo(gos: []const GoInfo, path_id: i64) ?*const GoInfo {
     return null;
 }
 
+fn hierarchyNodeReadable(nodes: []const TEntry, gos: []const GoInfo, path_id: i64) bool {
+    const node = findNode(nodes, path_id) orelse return false;
+    return findGo(gos, node.go) != null;
+}
+
+
 /// Traversal depth limit for `printHierarchyNode`. Children lists are
 /// file-supplied and may be cyclic or nest beyond any scene graph, so the
 /// recursion must terminate: the bound stops it the way `max_json_depth`
 /// and `typetree.max_depth` bound their parsers.
 const max_hierarchy_depth: usize = 512;
 
-fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, bones: []const i64, path_id: i64, depth: usize, json: bool, stdout: *Io.Writer) !void {
+fn printHierarchyNode(
+    nodes: []const TEntry,
+    gos: []const GoInfo,
+    bones: []const i64,
+    path_id: i64,
+    depth: usize,
+    json: bool,
+    skipped_children: *usize,
+    stdout: *Io.Writer,
+) !void {
     if (depth > max_hierarchy_depth) return error.TooDeep;
     const tn = findNode(nodes, path_id) orelse return;
     const go = findGo(gos, tn.go);
@@ -8824,9 +9008,15 @@ fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, bones: []const
         }
         try stdout.print("],\"bone\":{}", .{bone});
         try stdout.writeAll(",\"children\":[");
-        for (tn.children.items, 0..) |c, i| {
-            if (i != 0) try stdout.writeByte(',');
-            try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, stdout);
+        var printed: usize = 0;
+        for (tn.children.items) |c| {
+            if (!hierarchyNodeReadable(nodes, gos, c)) {
+                skipped_children.* += 1;
+                continue;
+            }
+            if (printed != 0) try stdout.writeByte(',');
+            printed += 1;
+            try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, skipped_children, stdout);
         }
         try stdout.writeAll("]}");
         return;
@@ -8846,8 +9036,58 @@ fn printHierarchyNode(nodes: []const TEntry, gos: []const GoInfo, bones: []const
     }
     try stdout.print("  pos({d}, {d}, {d})\n", .{ tn.pos[0], tn.pos[1], tn.pos[2] });
     for (tn.children.items) |c| {
-        try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, stdout);
+        if (!hierarchyNodeReadable(nodes, gos, c)) {
+            skipped_children.* += 1;
+            continue;
+        }
+        try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, skipped_children, stdout);
     }
+}
+
+test "hierarchy JSON counts an unreadable child without leaving a dangling comma" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var children: std.ArrayList(i64) = .empty;
+    try children.append(arena, 999);
+    const nodes = [_]TEntry{.{ .path_id = 10, .node = .{ .go = 20, .children = children } }};
+    const gos = [_]GoInfo{.{ .path_id = 20, .name = "root" }};
+    var output: std.ArrayList(u8) = .empty;
+    var writer = std.Io.Writer.Allocating.fromArrayList(arena, &output);
+    var skipped: usize = 0;
+
+    try printHierarchyNode(&nodes, &gos, &.{}, 10, 0, true, &skipped, &writer.writer);
+    try writer.writer.flush();
+    const rendered = writer.toArrayList();
+
+    try std.testing.expectEqualStrings(
+        "{\"name\":\"root\",\"transform\":10,\"gameObject\":20,\"position\":[0,0,0],\"components\":[],\"bone\":false,\"children\":[]}",
+        rendered.items,
+    );
+    try std.testing.expectEqual(1, skipped);
+}
+
+test "emitVerifyReport JSON carries checked, failed, and skipped" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var json: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(a, &json);
+    var report: VerifyReport = .{
+        .checked = 3,
+        .failed = 1,
+        .skipped = 2,
+    };
+    try recordFailure(&report, a, null, 7, "read failed: {s}", .{"Corrupt"});
+    try emitVerifyReport(true, &report, &aw.writer);
+    const out = aw.toArrayList().items;
+    // recordFailure bumps `failed` itself, so the report ends at 2.
+    try std.testing.expectEqualStrings("{\"checked\":3,\"failed\":2,\"skipped\":2,\"failures\":[{\"path_id\":7,\"error\":\"read failed: Corrupt\"}]}\n", out);
+    // text mode emits nothing on stdout (the report is printed separately)
+    var text: std.ArrayList(u8) = .empty;
+    var tw = std.Io.Writer.Allocating.fromArrayList(a, &text);
+    try emitVerifyReport(false, &report, &tw.writer);
+    try std.testing.expectEqual(@as(usize, 0), tw.toArrayList().items.len);
 }
 
 test "parseCommand recognizes known subcommands" {
@@ -8862,6 +9102,19 @@ test "parseCommand recognizes known subcommands" {
     try std.testing.expectEqual(Command.hash, parseCommand("hash"));
     try std.testing.expect(parseCommand("bogus") == null);
     try std.testing.expect(parseCommand("--version") == null);
+}
+
+test "info rejects an unrecognized file instead of printing a successful diagnostic" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var output: std.ArrayList(u8) = .empty;
+    var writer = std.Io.Writer.Allocating.fromArrayList(arena_state.allocator(), &output);
+
+    try std.testing.expectError(
+        error.UnknownFormat,
+        cmdInfo("broken.bin", "not a Unity asset", false, false, true, &writer.writer),
+    );
+    try std.testing.expectEqual(0, output.items.len);
 }
 
 test "writeObjFloat matches Python's %.9g" {
@@ -9281,6 +9534,23 @@ fn typelessMonoFixture(a: std.mem.Allocator, payload: []const u8) ![]u8 {
     try out.writeBytes(meta.getWritten());
     try out.writeBytes(payload);
     return a.dupe(u8, out.getWritten());
+}
+
+test "container info JSON includes embedded SerializedFile metadata" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const sf_bytes = try typelessMonoFixture(a, try monoScriptPayload(a));
+    var json: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(a, &json);
+    try writeContainerEntryJson(a, "CAB-\"quoted", sf_bytes, &aw.writer);
+    const actual = aw.toArrayList().items;
+
+    try std.testing.expectEqualStrings(
+        "{\"path\":\"CAB-\\\"quoted\",\"size\":197,\"serialized\":{\"version\":22,\"unity\":\"2020.1.0f1\",\"platform\":3,\"endian\":\"little\",\"type_tree\":false,\"types\":1,\"objects\":1,\"externals\":0,\"class_ids\":[115]}}",
+        actual,
+    );
 }
 
 test "editSerializedPatches decodes a typeless file via injected trees" {
