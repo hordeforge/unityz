@@ -171,6 +171,16 @@ assemblies sharing a plain class name do not collide). MonoBehaviours
 resolve their script via `m_Script` against the mono-script table; other
 classes resolve by class name.
 
+`unityz trees <file> --out <out.json>` writes this shape from the trees a
+file already carries. Unity keeps type trees in AssetBundles but strips
+them from a player's serialized files, so a game's own bundles are the
+closest version-exact source of trees for its typeless `.assets`. Built-in
+classes are keyed by class name; a MonoBehaviour tree is keyed by its
+script's namespace-qualified class, resolved by following `m_Script` to a
+MonoScript object inside the same container, and listed in
+`__monoscripts__`. A MonoBehaviour whose MonoScript lives outside the file
+is skipped and counted on stderr. Without `--out` the table goes to stdout.
+
 unityz ships two generators and a merge tool for this shape. The
 preferred one is in-tree and game-specific: `unityz managed <data-dir>
 --trees <out.json>` builds the trees from the Mono build's own

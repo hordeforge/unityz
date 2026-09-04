@@ -106,6 +106,13 @@ const usage =
     \\                 built from the assemblies and the game's MonoScript
     \\                 objects, so typeless MonoBehaviours decode without
     \\                 a hand-made trees file)
+    \\  trees <path>   Export the type trees embedded in a file as a
+    \\                 --trees JSON table (--out <file.json> to write it,
+    \\                 else stdout). Unity keeps trees in AssetBundles but
+    \\                 strips them from a player's .assets files, so a
+    \\                 game's own bundles supply version-exact trees for
+    \\                 its typeless files; MonoBehaviour trees are keyed
+    \\                 by script class via the container's MonoScripts
     \\
     \\Edit usage: unityz edit <file> <path_id> <field> <json-value> [<field> <json-value> ...]
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
@@ -306,7 +313,7 @@ pub fn main(init: std.process.Init) !void {
     if (verify_failed_flag or command_failed_flag) std.process.exit(1);
 }
 
-const Command = enum { info, extract, edit, verify, stats, find, fsb, show, diff, hash, skin, shader, hierarchy, managed };
+const Command = enum { info, extract, edit, verify, stats, find, fsb, show, diff, hash, skin, shader, hierarchy, managed, trees };
 
 fn parseCommand(arg: []const u8) ?Command {
     inline for (std.meta.fields(Command)) |field| {
@@ -353,6 +360,7 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
         .skin => return cmdSkin(path, rest, bytes, stdout),
         .hierarchy => return cmdHierarchy(path, rest, bytes, stdout),
         .managed => return cmdManaged(path, rest, bytes, stdout),
+        .trees => return cmdTrees(path, rest, bytes, stdout),
     }
 }
 
@@ -8652,6 +8660,187 @@ fn skipWs(text: []const u8, pos: *usize) void {
 /// node named by its GameObject with the transform path id, component
 /// classes, and local position. UnityPy's CLI has no scene-structure
 /// view.
+/// `trees <path> [--out <file.json>]`: exports the type trees embedded in a
+/// file as a `--trees` JSON table. Unity keeps trees in AssetBundles but
+/// strips them from a player's serialized files, so a game's bundles are
+/// usually the closest version-exact source of trees for its typeless
+/// `.assets` files. Built-in classes are keyed by class name; MonoBehaviour
+/// trees are keyed by their script's namespace-qualified class name, resolved
+/// through the MonoScript objects inside the same container, and listed in
+/// `__monoscripts__` so a typeless MonoBehaviour can find its tree.
+fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+    var out_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        if (std.mem.eql(u8, rest[i], "--out") and i + 1 < rest.len) {
+            out_path = rest[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, rest[i], "--json")) {
+            // the output is always JSON; accepted so scripts can pass it uniformly
+        } else {
+            return usageError("unityz: unknown trees option '{s}'\n", .{rest[i]});
+        }
+    }
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Every serialized file in the container, by basename, so a
+    // MonoBehaviour's m_Script can be followed into a sibling node.
+    const Member = struct { name: []const u8, sf: unityz.serialized.SerializedFile };
+    var members: std.ArrayList(Member) = .empty;
+    switch (unityz.container.sniff(bytes).container) {
+        .bundle => {
+            const b = try unityz.bundle.parse(arena, bytes);
+            for (b.nodes) |n| {
+                if (unityz.container.sniff(n.data).container != .serialized) continue;
+                const sf = unityz.serialized.parse(arena, n.data) catch continue;
+                try members.append(arena, .{ .name = basename(n.path), .sf = sf });
+            }
+        },
+        .webfile => {
+            const wf = try unityz.webfile.parse(arena, bytes);
+            for (wf.entries) |e| {
+                if (unityz.container.sniff(e.data).container != .serialized) continue;
+                const sf = unityz.serialized.parse(arena, e.data) catch continue;
+                try members.append(arena, .{ .name = basename(e.path), .sf = sf });
+            }
+        },
+        .serialized => try members.append(arena, .{ .name = basename(path), .sf = try unityz.serialized.parse(arena, bytes) }),
+        else => return error.UnknownFormat,
+    }
+
+    // MonoScript objects across the container: "basename:path_id" -> class.
+    var scripts: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (members.items) |m| {
+        const refs = unityz.managed_trees.scanMonoScripts(arena, m.sf.source, m.name) catch continue;
+        for (refs) |r| {
+            const full = if (r.namespace.len != 0) try std.fmt.allocPrint(arena, "{s}.{s}", .{ r.namespace, r.class_name }) else r.class_name;
+            try scripts.put(arena, try std.fmt.allocPrint(arena, "{s}:{d}", .{ m.name, r.path_id }), full);
+        }
+    }
+
+    var class_trees: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+    var class_ids: std.StringArrayHashMapUnmanaged(i32) = .empty;
+    var script_trees: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+    const Mono = struct { class: []const u8, file: []const u8, path_id: i64 };
+    var monoscripts: std.ArrayList(Mono) = .empty;
+    var unresolved: usize = 0;
+    var unity_version: []const u8 = "";
+    for (members.items) |m| {
+        const sf = &m.sf;
+        if (unity_version.len == 0) unity_version = sf.unity_version;
+        for (sf.types, 0..) |t, ti| {
+            if (t.type_tree.roots.len == 0) continue;
+            const flat = try flattenTree(arena, &t.type_tree);
+            if (t.class_id != 114) {
+                const name = className(t.class_id) orelse try std.fmt.allocPrint(arena, "Class{d}", .{t.class_id});
+                if (class_trees.contains(name)) continue;
+                try class_trees.put(arena, name, try unityz.managed_trees.nodesToJson(arena, flat));
+                try class_ids.put(arena, name, t.class_id);
+                continue;
+            }
+            // A script tree: find an object using it and follow m_Script.
+            const cls = for (sf.objects) |*o| {
+                if (o.class_id != 114 or (o.type_index orelse continue) != ti) continue;
+                const data = sf.objectData(o) orelse continue;
+                var r = unityz.streams.Reader.init(data);
+                r.endian = sf.endian;
+                const v = unityz.object_reader.readObject(arena, &r, &t.type_tree.roots[0]) catch continue;
+                const ptr = unityz.classes.pptrField(v, "m_Script") orelse continue;
+                const fname = if (ptr.file_id == 0) m.name else if (ptr.file_id > 0 and @as(usize, @intCast(ptr.file_id - 1)) < sf.externals.len) basename(sf.externals[@intCast(ptr.file_id - 1)].path) else continue;
+                var key_buf: [1024]u8 = undefined;
+                const key = std.fmt.bufPrint(&key_buf, "{s}:{d}", .{ fname, ptr.path_id }) catch continue;
+                if (scripts.get(key)) |c| break Mono{ .class = c, .file = fname, .path_id = ptr.path_id };
+            } else {
+                unresolved += 1;
+                continue;
+            };
+            if (script_trees.contains(cls.class)) continue;
+            try script_trees.put(arena, cls.class, try unityz.managed_trees.nodesToJson(arena, flat));
+            try monoscripts.append(arena, cls);
+        }
+    }
+    if (script_trees.count() != 0 and !class_trees.contains("MonoBehaviour")) {
+        // The plain header is what resolves a typeless MonoBehaviour's
+        // m_Script before its full script tree is known.
+        const header = try unityz.managed_trees.monoBehaviourHeader(arena);
+        try class_trees.put(arena, "MonoBehaviour", try unityz.managed_trees.nodesToJson(arena, try unityz.managed_trees.monoHeaderTree(arena, header)));
+        try class_ids.put(arena, "MonoBehaviour", 114);
+    }
+    if (class_trees.count() == 0 and script_trees.count() == 0) {
+        failure("unityz: {s}: no type trees embedded (a Mono build strips them; see --trees)\n", .{path});
+        return;
+    }
+
+    var json: std.ArrayList(u8) = .empty;
+    var jw = std.Io.Writer.Allocating.fromArrayList(arena, &json);
+    const w = &jw.writer;
+    const js = unityz.managed_trees.writeJsonString;
+    try w.writeAll("{\"__meta__\":{\"unity\":");
+    try js(w, unity_version);
+    try w.writeAll(",\"source\":");
+    try js(w, basename(path));
+    try w.writeAll("},\"__class_ids__\":{");
+    for (class_ids.keys(), class_ids.values(), 0..) |k, v, n| {
+        if (n != 0) try w.writeByte(',');
+        try js(w, k);
+        try w.print(":{d}", .{v});
+    }
+    try w.writeByte('}');
+    for (class_trees.keys(), class_trees.values()) |k, v| {
+        try w.writeByte(',');
+        try js(w, k);
+        try w.print(":{s}", .{v});
+    }
+    try w.writeAll(",\"__script_trees__\":{");
+    for (script_trees.keys(), script_trees.values(), 0..) |k, v, n| {
+        if (n != 0) try w.writeByte(',');
+        try js(w, k);
+        try w.print(":{s}", .{v});
+    }
+    try w.writeAll("},\"__monoscripts__\":[");
+    for (monoscripts.items, 0..) |m, n| {
+        if (n != 0) try w.writeByte(',');
+        try w.writeAll("{\"file\":");
+        try js(w, m.file);
+        try w.print(",\"path_id\":{d},\"class\":", .{m.path_id});
+        try js(w, m.class);
+        try w.writeByte('}');
+    }
+    try w.writeAll("]}\n");
+    const out_bytes = jw.toArrayList().items;
+
+    if (out_path) |op| {
+        const io = io_global.io;
+        const file = std.Io.Dir.cwd().createFile(io, op, .{}) catch |err| {
+            failure("unityz: {s}: {s}\n", .{ op, @errorName(err) });
+            return;
+        };
+        defer file.close(io);
+        try file.writeStreamingAll(io, out_bytes);
+        try stdout.print("trees: {d} class tree(s), {d} script tree(s) written to {s}\n", .{ class_trees.count(), script_trees.count(), op });
+    } else {
+        try stdout.writeAll(out_bytes);
+    }
+    if (unresolved != 0) diagnostic("unityz: {s}: {d} MonoBehaviour tree(s) skipped: their MonoScript is outside this file\n", .{ path, unresolved });
+}
+
+/// Pre-order flat node list of a parsed tree, the wire layout the
+/// `--trees` format and `fromFlatNodes` expect.
+fn flattenTree(arena: std.mem.Allocator, tree: *const unityz.typetree.TypeTree) ![]const unityz.typetree.Node {
+    var out: std.ArrayList(unityz.typetree.Node) = .empty;
+    for (tree.roots) |*root| try flattenNode(arena, root, &out);
+    return out.items;
+}
+
+fn flattenNode(arena: std.mem.Allocator, node: *const unityz.typetree.Node, out: *std.ArrayList(unityz.typetree.Node)) !void {
+    var copy = node.*;
+    copy.children = &.{};
+    try out.append(arena, copy);
+    for (node.children) |*c| try flattenNode(arena, c, out);
+}
+
 fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     _ = path;
     var json = false;
@@ -10084,4 +10273,28 @@ test "diff --fields decodes typeless objects through injected trees" {
     try std.testing.expectEqualStrings("m_Name", diffs.items[0].path);
     try std.testing.expectEqualStrings("\"Test\"", diffs.items[0].old);
     try std.testing.expectEqualStrings("\"Tost\"", diffs.items[0].new);
+}
+
+test "flattenTree reproduces the flat node list a tree was built from" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const flat = try monoScriptFlatNodes(a);
+    const tree = try unityz.typetree.fromFlatNodes(a, flat);
+    const back = try flattenTree(a, &tree);
+    try std.testing.expectEqual(flat.len, back.len);
+    for (flat, back) |want, got| {
+        try std.testing.expectEqualStrings(want.type_name, got.type_name);
+        try std.testing.expectEqualStrings(want.name, got.name);
+        try std.testing.expectEqual(want.level, got.level);
+        try std.testing.expectEqual(want.meta_flags, got.meta_flags);
+    }
+    // The exported JSON parses back through the --trees loader.
+    const json = try unityz.managed_trees.nodesToJson(a, back);
+    var out: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(a, &out);
+    const v = try parseJsonLiteralAlloc(a, json);
+    const reparsed = (try buildInjectedTree(a, "MonoScript", v, &aw.writer)).?;
+    try std.testing.expectEqual(tree.roots.len, reparsed.roots.len);
+    try std.testing.expectEqual(tree.roots[0].children.len, reparsed.roots[0].children.len);
 }
