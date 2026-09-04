@@ -41,8 +41,9 @@ const usage =
     \\  verify <path>   Verify every object round-trips byte-exactly
     \\                 (--class N / --path-id N to check a subset,
     \\                  N may be node:path-id; a --path-id that
-    \\                  matches no object is a failure; --json for a machine-readable
-    \\                  report; --trees <file.json> for typeless Mono files,
+    \\                  matches no object is a failure; --json for a
+    \\                  machine-readable report; --trees <file.json>
+    \\                  for typeless Mono files,
     \\                  as in extract)
     \\  stats <path>    Per-class sizes + duplicate-object detection
     \\                 (--json for a machine-readable summary;
