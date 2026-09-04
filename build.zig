@@ -1,4 +1,15 @@
 const std = @import("std");
+const manifest = @embedFile("build.zig.zon");
+
+fn packageVersion() []const u8 {
+    const marker = ".version = \"";
+    const source = manifest[0..];
+    const start = (std.mem.indexOf(u8, source, marker) orelse
+        @panic("build.zig.zon has no package version")) + marker.len;
+    const end = std.mem.indexOfScalarPos(u8, source, start, '"') orelse
+        @panic("build.zig.zon has an unterminated package version");
+    return source[start..end];
+}
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -9,6 +20,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
     });
+    const package_options = b.addOptions();
+    package_options.addOption([]const u8, "version", packageVersion());
+    lib.addOptions("package_options", package_options);
 
     // The vendored Unity crunch decompressor (ZLIB license): a C++ static
     // library exposing `unitycrunch_unpack` / `unitycrunch_free`, linked
