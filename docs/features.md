@@ -259,6 +259,22 @@ pixel diffs for textures/sprites), `--audio` (streamed audio data),
 `--fields` (the exact changed field paths and values).
 Directory diffs run the same three passes on every matched file pair.
 
+## Batch mode
+
+Every command accepts a directory and runs over each regular file in it.
+Plain output streams through per file. With `--json`, each file's output
+is wrapped as one line, `{"file":"<path>","results":[<doc>, ...]}`, so a
+consumer can tell which file produced which document without depending on
+directory order. `results` holds every document the command emitted for
+that file (normally one; `hierarchy` and `info` emit one per embedded
+SerializedFile), and a non-JSON line is kept as a JSON string. A file the
+command could not read or decode adds `"error":"<name>"` with the same
+diagnostic on stderr; the batch continues and exits 1 at the end.
+
+A file unityz does not recognize as a Unity asset (not a SerializedFile,
+bundle, or WebFile) is an error for every command, so a stray file in a
+data directory shows up as a failure rather than as an empty success.
+
 ## Exit codes
 
 Every command follows one contract, so scripts can branch on the status
