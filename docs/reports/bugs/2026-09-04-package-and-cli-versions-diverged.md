@@ -45,10 +45,10 @@ compiled and passed every existing test while publishing the older value.
 
 ## Resolution
 
-`build.zig` embeds the package manifest, extracts its semantic-version string,
-and exposes it to the public library as a generated options module. The library
-parses that generated value for its public `version`, which the CLI prints.
-There is now one source value instead of two values requiring manual sync.
+`build.zig` imports the package manifest's version and exposes it to the public
+library as a generated options module. The library parses that generated value
+for its public `version`, which the CLI prints. There is now one source value
+instead of two values requiring manual sync.
 
 ## Verification
 
