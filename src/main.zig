@@ -8975,7 +8975,6 @@ fn hierarchyNodeReadable(nodes: []const TEntry, gos: []const GoInfo, path_id: i6
     return findGo(gos, node.go) != null;
 }
 
-
 /// Traversal depth limit for `printHierarchyNode`. Children lists are
 /// file-supplied and may be cyclic or nest beyond any scene graph, so the
 /// recursion must terminate: the bound stops it the way `max_json_depth`
