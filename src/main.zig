@@ -2020,12 +2020,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 extracted += 1;
                 // GLB (glTF 2.0 binary) alongside the OBJ: self-contained
                 // and material/UV/bone-friendly for modern pipelines.
-                const glb = writeMeshGlb(arena, &sf, v, &mesh) catch |err| {
-                    try stdout.print("  mesh {d}: GLB conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
-                    skipped += 1;
-                    null;
-                };
-                if (glb) |g| {
+                if (writeMeshGlb(arena, &sf, v, &mesh)) |g| {
                     if (g.len != 0) {
                         var glb_buf: [160]u8 = undefined;
                         const glb_name = sanitizeComponent(try std.fmt.bufPrint(&glb_buf, "{s}.glb", .{name[0 .. name.len - 4]}));
@@ -2033,6 +2028,9 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                         try stdout.print("extracted {s} ({d} bytes, glTF binary)\n", .{ glb_name, g.len });
                         extracted += 1;
                     }
+                } else |err| {
+                    try stdout.print("  mesh {d}: GLB conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
+                    skipped += 1;
                 }
             },
             74 => { // AnimationClip -> curves JSON
