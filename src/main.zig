@@ -70,7 +70,10 @@ const usage =
     \\                  --class <id> to compare one class;
     \\                  --pixels to decode matched Texture2D/Sprite images
     \\                  and report pixel diffs; --audio to compare matched
-    \\                  AudioClip streams)
+    \\                  AudioClip streams;
+    \\                  --fields for the exact changed field paths;
+    \\                  all three also run per matched file pair
+    \\                  when both arguments are directories)
     \\  hash <path>      Print per-object content fingerprints
     \\                 (--json for a machine-readable array;
     \\                  --class <id> / --path-id <id> filters,
@@ -120,6 +123,28 @@ const usage =
 /// so without this the drain error surfaces as an ugly WriteFailed trace.
 fn finalFlush(stdout: *Io.Writer) void {
     stdout.flush() catch std.process.exit(141);
+}
+
+/// Prints a usage diagnostic to stderr and returns `error.Usage`; main() turns
+/// it into exit status 2 without a second generic line, so a bad flag can never
+/// look like a successful run on stdout.
+fn usageError(comptime fmt: []const u8, args: anytype) error{Usage} {
+    diagnostic(fmt, args);
+    return error.Usage;
+}
+
+/// Reports a per-input failure on stderr and marks the run failed (exit 1)
+/// without aborting: batch mode keeps going, single runs finish their output.
+fn failure(comptime fmt: []const u8, args: anytype) void {
+    diagnostic(fmt, args);
+    command_failed_flag = true;
+}
+
+fn diagnostic(comptime fmt: []const u8, args: anytype) void {
+    var buf: [512]u8 = undefined;
+    var w: Io.File.Writer = .init(.stderr(), io_global.io, &buf);
+    w.interface.print(fmt, args) catch {};
+    w.interface.flush() catch {};
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -184,6 +209,7 @@ pub fn main(init: std.process.Init) !void {
     if (stat.kind == .directory and (command == .diff or command == .managed)) {
         if (command == .managed) {
             cmdManaged(path, rest, &.{}, stdout) catch |err| {
+                if (err == error.Usage) std.process.exit(2);
                 if (err == error.WriteFailed) std.process.exit(141);
                 try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
                 try stderr.flush();
@@ -193,13 +219,14 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
         cmdDiff(path, rest, &.{}, stdout) catch |err| {
+            if (err == error.Usage) std.process.exit(2);
             if (err == error.WriteFailed) std.process.exit(141);
             try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
             try stderr.flush();
             std.process.exit(1);
         };
         finalFlush(stdout);
-        if (verify_failed_flag) std.process.exit(1);
+        if (verify_failed_flag or command_failed_flag) std.process.exit(1);
         return;
     }
     if (stat.kind == .directory and command != .diff) {
@@ -229,6 +256,7 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             };
             runCommand(command, full, rest, bytes, stdout) catch |err| {
+                if (err == error.Usage) std.process.exit(2);
                 if (err == error.WriteFailed) std.process.exit(141);
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 try stderr.flush();
@@ -247,6 +275,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     runCommand(command, path, rest, bytes, stdout) catch |err| {
+        if (err == error.Usage) std.process.exit(2);
         if (err == error.WriteFailed) std.process.exit(141);
         try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
         try stderr.flush();
@@ -279,7 +308,7 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
                 } else if (std.mem.eql(u8, arg, "--json")) {
                     json = true;
                 } else {
-                    return error.InvalidOption;
+                    return usageError("unityz: unknown info option '{s}'\n", .{arg});
                 }
             }
             return cmdInfo(path, bytes, dump, objects, json, stdout);
@@ -614,8 +643,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             summary_mode = true;
         } else if (std.mem.eql(u8, arg, "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                try stdout.print("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
-                return;
+                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
             };
             i += 1;
         } else if (std.mem.eql(u8, arg, "--outdir") and i + 1 < rest.len) {
@@ -623,8 +651,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             i += 1;
         } else if (std.mem.eql(u8, arg, "--path-id") and i + 1 < rest.len) {
             path_filter = parseSelector(rest[i + 1]) catch {
-                try stdout.print("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
-                return;
+                return usageError("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
             };
             i += 1;
         } else if (std.mem.eql(u8, arg, "--name") and i + 1 < rest.len) {
@@ -640,8 +667,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             trees_path = rest[i + 1];
             i += 1;
         } else {
-            try stdout.print("unityz: unknown extract option '{s}'\n", .{arg});
-            return;
+            return usageError("unityz: unknown extract option '{s}'\n", .{arg});
         }
     }
     if (raw and json_mode) {
@@ -1292,8 +1318,7 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
         } else if (std.mem.eql(u8, rest[i], "--json")) {
             json = true;
         } else {
-            try stdout.print("unityz: unknown fsb option '{s}'\n", .{rest[i]});
-            return false;
+            return usageError("unityz: unknown fsb option '{s}'\n", .{rest[i]});
         }
     }
     if (json and outdir != null) {
@@ -4818,14 +4843,12 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                try stdout.print("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
-                return;
+                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
             };
             i += 1;
         } else if (std.mem.eql(u8, rest[i], "--path-id") and i + 1 < rest.len) {
             path_filter = parseSelector(rest[i + 1]) catch {
-                try stdout.print("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
-                return;
+                return usageError("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
             };
             i += 1;
         } else if (std.mem.eql(u8, rest[i], "--json")) {
@@ -4834,8 +4857,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
             trees_path = rest[i + 1];
             i += 1;
         } else {
-            try stdout.print("unityz: unknown verify option '{s}'\n", .{rest[i]});
-            return;
+            return usageError("unityz: unknown verify option '{s}'\n", .{rest[i]});
         }
     }
 
@@ -5459,8 +5481,7 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             trees_path = rest[ai + 1];
             ai += 1;
         } else {
-            try stdout.print("unityz: unknown skin option '{s}'\n", .{arg});
-            return;
+            return usageError("unityz: unknown skin option '{s}'\n", .{arg});
         }
     }
 
@@ -5590,25 +5611,15 @@ fn diag(json: bool, stdout: *Io.Writer, comptime fmt: []const u8, args: anytype)
 
 /// Reports a per-file failure on stderr, keeping it out of the stdout
 /// stream that carries the command's (possibly JSON) result.
-fn warnToStderr(path: []const u8, err: anyerror) void {
-    var buf: [512]u8 = undefined;
-    var w: Io.File.Writer = .init(.stderr(), io_global.io, &buf);
-    w.interface.print("unityz: {s}: {s}\n", .{ path, @errorName(err) }) catch return;
-    w.interface.flush() catch {};
-}
-
 /// Compares two directories file-by-file by content hash, reporting
 /// unchanged/changed/new/deleted files and totals. UnityPy has no tree
 /// comparison.
-fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool, pixels: bool, audio: bool, class_filter: ?i32, stdout: *Io.Writer) !void {
+fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool, pixels: bool, audio: bool, fields: bool, class_filter: ?i32, stdout: *Io.Writer) !void {
     const DirFile = struct { name: []const u8, hash: u64, size: u64 };
     var files_a: std.ArrayList(DirFile) = .empty;
     var files_b: std.ArrayList(DirFile) = .empty;
 
-    var dir = std.Io.Dir.cwd().openDir(io, dir_a, .{ .iterate = true }) catch |err| {
-        try stdout.print("unityz: {s}: {s}\n", .{ dir_a, @errorName(err) });
-        return;
-    };
+    var dir = std.Io.Dir.cwd().openDir(io, dir_a, .{ .iterate = true }) catch |err| return failure("unityz: {s}: {s}\n", .{ dir_a, @errorName(err) });
     defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
@@ -5617,7 +5628,7 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
         const data = std.Io.Dir.cwd().readFileAlloc(io, full, std.heap.page_allocator, .unlimited) catch |err| {
             // Dropping it silently would report the file as "only in" the
             // other directory, which reads as a real difference.
-            warnToStderr(full, err);
+            diagnostic("unityz: {s}: {s}\n", .{ full, @errorName(err) });
             continue;
         };
         // `entry.name` borrows the iterator's buffer and is overwritten by the
@@ -5629,17 +5640,14 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
         std.heap.page_allocator.free(data);
     }
 
-    var dir2 = std.Io.Dir.cwd().openDir(io, dir_b, .{ .iterate = true }) catch |err| {
-        try stdout.print("unityz: {s}: {s}\n", .{ dir_b, @errorName(err) });
-        return;
-    };
+    var dir2 = std.Io.Dir.cwd().openDir(io, dir_b, .{ .iterate = true }) catch |err| return failure("unityz: {s}: {s}\n", .{ dir_b, @errorName(err) });
     defer dir2.close(io);
     var it2 = dir2.iterate();
     while (try it2.next(io)) |entry| {
         if (entry.kind != .file) continue;
         const full = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_b, entry.name });
         const data = std.Io.Dir.cwd().readFileAlloc(io, full, std.heap.page_allocator, .unlimited) catch |err| {
-            warnToStderr(full, err);
+            diagnostic("unityz: {s}: {s}\n", .{ full, @errorName(err) });
             continue;
         };
         try files_b.append(std.heap.page_allocator, .{ .name = full[dir_b.len + 1 ..], .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
@@ -5680,7 +5688,7 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
             // The pixel/audio passes run on every matched pair, not only
             // changed files: streamed pixels/audio live outside the file's
             // serialized bytes, so the file hash cannot see .resS edits.
-            if (pixels or audio) {
+            if (pixels or audio or (fields and fa.hash != fb.hash)) {
                 const pa = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_a, fa.name });
                 defer std.heap.page_allocator.free(pa);
                 const pb = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_b, fb.name });
@@ -5714,10 +5722,13 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
                         try diag_out.print("  audio in {s}:\n", .{fa.name});
                         try audioPass(arena_state.allocator(), data_a, data_b, class_filter, diag_out, &audio_stats);
                     }
+                    if (fields and fa.hash != fb.hash) {
+                        try diag_out.print("  fields in {s}:\n", .{fa.name});
+                        try fieldsPass(arena_state.allocator(), data_a, data_b, class_filter, diag_out);
+                    }
                     if (json) try err_writer.flush();
                 }
             }
-            break;
         }
         if (!matched) {
             only_a += 1;
@@ -5799,21 +5810,18 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--path-id") and i + 1 < rest.len) {
             path_filter = parseSelector(rest[i + 1]) catch {
-                try stdout.print("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
-                return;
+                return usageError("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
             };
             i += 1;
         } else if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                try stdout.print("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
-                return;
+                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
             };
             i += 1;
         } else if (std.mem.eql(u8, rest[i], "--json")) {
             json = true;
         } else {
-            try stdout.print("unityz: unknown hash option '{s}'\n", .{rest[i]});
-            return;
+            return usageError("unityz: unknown hash option '{s}'\n", .{rest[i]});
         }
     }
 
@@ -6079,6 +6087,27 @@ const FieldDiff = struct {
 /// changed object, by decoding both value trees and walking them. Field
 /// paths look like `m_LocalPosition.x` or `m_Children[2]`. With
 /// `collect` set (json mode) the entries are appended instead of printed.
+/// The `--fields` pass for one matched file pair: every object whose bytes
+/// changed gets its exact changed field paths printed, as the single-file
+/// diff does.
+fn fieldsPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, class_filter: ?i32, out: *Io.Writer) !void {
+    var a_list: std.ArrayList(Fp) = .empty;
+    var b_list: std.ArrayList(Fp) = .empty;
+    try collectFingerprints(arena, a_bytes, class_filter, null, &a_list);
+    try collectFingerprints(arena, b_bytes, class_filter, null, &b_list);
+    var b_by_key: FpMap = .empty;
+    defer b_by_key.deinit(std.heap.page_allocator);
+    for (b_list.items) |fb| {
+        const gop = try b_by_key.getOrPut(std.heap.page_allocator, .{ .path_id = fb.path_id, .node = fb.node });
+        if (!gop.found_existing) gop.value_ptr.* = fb;
+    }
+    for (a_list.items) |fa| {
+        const fb = b_by_key.get(.{ .path_id = fa.path_id, .node = fa.node }) orelse continue;
+        if (fb.hash == fa.hash and fb.size == fa.size) continue;
+        try diffObjectFields(arena, a_bytes, b_bytes, fa, null, out);
+    }
+}
+
 fn diffObjectFields(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, collect: ?*std.ArrayList(FieldDiff), stdout: *Io.Writer) !void {
     const va = try findObjectValue(arena, a_bytes, fa);
     const vb = try findObjectValue(arena, b_bytes, fa);
@@ -6445,8 +6474,7 @@ fn findObjectRgbaInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_
 /// comparison. Both files must be the same container kind.
 fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     if (rest.len < 1) {
-        try stdout.print("unityz: diff needs: <file2>\n", .{});
-        return;
+        return usageError("unityz: diff needs: <file2>\n", .{});
     }
     var json = false;
     var pixels = false;
@@ -6465,13 +6493,11 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             fields = true;
         } else if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                try stdout.print("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
-                return;
+                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
             };
             i += 1;
         } else {
-            try stdout.print("unityz: unknown diff option '{s}'\n", .{rest[i]});
-            return;
+            return usageError("unityz: unknown diff option '{s}'\n", .{rest[i]});
         }
     }
     const io = io_global.io;
@@ -6480,17 +6506,11 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         try stdout.print("unityz: {s}: FileNotFound\n", .{path});
         return;
     };
-    const stat_b = std.Io.Dir.cwd().statFile(io, rest[0], .{}) catch {
-        try stdout.print("unityz: {s}: FileNotFound\n", .{rest[0]});
-        return;
-    };
+    const stat_b = std.Io.Dir.cwd().statFile(io, rest[0], .{}) catch return failure("unityz: {s}: FileNotFound\n", .{rest[0]});
     if (stat_a.kind == .directory or stat_b.kind == .directory) {
-        return diffDirectories(io, path, rest[0], json, pixels, audio, class_filter, stdout);
+        return diffDirectories(io, path, rest[0], json, pixels, audio, fields, class_filter, stdout);
     }
-    const other_bytes = std.Io.Dir.cwd().readFileAlloc(io, rest[0], std.heap.page_allocator, .unlimited) catch |err| {
-        try stdout.print("unityz: {s}: {s}\n", .{ rest[0], @errorName(err) });
-        return;
-    };
+    const other_bytes = std.Io.Dir.cwd().readFileAlloc(io, rest[0], std.heap.page_allocator, .unlimited) catch |err| return failure("unityz: {s}: {s}\n", .{ rest[0], @errorName(err) });
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
@@ -6499,8 +6519,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     const kind_a = unityz.container.sniff(bytes).container;
     const kind_b = unityz.container.sniff(other_bytes).container;
     if (kind_a != kind_b or (kind_a != .serialized and kind_a != .bundle and kind_a != .webfile)) {
-        try stdout.print("unityz: diff needs two serialized files, bundles, or webfiles of the same kind\n", .{});
-        return;
+        return failure("unityz: diff needs two serialized files, bundles, or webfiles of the same kind\n", .{});
     }
 
     var a_list: std.ArrayList(Fp) = .empty;
@@ -6862,12 +6881,10 @@ fn parseSelector(text: []const u8) !Selector {
 /// specific container entry.
 fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer, shader_only: bool) !bool {
     if (rest.len < 1) {
-        try stdout.print("unityz: show needs: <path-id>\n", .{});
-        return false;
+        return usageError("unityz: show needs: <path-id>\n", .{});
     }
     const sel = parseSelector(rest[0]) catch {
-        try stdout.print("unityz: invalid path id '{s}'\n", .{rest[0]});
-        return false;
+        return usageError("unityz: invalid path id '{s}'\n", .{rest[0]});
     };
     var raw = false;
     var trees_path: ?[]const u8 = null;
@@ -6879,8 +6896,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             trees_path = rest[i + 1];
             i += 1;
         } else {
-            try stdout.print("unityz: unknown show option '{s}'\n", .{rest[i]});
-            return false;
+            return usageError("unityz: unknown show option '{s}'\n", .{rest[i]});
         }
     }
 
@@ -7061,8 +7077,7 @@ fn dumpHex(data: []const u8, stdout: *Io.Writer) !void {
 /// has no search.
 fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     if (rest.len < 1) {
-        try stdout.print("unityz: find needs: <substring> [--class <id>] [--json] [--exact]\n", .{});
-        return;
+        return usageError("unityz: find needs: <substring> [--class <id>] [--json] [--exact]\n", .{});
     }
     const needle = rest[0];
     var class_filter: ?i32 = null;
@@ -7074,8 +7089,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                try stdout.print("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
-                return;
+                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
             };
             i += 1;
         } else if (std.mem.eql(u8, rest[i], "--json")) {
@@ -7088,8 +7102,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             trees_path = rest[i + 1];
             i += 1;
         } else {
-            try stdout.print("unityz: unknown find option '{s}'\n", .{rest[i]});
-            return;
+            return usageError("unityz: unknown find option '{s}'\n", .{rest[i]});
         }
     }
 
@@ -7269,8 +7282,7 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
             class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                try stdout.print("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
-                return;
+                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
             };
             i += 1;
         } else if (std.mem.eql(u8, rest[i], "--json")) {
@@ -7281,8 +7293,7 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
             trees_path = rest[i + 1];
             i += 1;
         } else {
-            try stdout.print("unityz: unknown stats option '{s}'\n", .{rest[i]});
-            return;
+            return usageError("unityz: unknown stats option '{s}'\n", .{rest[i]});
         }
     }
     if (json and dups_only) {
@@ -8123,12 +8134,10 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         return cmdEditPatch(path, out_path, patch_text, verify, bytes, injected, stdout);
     }
     if (pairs.items.len < 2 or pairs.items.len % 2 != 0) {
-        try stdout.print("unityz: edit needs: <path_id> <field> <json-value> [<field> <json-value> ...]\n", .{});
-        return;
+        return usageError("unityz: edit needs: <path_id> <field> <json-value> [<field> <json-value> ...]\n", .{});
     }
     const sel = parseSelector(rest[0]) catch {
-        try stdout.print("unityz: invalid path id '{s}'\n", .{rest[0]});
-        return;
+        return usageError("unityz: invalid path id '{s}'\n", .{rest[0]});
     };
 
     switch (unityz.container.sniff(bytes).container) {
@@ -8605,7 +8614,7 @@ fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, s
             trees_path = rest[i + 1];
             i += 1;
         } else {
-            return error.InvalidOption;
+            return usageError("unityz: unknown hierarchy option '{s}'\n", .{arg});
         }
     }
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -8672,8 +8681,7 @@ fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             trees_path = rest[i + 1];
             i += 1;
         } else {
-            try stdout.print("unityz: unknown managed option '{s}'\n", .{arg});
-            return;
+            return usageError("unityz: unknown managed option '{s}'\n", .{arg});
         }
     }
 
@@ -9917,4 +9925,35 @@ test "writeShaderText emits a ShaderLab reconstruction" {
     try std.testing.expect(std.mem.indexOf(u8, text, "Name \"FORWARD\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "//   vertex: 5 variant(s)") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Fallback \"Diffuse\"") != null);
+}
+
+test "diffDirectories visits every matched file, not only the first" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    io_global.io = io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "a");
+    try tmp.dir.createDirPath(io, "b");
+    const same = try typelessMonoFixture(a, try monoScriptPayload(a));
+    const other = try typelessMonoFixture(a, "other payload bytes!");
+    // Three matched pairs: two changed, one unchanged, plus one only in b.
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/x", .data = same });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b/x", .data = other });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/y", .data = same });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b/y", .data = other });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/z", .data = same });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b/z", .data = same });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b/w", .data = same });
+
+    const dir_a = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/a", .{&tmp.sub_path});
+    const dir_b = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/b", .{&tmp.sub_path});
+    var out: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(a, &out);
+    try diffDirectories(io, dir_a, dir_b, true, false, false, false, null, &aw.writer);
+    const json = aw.toArrayList().items;
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"unchanged\":1,\"changed\":2,\"only_a\":0,\"only_b\":1") != null);
 }

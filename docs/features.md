@@ -257,6 +257,20 @@ reference is caught at verify time. `diff` compares files by content
 hash and optionally decodes matched objects: `--pixels` (per-channel
 pixel diffs for textures/sprites), `--audio` (streamed audio data),
 `--fields` (the exact changed field paths and values).
+Directory diffs run the same three passes on every matched file pair.
+
+## Exit codes
+
+Every command follows one contract, so scripts can branch on the status
+without parsing output:
+
+- 0: the command ran; for `verify`, `skin`, and `fsb --json` this also
+  means every check passed.
+- 1: an input could not be read or decoded, or a check failed. Batch runs
+  over a directory keep going and return 1 at the end if any member failed.
+- 2: a usage error: an unknown flag, a missing argument, or a malformed
+  id. The diagnostic goes to stderr and nothing is written to stdout, so a
+  bad flag can never be mistaken for a successful machine-readable run.
 
 Whole-file evidence: the real 7DTD bundle (Unity 2022.3.62f2, fully
 typeless) extracts to 8090 files with zero decode failures (260 PNGs,
