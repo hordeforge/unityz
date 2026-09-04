@@ -234,6 +234,7 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(1);
             };
             finalFlush(stdout);
+            if (command_failed_flag) std.process.exit(1);
             return;
         }
         cmdDiff(path, rest, &.{}, stdout) catch |err| {
@@ -9001,13 +9002,14 @@ fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, std
     var total_classes: usize = 0;
     for (files.names.items, 0..) |fname, fi| {
         const assembly = unityz.dotnet.parseAssembly(arena, fname, files.datas.items[fi]) catch |err| {
+            // An assembly that does not parse leaves the listing incomplete, so
+            // the run fails; --json keeps the per-file error entry as well.
             if (json) {
                 if (!first_asm) try stdout.writeByte(',');
                 try stdout.print("{{\"file\":\"{s}\",\"error\":\"{s}\"}}", .{ fname, @errorName(err) });
                 first_asm = false;
-            } else {
-                try stdout.print("{s}: {s}\n", .{ fname, @errorName(err) });
             }
+            failure("unityz: {s}: {s}\n", .{ fname, @errorName(err) });
             continue;
         };
         // collect MonoBehaviour subclasses
