@@ -212,9 +212,6 @@ pub fn buildTypeMap(arena: std.mem.Allocator, assemblies: []const dotnet.Assembl
 // Field -> flat typetree nodes
 // ---------------------------------------------------------------------------
 
-/// Appends one flat node (and its children) for a managed field.
-/// `types` resolves class/valuetype names; `warn` collects unsupported
-/// types so the caller can report them.
 /// Whether a field is delegate-typed: one of the System delegate
 /// families (Action<...>, Func<...>, EventHandler, ...) by name, or a
 /// same-assembly type deriving from System.Delegate. Unity never
@@ -248,6 +245,9 @@ fn classNotSerializable(type_name: []const u8, types: *const TypeMap) bool {
     return !info.is_serializable;
 }
 
+/// Appends one flat node (and its children) for a managed field.
+/// `types` resolves class/valuetype names; `warn` collects unsupported
+/// types so the caller can report them.
 fn appendFieldNodes(
     arena: std.mem.Allocator,
     out: *std.ArrayList(typetree.Node),
