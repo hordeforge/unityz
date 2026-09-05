@@ -26,26 +26,29 @@ Nothing in flight.
   and versions, and `--builtin` decodes stripped files' built-in classes
   through it. Exact-release matching only. See "Built-in engine-class
   trees" in [features.md](features.md).
+- MonoBehaviour serialization rules (PRs #160-#164, 2026-09-05):
+  `managed --trees` now matches Unity's field rules for real game data:
+  `[HideInInspector]` publics and the `fdNotSerialized` flag, delegate
+  skipping, per-field 4-byte cells for every sub-4-byte field, per-string
+  array alignment, native engine structs (`LayerMask`, `Hash128`), and
+  generic/cross-assembly base chains. Class-114 decode failures drop on
+  Raft (46 -> 23), Green Hell (21167 -> 2594), The Forest (550 -> 324),
+  and Stranded Deep (623 -> 540 while decoding 551 more objects). The
+  residue in every game is data authored by older class layouts : a
+  documented data-age limit, not a tree bug (see features.md).
 - Creation from empty state (2026-09-05): `create <spec.json> --out
   <file>` builds a format-22 SerializedFile and a UnityFS v8 bundle from
   declared type trees, JSON object values, and an optional `.resource`
   sidecar (stored or LZ4), re-verifying before it writes; the 7DTD
   pipeline's self-test bundle reproduces byte for byte. See "Creating
   files" in [features.md](features.md).
-- CLI automation contract (PRs #139-#151, 2026-09-04): usage errors exit 2
-  and every read, decode, or check failure exits 1, always with the
-  diagnostic on stderr and nothing on stdout; batch `--json` wraps each
-  file's documents as `{"file":...,"results":[...]}`; batch `extract`
-  writes each file under its own subdirectory; directory `diff` compares
-  every matched file (it stopped after the first) and runs `--fields`;
-  `diff --trees` decodes typeless Mono objects; `verify --path-id` on a
-  missing object fails; `unityz --version` is derived from build.zig.zon
-  so it cannot drift from the package version. Later PRs in the run
-  add the `trees` command (export a file's embedded type trees as a
-  `--trees` table), make bundles extract their assets by default, keep
-  `fsb` batch output apart, reject `--out` over a directory, make
-  `edit --patch` atomic on a missing object, and fix `managed` exit
-  codes. Handover:
+- CLI automation contract (PRs #139-#151, 2026-09-04): usage errors exit 2,
+  read/decode/check failures exit 1, diagnostics on stderr only; batch
+  `--json` wraps per-file results, directory `diff` compares every matched
+  file and runs `--fields`, and `verify --path-id` fails on a missing
+  object. Later PRs added the `trees` command, default bundle asset
+  extraction, `edit --patch` atomicity, and `managed` exit codes.
+  Handover:
   [2026-09-04-cli-contract-sweep.md](handovers/2026-09-04-cli-contract-sweep.md). See the "Batch mode" and
   "Exit codes" sections of [features.md](features.md).
 - Managed trees and modern mesh export (PRs #110-#111, #115-#116):

@@ -214,28 +214,38 @@ For Mono games the script trees can be generated from the game itself:
 `managed <dir> --trees out.json` reads every assembly under
 `<dir>/Managed` (pure Zig, no CLR) and emits the MonoBehaviour script
 trees plus the mono-script mapping. Field visibility follows Unity's
-serializer: public instance fields, plus private/protected ones marked
-`[SerializeField]`, base-class fields first; `[NonSerialized]` public
-fields are skipped (`[HideInInspector]` still serializes). Bool fields
-occupy their own 4-byte-aligned slot; delegate fields and single
-plain-class fields whose class lacks `[Serializable]` are omitted, while
-arrays of plain classes serialize regardless. Known layout limits fall
-back to 4-byte `int` placeholders so byte alignment is preserved.
+serializer:
+
+- public instance fields serialize, plus private/protected ones marked
+  `[SerializeField]`, base-class fields first;
+- `[NonSerialized]` public fields are skipped (`[HideInInspector]` still
+  serializes);
+- every sub-4-byte field (bool/char/byte/short) occupies its own
+  4-byte-aligned cell, and strings inside arrays pad per element;
+- delegate fields and single plain-class fields whose class lacks
+  `[Serializable]` are omitted, while arrays of plain classes serialize
+  regardless;
+- base chains resolve across assemblies, including through generic
+  bases (TypeSpec `extends`).
+
+Known layout limits fall back to 4-byte `int` placeholders so byte
+alignment is preserved.
 
 A class's generated tree matches objects only when the data was
 serialized by the same class definition the assemblies describe. Long
 lived games ship assets built by earlier releases: an object whose class
-later gained fields decodes only up to its older layout's last field,
-and `verify` reports it (`OutOfBounds` when the tree runs past the
+later gained fields decodes only up to its older layout's last field.
+`verify` reports the mismatch (`OutOfBounds` when the tree runs past the
 object, `bytes differ` when trailing fields were read at shifted
-offsets). No metadata-driven tree can recover those objects — the wire
-carries no field names — so whole-class residues of that shape are data
-age, not a tree bug. Green Hell's `resources.assets` is the measured
-example: after matching every serialization rule above, the remaining
-class-114 objects all over-read by a fixed per-class amount
-(`Construction`, `ConstructionGhost`, `ItemSlot`, `ItemSlotStack`,
-`Decoration`, `AIs.AI`, ...), each stopping cleanly at an older
-field-list boundary.
+offsets).
+
+No metadata-driven tree can recover such objects: the wire carries no
+field names, so whole-class residues of that shape are data age, not a
+tree bug. Green Hell's `resources.assets` is the measured example: after
+matching every serialization rule above, the remaining class-114 objects
+all over-read by a fixed per-class amount (`Construction`,
+`ConstructionGhost`, `ItemSlot`, `ItemSlotStack`, `Decoration`,
+`AIs.AI`, ...), each stopping cleanly at an older field-list boundary.
 
 A typeless file holds built-in objects (Mesh, Texture2D, ...) as well as
 scripts, so full coverage needs both generators' output merged: the
