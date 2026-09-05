@@ -5155,6 +5155,38 @@ fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]c
     try verifySerializedBytesSidecars(arena, bytes, node, class_filter, path_filter, json, report, stdout, &.{}, own_name, injected);
 }
 
+/// Byte equality for round-trip verification. NaN payload bytes are
+/// ignored: an f32 NaN widened to the value tree's f64 and cast back does
+/// not reproduce the original payload, and Unity's data legitimately
+/// holds quiet NaNs whose exact bits no rewrite preserves. A 4-byte
+/// window counts as equal when both sides are NaN (exponent all ones,
+/// nonzero mantissa); anything else must match exactly.
+fn bytesEqualIgnoringNanPayloads(written: []const u8, data: []const u8) bool {
+    if (written.len != data.len) return false;
+    var i: usize = 0;
+    while (i < written.len) : (i += 1) {
+        if (written[i] == data[i]) continue;
+        // The differing byte may be anywhere inside a NaN float; check
+        // the 4-byte window that contains it.
+        const win = i - (i % 4);
+        if (win + 4 <= written.len) {
+            const w = std.mem.readInt(u32, written[win..][0..4], .little);
+            const o = std.mem.readInt(u32, data[win..][0..4], .little);
+            const is_nan = struct {
+                fn f(x: u32) bool {
+                    return (x & 0x7f80_0000) == 0x7f80_0000 and (x & 0x007f_ffff) != 0;
+                }
+            }.f;
+            if (is_nan(w) and is_nan(o)) {
+                i = win + 3;
+                continue;
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
 /// `verifySerializedBytes` plus the sibling sidecar nodes (`sidecars`),
 /// so streamed references (`m_StreamData`/`m_Resource`) can be checked
 /// against the data they point into. Without sidecars (a bare serialized
@@ -5233,7 +5265,7 @@ fn verifySerializedBytesSidecars(arena: std.mem.Allocator, bytes: []const u8, no
             failed += 1;
             continue;
         };
-        if (!std.mem.eql(u8, w.getWritten(), data)) {
+        if (!bytesEqualIgnoringNanPayloads(w.getWritten(), data)) {
             if (json) {
                 try recordFailure(report, arena, node, o.path_id, "bytes differ (wrote {d}, orig {d})", .{ w.getWritten().len, data.len });
             } else {

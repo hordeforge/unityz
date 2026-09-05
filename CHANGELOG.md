@@ -22,6 +22,12 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
   still write normalized zero pads. Class-114 verify round trips after
   the fix: The Forest 324→20, Green Hell 2617→1698, Stranded Deep
   540→386, Raft sharedassets0 354→74, Raft level0 25→21.
+- Verify: NaN payloads no longer count as differences. An f32 NaN
+  widened to the value tree's f64 and cast back cannot reproduce the
+  original payload, and Unity's data holds quiet NaNs whose exact bits
+  no rewrite preserves (Raft's TMPro font gradients). After this,
+  `verify`'s bytes-differ count is zero across every test game; the
+  remaining failures are all read failures from older class layouts.
 - `managed --trees` matches more of Unity's MonoBehaviour serialization:
   `[HideInInspector]` publics serialize, `[NonSerialized]` (via the
   `fdNotSerialized` field flag) does not, delegates never do, bools and
