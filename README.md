@@ -96,6 +96,10 @@ read or check failures exit 1, always with the diagnostic on stderr. See
 - `trees` - export the type trees embedded in a file as a `--trees` JSON
   table (`--out <file.json>`), so a game's own AssetBundles, which keep
   their trees, supply version-exact trees for its stripped `.assets` files
+- `trees --builtin <release>` - export the built-in engine-class trees
+  unityz ships for one exact Unity release (`--class <id>` for one class);
+  `--builtin` on any `--trees`-taking command decodes a stripped file's
+  built-in classes through them
 
 ### Typeless files
 
@@ -115,6 +119,12 @@ serialized files, so the trees match that specific game's layouts. For
 version-generic trees instead, `scripts/structsdump-to-trees.py`
 converts AssetRipper's public type-tree dumps into the format, and
 `scripts/merge-trees.py` joins the two halves for full coverage.
+
+unityz also ships the built-in engine-class trees of specific Unity
+releases (currently 2022.3.62f2) inside the binary. `--builtin` on any of
+the commands above decodes a stripped file's built-in classes through the
+shipped trees for the file's own exact release, and `trees --builtin
+<release>` exports them; MonoBehaviour script fields still need `--trees`.
 
 Without trees, a typeless file reports how many objects were skipped.
 

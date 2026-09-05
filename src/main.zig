@@ -115,6 +115,17 @@ const usage =
     \\                 game's own bundles supply version-exact trees for
     \\                 its typeless files; MonoBehaviour trees are keyed
     \\                 by script class via the container's MonoScripts
+    \\  trees --builtin <release>  Export the built-in engine-class trees
+    \\                 unityz ships for one exact Unity release (currently
+    \\                 2022.3.62f2) in the same JSON shape (--class <id>
+    \\                 for one class; --out <file.json>); an unknown
+    \\                 release or class is a failure
+    \\
+    \\Global option:
+    \\  --builtin      With any command that accepts --trees: decode a
+    \\                 typeless file's built-in classes through the shipped
+    \\                 trees for its own Unity release (exact match only;
+    \\                 MonoBehaviour script fields still need --trees)
     \\
     \\Edit usage: unityz edit <file> <path_id> <field> <json-value> [<field> <json-value> ...]
     \\  <field> may be dotted and indexed, e.g. m_Container[0][1].preloadSize
@@ -206,6 +217,21 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     };
 
+    // `trees --builtin <release>` reads no file: it exports the shipped
+    // database, so it is dispatched before the path argument is required.
+    if (command == .trees and args.len >= 2 and std.mem.eql(u8, args[1], "--builtin")) {
+        cmdTreesBuiltin(args[2..], stdout) catch |err| {
+            if (err == error.Usage) std.process.exit(2);
+            if (err == error.WriteFailed) std.process.exit(141);
+            try stderr.print("unityz: {s}\n", .{@errorName(err)});
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        finalFlush(stdout);
+        if (command_failed_flag) std.process.exit(1);
+        return;
+    }
+
     if (args.len < 2) {
         try stderr.print("unityz: '{s}' needs a path argument\n\n{s}\n", .{ arg0, usage });
         try stderr.flush();
@@ -215,7 +241,18 @@ pub fn main(init: std.process.Init) !void {
     // Read the whole file once; the parsers borrow from the buffer. A
     // directory argument processes every file in it (batch mode).
     const path = args[1];
-    const rest = args[2..];
+    // `--builtin` is a global switch shared by every command that takes
+    // `--trees`; it is removed here so the per-command option parsers never
+    // see it.
+    var kept: std.ArrayList([]const u8) = .empty;
+    for (args[2..]) |a| {
+        if (std.mem.eql(u8, a, "--builtin")) {
+            builtin_mode = true;
+        } else {
+            try kept.append(arena, a);
+        }
+    }
+    const rest: []const []const u8 = kept.items;
 
     const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
         try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(error.FileNotFound) });
@@ -389,6 +426,10 @@ var extract_outdir: ?[]const u8 = null;
 /// (CAB-...) and would otherwise overwrite each other's files.
 var batch_mode: bool = false;
 
+/// `--builtin`: decode typeless objects through the built-in engine-class
+/// trees shipped for the file's own Unity release (see `builtin_trees`).
+var builtin_mode: bool = false;
+
 /// `extract <path> [--raw] [--json]` — write embedded assets (to the
 /// current directory or `--outdir <dir>`): bundle/webfile nodes as files,
 /// serialized-file textures as PNG, meshes as OBJ, text assets, sprites,
@@ -465,7 +506,68 @@ const InjectedTrees = struct {
     class_ids: std.AutoHashMapUnmanaged(i32, []const u8) = .empty,
     monoscripts: std.StringHashMapUnmanaged([]const u8) = .empty,
     mono_header: ?*const unityz.typetree.TypeTree = null,
+    /// Present under `--builtin`: the shipped release database, opened for
+    /// the file's revision and consulted for classes the injected table
+    /// lacks.
+    builtin: ?*BuiltinCache = null,
 };
+
+/// Lazily opened built-in database plus the trees already linked from it,
+/// so a file with thousands of objects decodes each class once.
+const BuiltinCache = struct {
+    arena: std.mem.Allocator,
+    revision: []const u8 = "",
+    db: ?unityz.builtin_trees.Db = null,
+    warned: bool = false,
+    trees: std.AutoHashMapUnmanaged(i32, ?*const unityz.typetree.TypeTree) = .empty,
+
+    fn tree(self: *BuiltinCache, revision: []const u8, class_id: i32) ?*const unityz.typetree.TypeTree {
+        if (!std.mem.eql(u8, self.revision, revision)) {
+            self.revision = revision;
+            self.trees = .empty;
+            self.db = unityz.builtin_trees.open(self.arena, revision) catch |err| blk: {
+                if (err == error.UnknownRevision and !self.warned) {
+                    self.warned = true;
+                    diagnostic("unityz: no built-in type trees for Unity {s}; shipped releases: {s}\n", .{ revision, releaseList() });
+                }
+                break :blk null;
+            };
+        }
+        const db = &(self.db orelse return null);
+        if (self.trees.get(class_id)) |cached| return cached;
+        const result: ?*const unityz.typetree.TypeTree = if (db.tree(self.arena, class_id)) |tt| blk: {
+            const tp = self.arena.create(unityz.typetree.TypeTree) catch return null;
+            tp.* = tt;
+            break :blk tp;
+        } else |_| null;
+        self.trees.put(self.arena, class_id, result) catch {};
+        return result;
+    }
+};
+
+/// The shipped built-in releases, comma-separated, for diagnostics.
+fn releaseList() []const u8 {
+    const list = comptime blk: {
+        var s: []const u8 = "";
+        for (unityz.builtin_trees.releases(), 0..) |r, i| s = s ++ (if (i == 0) "" else ", ") ++ r;
+        break :blk s;
+    };
+    return list;
+}
+
+/// The trees table a command decodes typeless objects with: the `--trees`
+/// file when given (null on a diagnostic, as before), plus the built-in
+/// release database under `--builtin`.
+fn loadTrees(arena: std.mem.Allocator, trees_path: ?[]const u8, stdout: *Io.Writer) !?*const InjectedTrees {
+    const from_file: ?*const InjectedTrees = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+    if (!builtin_mode) return from_file;
+    const table = try arena.create(InjectedTrees);
+    table.* = if (from_file) |f| f.* else .{};
+    const cache = try arena.create(BuiltinCache);
+    cache.* = .{ .arena = arena };
+    table.builtin = cache;
+    return table;
+}
 
 /// Reads and parses a `--trees` file into an InjectedTrees table (arena
 /// owned). Prints a diagnostic and returns null when the file is unreadable
@@ -592,8 +694,20 @@ fn buildInjectedTree(arena: std.mem.Allocator, name: []const u8, value: unityz.v
                 if (mf >= std.math.minInt(i32) and mf <= std.math.maxInt(i32)) {
                     node.meta_flags = @intCast(mf);
                 }
+            } else if (std.mem.eql(u8, ff.name, "m_ByteSize")) {
+                // Optional (older trees files omit it); carried so a tree
+                // exported from here reserializes with Unity's own sizes.
+                const bs = ff.value.asInt() orelse continue;
+                if (bs >= std.math.minInt(i32) and bs <= std.math.maxInt(i32)) node.byte_size = @intCast(bs);
+            } else if (std.mem.eql(u8, ff.name, "m_Version")) {
+                const ver = ff.value.asInt() orelse continue;
+                if (ver >= std.math.minInt(i32) and ver <= std.math.maxInt(i32)) node.version = @intCast(ver);
+            } else if (std.mem.eql(u8, ff.name, "m_TypeFlags")) {
+                const tf = ff.value.asInt() orelse continue;
+                if (tf >= 0 and tf <= 255) node.type_flags = @intCast(tf);
             }
         }
+        node.index = @intCast(i);
         nodes[i] = node;
     }
     const tree = unityz.typetree.fromFlatNodes(arena, nodes) catch |err| {
@@ -645,6 +759,8 @@ fn injectedTreeFor(
     data: []const u8,
 ) ?*const unityz.typetree.TypeTree {
     if (class_id == 114) {
+        // Script fields are not in the built-in database (it has only the
+        // MonoBehaviour header), so a script tree must come from `--trees`.
         const hdr = inj.mono_header orelse return null;
         var r = unityz.streams.Reader.init(data);
         r.endian = sf.endian;
@@ -653,8 +769,11 @@ fn injectedTreeFor(
         const cls = injectedScriptClass(inj, sf, own_basename, script) orelse return null;
         return inj.script_trees.get(cls);
     }
-    const name = inj.class_ids.get(class_id) orelse return null;
-    return inj.trees.get(name);
+    if (inj.class_ids.get(class_id)) |name| {
+        if (inj.trees.get(name)) |tp| return tp;
+    }
+    const cache = inj.builtin orelse return null;
+    return cache.tree(sf.unity_version, class_id);
 }
 
 fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
@@ -742,7 +861,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             var scripts: std.ArrayList(ScriptEntry) = .empty;
             const summary_ptr: ?*ExtractSummary = if (summary_mode) &summary else null;
             var sidecars: std.ArrayList(Sidecar) = .empty;
-            const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+            const injected = try loadTrees(arena, trees_path, stdout);
             const wf = unityz.webfile.parse(arena, bytes) catch |err| {
                 failure("unityz: {s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
                 return;
@@ -786,7 +905,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             var scripts: std.ArrayList(ScriptEntry) = .empty;
             const summary_ptr: ?*ExtractSummary = if (summary_mode) &summary else null;
             var sidecars: std.ArrayList(Sidecar) = .empty;
-            const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+            const injected = try loadTrees(arena, trees_path, stdout);
             const b = unityz.bundle.parse(arena, bytes) catch |err| {
                 failure("unityz: {s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
                 return;
@@ -834,7 +953,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             var summary: ExtractSummary = .{};
             var scripts: std.ArrayList(ScriptEntry) = .empty;
             const summary_ptr: ?*ExtractSummary = if (summary_mode) &summary else null;
-            const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+            const injected = try loadTrees(arena, trees_path, stdout);
             // Streamed textures/audio point at sibling `.resS` files; load
             // them so those references resolve for a bare serialized file.
             const sidecars = try diskSidecars(arena, path);
@@ -4908,7 +5027,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+    const injected = try loadTrees(arena, trees_path, stdout);
 
     var report: VerifyReport = .{};
     switch (unityz.container.sniff(bytes).container) {
@@ -5537,7 +5656,7 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+    const injected = try loadTrees(arena, trees_path, stdout);
 
     var shaders: std.ArrayList(ShaderSummary) = .empty;
     defer shaders.deinit(arena);
@@ -6578,7 +6697,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+    const injected = try loadTrees(arena, trees_path, stdout);
     if (stat_a.kind == .directory or stat_b.kind == .directory) {
         return diffDirectories(io, path, rest[0], json, pixels, audio, fields, class_filter, injected, stdout);
     }
@@ -6974,7 +7093,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+    const injected = try loadTrees(arena, trees_path, stdout);
 
     var found = false;
     var failed = false;
@@ -7176,7 +7295,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+    const injected = try loadTrees(arena, trees_path, stdout);
     var found: std.ArrayList(FindMatch) = .empty;
 
     switch (unityz.container.sniff(bytes).container) {
@@ -7368,7 +7487,7 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+    const injected = try loadTrees(arena, trees_path, stdout);
 
     if (json) {
         try statsJson(arena, bytes, class_filter, injected, basename(path), stdout);
@@ -8208,7 +8327,7 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             try pairs.append(arena, rest[i]);
         }
     }
-    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+    const injected = try loadTrees(arena, trees_path, stdout);
     if (patch_path) |pp| {
         const io = io_global.io;
         const patch_text = std.Io.Dir.cwd().readFileAlloc(io, pp, arena, .unlimited) catch |err| {
@@ -8848,6 +8967,89 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     if (unresolved != 0) diagnostic("unityz: {s}: {d} MonoBehaviour tree(s) skipped: their MonoScript is outside this file\n", .{ path, unresolved });
 }
 
+/// `trees --builtin <release> [--class <id>] [--out <file.json>]`: the
+/// shipped built-in engine-class trees of one release, in the `--trees`
+/// JSON shape (with `m_ByteSize`, `m_Version`, `m_TypeFlags`, `m_Index`).
+/// The release must match exactly; an unknown release or a class absent
+/// from it is a failure with nothing on stdout.
+fn cmdTreesBuiltin(rest: []const []const u8, stdout: *Io.Writer) !void {
+    if (rest.len == 0 or std.mem.startsWith(u8, rest[0], "--")) return usageError("unityz: trees --builtin needs a Unity release, e.g. 2022.3.62f2 (shipped: {s})\n", .{releaseList()});
+    const release = rest[0];
+    var out_path: ?[]const u8 = null;
+    var class_filter: ?i32 = null;
+    var i: usize = 1;
+    while (i < rest.len) : (i += 1) {
+        if (std.mem.eql(u8, rest[i], "--out") and i + 1 < rest.len) {
+            out_path = rest[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
+            class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch return usageError("unityz: --class needs an integer class id\n", .{});
+            i += 1;
+        } else if (std.mem.eql(u8, rest[i], "--json")) {
+            // the output is always JSON
+        } else {
+            return usageError("unityz: unknown trees option '{s}'\n", .{rest[i]});
+        }
+    }
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const db = unityz.builtin_trees.open(arena, release) catch |err| switch (err) {
+        error.UnknownRevision => {
+            failure("unityz: no built-in type trees for Unity {s}; shipped releases: {s}\n", .{ release, releaseList() });
+            return;
+        },
+        else => return err,
+    };
+    if (class_filter) |cid| {
+        if (db.class(cid) == null) {
+            failure("unityz: class {d} has no built-in type tree in Unity {s}\n", .{ cid, release });
+            return;
+        }
+    }
+
+    var json: std.ArrayList(u8) = .empty;
+    var jw = std.Io.Writer.Allocating.fromArrayList(arena, &json);
+    const w = &jw.writer;
+    const js = unityz.managed_trees.writeJsonString;
+    try w.writeAll("{\"__meta__\":{\"unity\":");
+    try js(w, release);
+    try w.writeAll(",\"source\":\"builtin\"},\"__class_ids__\":{");
+    var first = true;
+    for (db.classes) |c| {
+        if (class_filter) |cid| if (c.class_id != cid) continue;
+        if (!first) try w.writeByte(',');
+        first = false;
+        try js(w, c.name);
+        try w.print(":{d}", .{c.class_id});
+    }
+    try w.writeByte('}');
+    for (db.classes) |c| {
+        if (class_filter) |cid| if (c.class_id != cid) continue;
+        const tree = try db.tree(arena, c.class_id);
+        try w.writeByte(',');
+        try js(w, c.name);
+        try w.writeByte(':');
+        try w.writeAll(try unityz.managed_trees.nodesToJson(arena, try flattenTree(arena, &tree)));
+    }
+    try w.writeAll("}\n");
+    const out_bytes = jw.toArrayList().items;
+
+    if (out_path) |op| {
+        const io = io_global.io;
+        const file = std.Io.Dir.cwd().createFile(io, op, .{}) catch |err| {
+            failure("unityz: {s}: {s}\n", .{ op, @errorName(err) });
+            return;
+        };
+        defer file.close(io);
+        try file.writeStreamingAll(io, out_bytes);
+        try stdout.print("trees: {d} built-in class tree(s) for Unity {s} written to {s}\n", .{ if (class_filter != null) @as(usize, 1) else db.classes.len, release, op });
+    } else {
+        try stdout.writeAll(out_bytes);
+    }
+}
+
 /// Pre-order flat node list of a parsed tree, the wire layout the
 /// `--trees` format and `fromFlatNodes` expect.
 fn flattenTree(arena: std.mem.Allocator, tree: *const unityz.typetree.TypeTree) ![]const unityz.typetree.Node {
@@ -8882,7 +9084,7 @@ fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, s
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const injected = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+    const injected = try loadTrees(arena, trees_path, stdout);
     switch (unityz.container.sniff(bytes).container) {
         .bundle => {
             const b = try unityz.bundle.parse(arena, bytes);
@@ -9980,13 +10182,18 @@ fn monoScriptPayload(a: std.mem.Allocator) ![]u8 {
 /// A minimal v22 serialized file with `enable_type_tree = 0` (a Mono build
 /// strips the trees): one MonoScript type, one object holding `payload`.
 fn typelessMonoFixture(a: std.mem.Allocator, payload: []const u8) ![]u8 {
+    return typelessFixture(a, "2020.1.0f1", 115, payload);
+}
+
+/// The same stripped v22 layout for any revision and class.
+fn typelessFixture(a: std.mem.Allocator, unity_version: []const u8, class_id: i32, payload: []const u8) ![]u8 {
     var meta: unityz.streams.Writer = .init(a);
     defer meta.deinit();
-    try meta.writeStringToNull("2020.1.0f1"); // unity_version
+    try meta.writeStringToNull(unity_version);
     try meta.writeInt(i32, 3); // target_platform
     try meta.writeByte(0); // enable_type_tree = false: no trees follow
     try meta.writeInt(i32, 1); // one type
-    try meta.writeInt(i32, 115); // class_id MonoScript
+    try meta.writeInt(i32, class_id);
     try meta.writeByte(0); // is_stripped (v16+)
     try meta.writeInt(i16, -1); // script_type_index (v17+)
     try meta.writeBytes(&[_]u8{0} ** 16); // old_type_hash (v13+)
@@ -10081,6 +10288,102 @@ test "editSerializedPatches decodes a typeless file via injected trees" {
     try std.testing.expectEqualStrings("Patched", testFieldOf(v, "m_Name").?.string);
     try std.testing.expectEqual(@as(i64, 0), testFieldOf(v, "m_ExecutionOrder").?.int);
     try std.testing.expectEqualStrings("MyClass", testFieldOf(v, "m_ClassName").?.string);
+}
+
+test "--builtin decodes a stripped 2022.3.62f2 file through the shipped trees" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var sink: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(a, &sink);
+
+    // A TextAsset (class 49) serialized with the built-in 2022.3.62f2 tree,
+    // then stored in a file whose trees are stripped.
+    const tree = try unityz.builtin_trees.lookup(a, "2022.3.62f2", 49);
+    var pw: unityz.streams.Writer = .init(a);
+    defer pw.deinit();
+    const fields = [_]unityz.value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "hello" } },
+        .{ .name = "m_Script", .value = .{ .string = "body text" } },
+    };
+    try unityz.object_writer.writeObject(&pw, &tree.roots[0], .{ .obj = &fields }, "");
+    const payload = try a.dupe(u8, pw.getWritten());
+    const stripped = try typelessFixture(a, "2022.3.62f2", 49, payload);
+    const sf = try unityz.serialized.parse(a, stripped);
+    try std.testing.expect(!sf.enable_type_tree);
+    const o = sf.findObject(1).?;
+    const data = sf.objectData(o).?;
+
+    // Off by default: no table, so the typeless object stays skipped.
+    builtin_mode = false;
+    try std.testing.expect((try loadTrees(a, null, &aw.writer)) == null);
+
+    // On: the class resolves from the shipped database and decodes.
+    builtin_mode = true;
+    defer builtin_mode = false;
+    const inj = (try loadTrees(a, null, &aw.writer)).?;
+    const bt = injectedTreeFor(a, inj, &sf, "test.assets", o.class_id, data).?;
+    var r = unityz.streams.Reader.init(data);
+    r.endian = sf.endian;
+    const v = try unityz.object_reader.readObject(a, &r, &bt.roots[0]);
+    try std.testing.expectEqualStrings("hello", testFieldOf(v, "m_Name").?.string);
+    try std.testing.expectEqualStrings("body text", testFieldOf(v, "m_Script").?.string);
+    try std.testing.expectEqual(@as(usize, data.len), r.position());
+    // the tree is linked once per class and reused
+    try std.testing.expectEqual(bt, injectedTreeFor(a, inj, &sf, "test.assets", o.class_id, data).?);
+    // a class the release lacks stays undecodable rather than guessed
+    try std.testing.expect(injectedTreeFor(a, inj, &sf, "test.assets", 999999, data) == null);
+    // MonoBehaviour script fields are not in the database
+    try std.testing.expect(injectedTreeFor(a, inj, &sf, "test.assets", 114, data) == null);
+
+    // An unknown revision yields no tree (and one stderr diagnostic).
+    const other = try typelessFixture(a, "2019.4.40f1", 49, payload);
+    const sf2 = try unityz.serialized.parse(a, other);
+    const inj2 = (try loadTrees(a, null, &aw.writer)).?;
+    try std.testing.expect(injectedTreeFor(a, inj2, &sf2, "test.assets", 49, data) == null);
+    try std.testing.expect(inj2.builtin.?.warned);
+
+    // A file that carries its own trees never consults the database.
+    var inj3: InjectedTrees = .{};
+    try inj3.class_ids.put(a, 49, "TextAsset");
+    const own = try a.create(unityz.typetree.TypeTree);
+    own.* = tree;
+    try inj3.trees.put(a, "TextAsset", own);
+    inj3.builtin = inj.builtin;
+    try std.testing.expectEqual(own, injectedTreeFor(a, &inj3, &sf, "test.assets", 49, data).?);
+}
+
+test "trees --builtin exports the --trees JSON shape and rejects unknowns" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var sink: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(a, &sink);
+
+    try cmdTreesBuiltin(&.{ "2022.3.62f2", "--class", "49" }, &aw.writer);
+    const out = aw.toArrayList().items;
+    try std.testing.expect(std.mem.startsWith(u8, out, "{\"__meta__\":{\"unity\":\"2022.3.62f2\",\"source\":\"builtin\"},\"__class_ids__\":{\"TextAsset\":49}"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"m_ByteSize\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"m_Version\":") != null);
+    // the export feeds straight back into the injected-trees loader
+    const v = try parseJsonLiteralAlloc(a, out);
+    const table = try buildInjectedTrees(a, v.obj, &aw.writer);
+    try std.testing.expectEqualStrings("TextAsset", table.class_ids.get(49).?);
+    const tp = table.trees.get("TextAsset").?;
+    try std.testing.expectEqualStrings("m_Script", tp.roots[0].children[1].name);
+    try std.testing.expectEqual(@as(i32, 4), tp.roots[0].children[0].children[0].children[0].byte_size);
+
+    // unknown release / class: failure flag set, nothing written
+    const before = aw.toArrayList().items.len;
+    command_failed_flag = false;
+    try cmdTreesBuiltin(&.{"2019.4.40f1"}, &aw.writer);
+    try std.testing.expect(command_failed_flag);
+    command_failed_flag = false;
+    try cmdTreesBuiltin(&.{ "2022.3.62f2", "--class", "0" }, &aw.writer);
+    try std.testing.expect(command_failed_flag);
+    command_failed_flag = false;
+    try std.testing.expectEqual(before, aw.toArrayList().items.len);
+    try std.testing.expectError(error.Usage, cmdTreesBuiltin(&.{}, &aw.writer));
 }
 
 test "appendScriptEntry flattens MonoScript metadata for scripts.json" {

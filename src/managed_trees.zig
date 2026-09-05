@@ -502,7 +502,7 @@ pub fn nodesToJson(arena: std.mem.Allocator, nodes: []const typetree.Node) ![]co
         try writeJsonString(w, n.type_name);
         try w.writeAll(",\"m_Name\":");
         try writeJsonString(w, n.name);
-        try w.print(",\"m_Level\":{d},\"m_MetaFlag\":{d}}}", .{ n.level, n.meta_flags });
+        try w.print(",\"m_Level\":{d},\"m_MetaFlag\":{d},\"m_ByteSize\":{d},\"m_Version\":{d},\"m_TypeFlags\":{d},\"m_Index\":{d}}}", .{ n.level, n.meta_flags, n.byte_size, n.version, n.type_flags, n.index });
     }
     try w.writeByte(']');
     var list = aw.toArrayList();
