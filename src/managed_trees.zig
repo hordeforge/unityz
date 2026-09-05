@@ -113,6 +113,8 @@ pub const TypeInfo = struct {
     is_object_derived: bool = false,
     is_enum: bool = false,
     is_struct: bool = false,
+    is_delegate: bool = false,
+    is_serializable: bool = false,
 };
 
 pub const TypeMap = std.StringHashMapUnmanaged(TypeInfo);
@@ -120,6 +122,30 @@ pub const TypeMap = std.StringHashMapUnmanaged(TypeInfo);
 fn isEnum(td: dotnet.TypeDef) bool {
     const base = td.base_name orelse return false;
     return std.mem.eql(u8, base, "System.Enum");
+}
+
+/// Whether a same-assembly type derives from System.Delegate (a C#
+/// delegate declaration compiles to such a class). Delegate fields are
+/// never serialized by Unity, so the tree builder must skip them.
+fn isDelegate(arena: std.mem.Allocator, td: dotnet.TypeDef, type_defs: []const dotnet.TypeDef) bool {
+    var seen: usize = 0;
+    var current: ?dotnet.TypeDef = td;
+    while (current) |c| {
+        if (seen > 64) return false;
+        seen += 1;
+        const base = c.base_name orelse return false;
+        if (std.mem.eql(u8, base, "System.MulticastDelegate") or std.mem.eql(u8, base, "System.Delegate")) return true;
+        var found: ?dotnet.TypeDef = null;
+        for (type_defs) |d| {
+            if (std.mem.eql(u8, d.fullName(arena), base)) {
+                found = d;
+                break;
+            }
+        }
+        if (found == null) return false;
+        current = found;
+    }
+    return false;
 }
 
 /// Whether a type derives (transitively) from UnityEngine.Object, i.e. it
@@ -161,7 +187,7 @@ fn isObjectDerived(arena: std.mem.Allocator, td: dotnet.TypeDef, type_defs: []co
 pub fn buildTypeMap(arena: std.mem.Allocator, assemblies: []const dotnet.Assembly) !TypeMap {
     var map: TypeMap = .empty;
     for (assemblies) |assembly| {
-        for (assembly.type_defs) |td| {
+        for (assembly.type_defs, 0..) |td, tdi| {
             const name = td.fullName(arena);
             if (map.contains(name)) continue;
             var info = TypeInfo{};
@@ -171,6 +197,10 @@ pub fn buildTypeMap(arena: std.mem.Allocator, assemblies: []const dotnet.Assembl
                 info.fields = try dotnet.collectFields(arena, td, assembly.type_defs, assembly.field_serialized, assembly.field_nonserialized);
                 info.is_object_derived = isObjectDerived(arena, td, assembly.type_defs);
                 info.is_struct = (td.flags & 0x100) != 0; // ValueType
+                info.is_delegate = isDelegate(arena, td, assembly.type_defs);
+                if (tdi < assembly.type_serializable.len) {
+                    info.is_serializable = assembly.type_serializable[tdi];
+                }
             }
             try map.put(arena, name, info);
         }
@@ -181,6 +211,39 @@ pub fn buildTypeMap(arena: std.mem.Allocator, assemblies: []const dotnet.Assembl
 // ---------------------------------------------------------------------------
 // Field -> flat typetree nodes
 // ---------------------------------------------------------------------------
+
+/// Whether a field is delegate-typed: one of the System delegate
+/// families (Action<...>, Func<...>, EventHandler, ...) by name, or a
+/// same-assembly type deriving from System.Delegate. Unity never
+/// serializes delegates, so the tree omits these fields entirely.
+fn delegateTyped(field: dotnet.Field, types: *const TypeMap) bool {
+    if (field.elem_type == dotnet.element.genericinst) {
+        const families = [_][]const u8{
+            "System.Action",        "System.Func",              "System.Predicate",
+            "System.Comparison",    "System.Converter",         "System.EventHandler",
+            "System.AsyncCallback", "System.MulticastDelegate", "System.Delegate",
+        };
+        for (families) |f| {
+            if (std.mem.startsWith(u8, field.type_name, f)) return true;
+        }
+        return false;
+    }
+    if (field.elem_type == dotnet.element.class or field.elem_type == dotnet.element.valuetype) {
+        if (types.get(field.type_name)) |info| return info.is_delegate;
+    }
+    return false;
+}
+
+/// Unity skips a SINGLE field whose type is a plain (non-Object,
+/// non-struct, non-enum, non-delegate) class lacking [Serializable].
+/// Arrays and lists of such classes serialize regardless (verified on
+/// Raft: BlockSurface[] is on the wire though BlockSurface has no
+/// [Serializable], while a single GameToFolderConnection field is not).
+fn classNotSerializable(type_name: []const u8, types: *const TypeMap) bool {
+    const info = types.get(type_name) orelse return false; // unknown/external: keep the placeholder path
+    if (info.is_enum or info.is_object_derived or info.is_struct or info.is_delegate) return false;
+    return !info.is_serializable;
+}
 
 /// Appends one flat node (and its children) for a managed field.
 /// `types` resolves class/valuetype names; `warn` collects unsupported
@@ -196,6 +259,9 @@ fn appendFieldNodes(
     warnings: *std.ArrayList([]const u8),
 ) BuildError!void {
     const t = field.elem_type;
+    // Delegate-typed fields are never serialized by Unity; skipping them
+    // keeps the tree aligned with the wire.
+    if (delegateTyped(field, types)) return;
     if (t == dotnet.element.string) {
         try appendNode(out, arena, level, "string", field.name, align_flag);
         return;
@@ -321,6 +387,7 @@ fn appendClassField(
             try appendNode(out, arena, level + 1, "SInt64", "m_PathID", 0);
             return;
         }
+        if (!info.is_struct and !info.is_serializable) return; // Unity skips the field
         // inline struct / class: its fields, base-first
         try appendNode(out, arena, level, full_name, name, 0);
         try appendFields(out, arena, level + 1, depth + 1, budget, info.fields, types, warnings);
@@ -464,18 +531,25 @@ pub fn buildScriptTree(
 /// wire padding, misreading everything that follows (every pre-2019
 /// MonoBehaviour whose fields end a small run decoded as Corrupt).
 fn markSmallRunAlignment(nodes: []typetree.Node) void {
-    const is_small = struct {
+    const is_packed_small = struct {
         fn f(t: []const u8) bool {
-            return std.mem.eql(u8, t, "bool") or std.mem.eql(u8, t, "char") or
-                std.mem.eql(u8, t, "UInt8") or std.mem.eql(u8, t, "SInt8") or
-                std.mem.eql(u8, t, "UInt16") or std.mem.eql(u8, t, "SInt16");
+            return std.mem.eql(u8, t, "char") or std.mem.eql(u8, t, "UInt8") or
+                std.mem.eql(u8, t, "SInt8") or std.mem.eql(u8, t, "UInt16") or
+                std.mem.eql(u8, t, "SInt16");
         }
     }.f;
     for (nodes, 0..) |*node, i| {
-        if (!is_small(node.type_name)) continue;
         if (i + 1 >= nodes.len) continue; // object-final field: no pad follows
-        if (is_small(nodes[i + 1].type_name)) continue; // packed with the next
-        node.meta_flags |= align_flag;
+        if (std.mem.eql(u8, node.type_name, "bool")) {
+            // MonoBehaviour serialization gives every bool its own
+            // 4-byte-aligned slot (one value byte + padding), verified
+            // across 642 Block instances.
+            node.meta_flags |= align_flag;
+        } else if (is_packed_small(node.type_name)) {
+            // char/byte/short fields pack into runs; the run's last
+            // member aligns before the next non-small value.
+            if (!is_packed_small(nodes[i + 1].type_name)) node.meta_flags |= align_flag;
+        }
     }
 }
 
@@ -529,7 +603,7 @@ pub fn writeJsonString(w: anytype, s: []const u8) !void {
 // Tests
 // ---------------------------------------------------------------------------
 
-test "markSmallRunAlignment flags the run end before aligned data" {
+test "markSmallRunAlignment: bools align individually, byte runs pack" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -539,22 +613,22 @@ test "markSmallRunAlignment flags the run end before aligned data" {
             try l.append(al, .{ .level = 1, .type_name = t, .name = "", .meta_flags = 0 });
         }
     };
-    // bool, bool, string  -> the two bools pack; nothing aligns before the
-    // string (2 bytes then pad is written after the run's last member)
+    // bool, bool, string -> both bools get their own 4-byte slot; a
+    // UInt8 run packs with a run-end pad before the string.
     try n.add(&list, a, "bool");
     try n.add(&list, a, "bool");
     try n.add(&list, a, "string");
-    // bool, int -> the bool's pad lands before the int
-    try n.add(&list, a, "bool");
-    try n.add(&list, a, "int");
-    // char at the very end of the object: no pad stored, no flag
-    try n.add(&list, a, "char");
+    try n.add(&list, a, "UInt8");
+    try n.add(&list, a, "UInt8");
+    try n.add(&list, a, "string");
+    try n.add(&list, a, "char"); // object-final: no pad stored
     const nodes = try list.toOwnedSlice(a);
     markSmallRunAlignment(nodes);
-    try std.testing.expectEqual(@as(i32, 0), nodes[0].meta_flags); // packed: followed by another bool
-    try std.testing.expectEqual(@as(i32, 0x4000), nodes[1].meta_flags); // run end: pads before the string
-    try std.testing.expectEqual(@as(i32, 0), nodes[2].meta_flags); // string, not small
-    try std.testing.expectEqual(@as(i32, 0x4000), nodes[3].meta_flags); // bool before int
-    try std.testing.expectEqual(@as(i32, 0), nodes[4].meta_flags); // int
-    try std.testing.expectEqual(@as(i32, 0), nodes[5].meta_flags); // final char, no pad
+    try std.testing.expectEqual(@as(i32, 0x4000), nodes[0].meta_flags); // bool
+    try std.testing.expectEqual(@as(i32, 0x4000), nodes[1].meta_flags); // bool
+    try std.testing.expectEqual(@as(i32, 0), nodes[2].meta_flags); // string
+    try std.testing.expectEqual(@as(i32, 0), nodes[3].meta_flags); // UInt8 packs with nodes[4]
+    try std.testing.expectEqual(@as(i32, 0x4000), nodes[4].meta_flags); // run end before string
+    try std.testing.expectEqual(@as(i32, 0), nodes[5].meta_flags); // string
+    try std.testing.expectEqual(@as(i32, 0), nodes[6].meta_flags); // final char, no pad
 }

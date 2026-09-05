@@ -85,9 +85,11 @@ pub const Assembly = struct {
     type_defs: []const TypeDef,
     /// Per field-row (1-based) custom-attribute marks: whether the field
     /// carries [SerializeField] (private fields Unity serializes anyway)
-    /// or [NonSerialized]/[HideInInspector] (public fields Unity skips).
+    /// or [NonSerialized] (public fields Unity skips).
     field_serialized: []const bool = &.{},
     field_nonserialized: []const bool = &.{},
+    /// Per TypeDef-row mark: whether the class carries [Serializable].
+    type_serializable: []const bool = &.{},
 };
 
 /// ELEMENT_TYPE_* constants used by field signatures.
@@ -701,26 +703,45 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
     const nonserialized_rows = try arena.alloc(bool, n_fields);
     @memset(serialized_rows, false);
     @memset(nonserialized_rows, false);
+    // [Serializable] per TypeDef row: a single plain-class field serializes
+    // inline only when its class carries it (arrays of plain classes
+    // serialize regardless, so the array path ignores this mark).
+    const type_serializable = try arena.alloc(bool, n_typedefs);
+    @memset(type_serializable, false);
     if (n_typedefs > 0 and table_data.row_counts[tables.customattr] > 0) {
         var ci: u32 = 0;
         while (ci < table_data.row_counts[tables.customattr]) : (ci += 1) {
             var cr = rowReader(&table_data, tables.customattr, ci + 1);
             const parent = try readCoded(&cr, 5, &hasCustomAttrTagTables(), &heaps);
-            if ((parent & 0x1f) != 1) continue; // not a Field parent
-            const frow = parent >> 5;
-            if (frow == 0 or frow > n_fields) continue;
-            const typ = try readCoded(&cr, 3, &.{ tables.methoddef, tables.memberref }, &heaps);
-            const attr = try resolveAttributeName(arena, typ, &table_data, &heaps, method_starts, n_typedefs);
-            if (attr) |a| {
-                if (std.mem.eql(u8, a, "UnityEngine.SerializeFieldAttribute") or std.mem.eql(u8, a, "UnityEngine.SerializeField")) {
-                    serialized_rows[frow - 1] = true;
-                } else if (std.mem.eql(u8, a, "System.NonSerializedAttribute") or std.mem.eql(u8, a, "UnityEngine.HideInInspector")) {
-                    nonserialized_rows[frow - 1] = true;
+            const tag = parent & 0x1f;
+            const trow = parent >> 5;
+            if (tag == 1) { // Field parent
+                if (trow == 0 or trow > n_fields) continue;
+                const typ = try readCoded(&cr, 3, &.{ tables.methoddef, tables.memberref }, &heaps);
+                const attr = try resolveAttributeName(arena, typ, &table_data, &heaps, method_starts, n_typedefs);
+                if (attr) |a| {
+                    if (std.mem.eql(u8, a, "UnityEngine.SerializeFieldAttribute") or std.mem.eql(u8, a, "UnityEngine.SerializeField")) {
+                        serialized_rows[trow - 1] = true;
+                    } else if (std.mem.eql(u8, a, "System.NonSerializedAttribute")) {
+                        // [NonSerialized] is the only marker that stops Unity
+                        // writing a public field; [HideInInspector] hides it
+                        // from the editor but still serializes it.
+                        nonserialized_rows[trow - 1] = true;
+                    }
+                }
+            } else if (tag == 3) { // TypeDef parent
+                if (trow == 0 or trow > n_typedefs) continue;
+                const typ = try readCoded(&cr, 3, &.{ tables.methoddef, tables.memberref }, &heaps);
+                const attr = try resolveAttributeName(arena, typ, &table_data, &heaps, method_starts, n_typedefs);
+                if (attr) |a| {
+                    if (std.mem.eql(u8, a, "System.SerializableAttribute")) {
+                        type_serializable[trow - 1] = true;
+                    }
                 }
             }
         }
     }
-    return .{ .name = name, .type_defs = type_defs, .field_serialized = serialized_rows, .field_nonserialized = nonserialized_rows };
+    return .{ .name = name, .type_defs = type_defs, .field_serialized = serialized_rows, .field_nonserialized = nonserialized_rows, .type_serializable = type_serializable };
 }
 
 /// The tables tagged by the HasCustomAttribute coded index (5 bits), for

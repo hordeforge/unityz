@@ -215,8 +215,11 @@ For Mono games the script trees can be generated from the game itself:
 `<dir>/Managed` (pure Zig, no CLR) and emits the MonoBehaviour script
 trees plus the mono-script mapping. Field visibility follows Unity's
 serializer: public instance fields, plus private/protected ones marked
-`[SerializeField]`, base-class fields first; `[NonSerialized]` and
-`[HideInInspector]` public fields are skipped. Known layout limits fall
+`[SerializeField]`, base-class fields first; `[NonSerialized]` public
+fields are skipped (`[HideInInspector]` still serializes). Bool fields
+occupy their own 4-byte-aligned slot; delegate fields and single
+plain-class fields whose class lacks `[Serializable]` are omitted, while
+arrays of plain classes serialize regardless. Known layout limits fall
 back to 4-byte `int` placeholders so byte alignment is preserved.
 
 A typeless file holds built-in objects (Mesh, Texture2D, ...) as well as
