@@ -176,10 +176,13 @@ resolve their script via `m_Script` against the mono-script table; other
 classes resolve by class name.
 
 `unityz trees <file> --out <out.json>` writes this shape from the trees a
-file already carries. Unity keeps type trees in AssetBundles but strips
+file already carries, adding `m_Version` and `m_ByteSize` per node so a
+writer (`create`) can embed the tree with its original metadata; the
+reader ignores both when absent. Unity keeps type trees in AssetBundles but strips
 them from a player's serialized files, so a game's own bundles are the
-closest version-exact source of trees for its typeless `.assets`. Built-in
-classes are keyed by class name; a MonoBehaviour tree is keyed by its
+closest version-exact source of trees for its typeless `.assets`.
+
+Built-in classes are keyed by class name; a MonoBehaviour tree is keyed by its
 script's namespace-qualified class, resolved by following `m_Script` to a
 MonoScript object inside the same container, and listed in
 `__monoscripts__`. A MonoBehaviour whose MonoScript lives outside the file
@@ -294,6 +297,80 @@ uv run scripts/structsdump-to-builtin.py 2021.3.45f2.dump -o src/builtin_trees/2
 
 Then add the release to the table in `src/builtin_trees.zig`; the module's
 tests link every class of every shipped file.
+## Creating files (`create`)
+
+`unityz create <spec.json> --out <file.unity3d>` builds a UnityFS bundle
+from empty state: a format-22 little-endian SerializedFile with the
+declared type trees embedded, an 8-aligned object table, no script or
+reference types, and an optional `.resource` sidecar, packed into one
+format-8 archive (`5.x.x` plus the exact revision in the header, the
+block/directory table at the head, the data hash zero - the layout Unity
+2022.3 itself writes).
+
+Before anything reaches disk the result is re-parsed and every object is
+round-trip checked, and every streamed reference is checked against the
+sidecar, exactly as `verify` does; `--no-verify` skips that. Output is
+written to a sibling temp file and renamed into place. On success stdout
+carries one JSON line, `{"file":...,"bytes":N,"objects":N,"verified":true}`.
+
+The spec is one JSON object:
+
+```json
+{
+  "revision": "2022.3.62f2",
+  "platform": 19,
+  "cab": "CAB-8c9178dc4d97f09235b2f3b683f22ca0",
+  "compression": "none",
+  "trees": "trees.json",
+  "objects": [
+    {"pathId": 1, "class": "AssetBundle", "value": {"m_Name": "...", "m_Container": []}},
+    {"pathId": 2, "class": 49, "value": {"m_Name": "notes", "m_Script": "text"}}
+  ],
+  "resource": {"file": "clips.bin"}
+}
+```
+
+- `revision` (required): the Unity revision written into the serialized
+  file and the archive header.
+- `platform` (default 19, StandaloneWindows64): the target platform id.
+- `cab` (required): the serialized node's name; the sidecar, when given,
+  is `<cab>.resource`.
+- `compression`: `none` (default, one stored block) or `lz4` (one LZ4
+  block, left stored when compressing does not shrink it, like Unity).
+- `trees`: the `--trees` table (see the section above) inline, or a path
+  to one. Every class an object uses must have a tree there; `create`
+  never guesses a layout. A `unityz trees` export of a real bundle carries
+  `m_Version` and `m_ByteSize` per node, so the embedded trees reproduce
+  the source's metadata exactly.
+- `objects`: in path-id order of your choosing. `class` is an id or a name
+  listed in the trees' `__class_ids__`; `value` is the object in the JSON
+  shape `show` and `extract --json` print (byte arrays as base64 strings,
+  `PPtr` as `{"m_FileID","m_PathID"}`). A `-0` literal is kept as a
+  negative-zero float.
+- `resource`: a file whose bytes become the `.resource` node. Objects
+  reference it through their own `StreamedResource`/`StreamingInfo`
+  fields (`m_Source` = `archive:/<cab>/<cab>.resource`, `m_Offset`,
+  `m_Size`); the caller lays those out.
+
+Rejections are a stderr diagnostic, exit 1, and no file: bad or
+incomplete spec JSON, an unknown key, an unknown compression, a class
+without a tree, a zero or duplicate path id, a value missing a field its
+tree names (or of the wrong shape), a same-file `PPtr` naming a path id
+the bundle does not contain (Unity loads such a reference as "nothing" and
+draws nothing, so it is refused up front), any count of `AssetBundle`
+(class 142) objects other than one, and a streamed reference that falls
+outside the sidecar (caught by the built-in verify pass).
+
+Verified against the 7DTD asset pipeline's synthesized self-test bundle
+(Unity 2022.3.62f2, 17 classes, 604 objects): exporting it with `trees`
+and `extract --json`, feeding both back through `create` with
+`"compression": "none"` reproduces the 9,313,411-byte file byte for byte;
+with `lz4` the archive is 3,262,352 bytes, `verify` passes all 604 objects,
+and `diff --fields` against the original reports zero changed objects.
+
+Library callers have the same pieces: `typetree.writeBlob`,
+`serialized_writer.create` (also takes external file references for
+`m_FileID > 0`), and `bundle.create`.
 
 ## Editing
 
@@ -374,7 +451,9 @@ without parsing output:
   means every check passed.
 - 1: an input could not be read or decoded, or a check failed. For `edit`
   this covers a missing object, a bad field path or value, a failed
-  rebuild, and a `--verify` round-trip failure: nothing is written. Batch runs
+  rebuild, and a `--verify` round-trip failure: nothing is written. For
+  `create` it covers every spec rejection and the built-in verify pass:
+  nothing is written. Batch runs
   over a directory keep going and return 1 at the end if any member failed.
 - 2: a usage error: an unknown flag, a missing argument, or a malformed
   id. The diagnostic goes to stderr and nothing is written to stdout, so a
@@ -406,8 +485,8 @@ For a shipped release the trees are node-for-node what UnityPy writes
 SerializedFile still needs caller-supplied `--trees`, and the remaining
 parity step is packing more releases.
 
-A brand-new object still needs a from-empty writer: unityz's writer
-rebuilds an existing SerializedFile or container instead of starting its
-first object table from empty input. Embedded-tree reading, extraction,
-verification, diffing, and in-place edits use the trees already present
-and are unaffected.
+Creating a file no longer depends on it: `create` builds a SerializedFile
+and UnityFS bundle from empty input, given the trees (built-in or
+supplied), and UnityPy has no equivalent from-scratch writer.
+Embedded-tree reading, extraction, verification, diffing, and in-place
+edits use the trees already present and are unaffected.

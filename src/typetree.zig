@@ -655,3 +655,110 @@ test "type-tree parser survives mutated and truncated wire data" {
         for (tree.roots) |*root| _ = root.children;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Blob writer: the inverse of `parseBlob`, for creating files from scratch.
+// ---------------------------------------------------------------------------
+
+pub const WriteError = error{ UnsupportedEncoding, OutOfMemory, TooDeep };
+
+/// Writes `tree` in the flat blob encoding of `format_version` (12-22;
+/// 19+ append the u64 reference-type hash). Nodes are emitted in preorder
+/// with `index` = their preorder position; strings in Unity's common table
+/// are referenced through the `0x80000000` flag, everything else goes into
+/// a local NUL-separated buffer. `Array` nodes carry type-flag bit 0, as
+/// Unity's own writer marks them. The writer's endianness is used.
+pub fn writeBlob(w: *streams.Writer, tree: *const TypeTree, format_version: u32) WriteError!void {
+    const with_hash = switch (format_version) {
+        12...18 => false,
+        19...22 => true,
+        else => return error.UnsupportedEncoding,
+    };
+    var nodes: streams.Writer = .init(w.allocator);
+    defer nodes.deinit();
+    nodes.endian = w.endian;
+    var strings: streams.Writer = .init(w.allocator);
+    defer strings.deinit();
+    var count: usize = 0;
+    for (tree.roots) |*root| try writeBlobNodeRec(&nodes, &strings, root, 0, with_hash, &count);
+    try w.writeInt(i32, @intCast(count));
+    try w.writeInt(i32, @intCast(strings.getWritten().len));
+    try w.writeBytes(nodes.getWritten());
+    try w.writeBytes(strings.getWritten());
+}
+
+fn writeBlobNodeRec(nodes: *streams.Writer, strings: *streams.Writer, node: *const Node, level: u32, with_hash: bool, count: *usize) WriteError!void {
+    if (level > max_depth) return error.TooDeep;
+    try nodes.writeInt(i16, @intCast(node.version));
+    try nodes.writeByte(@intCast(level));
+    const array_bit: u8 = if (std.mem.eql(u8, node.type_name, "Array")) 1 else 0;
+    try nodes.writeByte(@as(u8, @intCast(node.type_flags & 0xFF)) | array_bit);
+    try nodes.writeInt(u32, try blobStringOffset(strings, node.type_name));
+    try nodes.writeInt(u32, try blobStringOffset(strings, node.name));
+    try nodes.writeInt(i32, node.byte_size);
+    try nodes.writeInt(i32, @intCast(count.*));
+    try nodes.writeInt(i32, node.meta_flags);
+    if (with_hash) try nodes.writeInt(u64, node.ref_type_hash);
+    count.* += 1;
+    for (node.children) |*c| try writeBlobNodeRec(nodes, strings, c, level + 1, with_hash, count);
+}
+
+/// The common-table offset when `s` is a common string, else its offset in
+/// the local buffer (appended on first use; duplicates are reused).
+fn blobStringOffset(strings: *streams.Writer, s: []const u8) WriteError!u32 {
+    if (commonStringOffset(s)) |off| return common_string_flag | off;
+    const buf = strings.getWritten();
+    var pos: usize = 0;
+    while (pos < buf.len) {
+        const end = std.mem.indexOfScalarPos(u8, buf, pos, 0) orelse buf.len;
+        if (std.mem.eql(u8, buf[pos..end], s)) return @intCast(pos);
+        pos = end + 1;
+    }
+    const off: u32 = @intCast(buf.len);
+    try strings.writeBytes(s);
+    try strings.writeByte(0);
+    return off;
+}
+
+test "writeBlob round-trips through parse, common and local strings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const flat = [_]Node{
+        .{ .level = 0, .type_name = "TextAsset", .name = "Base", .version = 2, .byte_size = -1, .meta_flags = 0x8000 },
+        .{ .level = 1, .type_name = "string", .name = "m_Name", .byte_size = -1, .meta_flags = 0x8001 },
+        .{ .level = 2, .type_name = "Array", .name = "Array", .byte_size = -1, .meta_flags = 0x4001 },
+        .{ .level = 3, .type_name = "int", .name = "size", .byte_size = 4 },
+        .{ .level = 3, .type_name = "char", .name = "data", .byte_size = 1 },
+        .{ .level = 1, .type_name = "MyLocalType", .name = "m_Script", .byte_size = -1, .ref_type_hash = 0x1234 },
+        .{ .level = 2, .type_name = "MyLocalType", .name = "inner", .byte_size = 4 },
+    };
+    const tree = try fromFlatNodes(a, &flat);
+    for ([_]u32{ 17, 22 }) |fv| {
+        var w = streams.Writer.init(a);
+        defer w.deinit();
+        try writeBlob(&w, &tree, fv);
+        var r = streams.Reader.init(w.getWritten());
+        const back = try parse(a, &r, fv, false);
+        try std.testing.expectEqual(@as(usize, 1), back.roots.len);
+        const root = &back.roots[0];
+        try std.testing.expectEqualStrings("TextAsset", root.type_name);
+        try std.testing.expectEqual(@as(i32, 2), root.version);
+        try std.testing.expectEqual(@as(i32, 0x8000), root.meta_flags);
+        try std.testing.expectEqual(@as(usize, 2), root.children.len);
+        const arr = &root.children[0].children[0];
+        try std.testing.expectEqualStrings("Array", arr.type_name);
+        try std.testing.expectEqual(@as(i32, 1), arr.type_flags);
+        try std.testing.expectEqual(@as(i32, 2), arr.index);
+        try std.testing.expectEqualStrings("data", arr.children[1].name);
+        const local = &root.children[1];
+        try std.testing.expectEqualStrings("MyLocalType", local.type_name);
+        try std.testing.expectEqualStrings("MyLocalType", local.children[0].type_name);
+        try std.testing.expectEqual(@as(u64, if (fv >= 19) 0x1234 else 0), local.ref_type_hash);
+        // the local buffer holds each string once
+        try std.testing.expectEqualStrings("MyLocalType\x00inner\x00", back.string_buffer);
+    }
+    var w = streams.Writer.init(a);
+    defer w.deinit();
+    try std.testing.expectError(error.UnsupportedEncoding, writeBlob(&w, &tree, 11));
+}

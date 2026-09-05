@@ -23,6 +23,7 @@ zig build
 ./zig-out/bin/unityz find path/to/asset Player
 ./zig-out/bin/unityz show path/to/asset 100
 ./zig-out/bin/unityz diff asset_a asset_b
+./zig-out/bin/unityz create spec.json --out new.unity3d
 ```
 
 Linux (x86_64) and macOS (aarch64) are built and tested in CI. The
@@ -49,6 +50,8 @@ shellcheck scripts/*.sh
 - **Edit in place** - change any field of any object, patch streamed
   sidecar bytes, and get byte-exact output that re-verifies before it
   writes (`edit`).
+- **Create from scratch** - build a whole bundle from type trees and
+  JSON object values, with no source file (`create`).
 - **Check and compare** - round-trip every object byte-exactly, validate
   streamed references, and diff two files down to the changed pixel,
   audio sample, or field path (`verify`, `diff`).
@@ -100,6 +103,10 @@ read or check failures exit 1, always with the diagnostic on stderr. See
   unityz ships for one exact Unity release (`--class <id>` for one class);
   `--builtin` on any `--trees`-taking command decodes a stripped file's
   built-in classes through them
+- `create` - build a UnityFS bundle from scratch (`<spec.json> --out
+  <file>`): a format-22 SerializedFile with the declared type trees and
+  objects plus an optional `.resource` sidecar, re-read and round-trip
+  checked before it is written
 
 ### Typeless files
 
@@ -155,11 +162,11 @@ UnityArchive container is detected but not yet parsed.
 - `src/streams.zig` - endian-aware binary reader/writer
 - `src/container.zig` - file type detection by magic/header
 - `src/webfile.zig` - WebFile container parser and rebuilder
-- `src/bundle.zig` - UnityFS bundle parser (with LZ4/LZMA blocks)
+- `src/bundle.zig` - UnityFS bundle parser and writer (with LZ4/LZMA blocks)
 - `src/lz4.zig` - LZ4 block decompression and compression (bundle
   rebuilds re-encode compressed blocks)
 - `src/serialized.zig` - SerializedFile parser (`.assets` and friends)
-- `src/serialized_writer.zig` - SerializedFile rebuild writer
+- `src/serialized_writer.zig` - SerializedFile rebuild and from-scratch writer
 - `src/typetree.zig` - TypeTree parsing + Unity common-string table
 - `src/value.zig` - generic object value model + JSON output
 - `src/object_reader.zig` - type-tree-driven object reader
