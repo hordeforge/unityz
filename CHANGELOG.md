@@ -13,6 +13,19 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ### Changed
 
+- `managed --trees`: MonoBehaviours now round-trip far more real game data.
+  Three Unity serialization rules the generator got wrong are fixed: the
+  `fdNotSerialized` field flag (the C# compiler's encoding of
+  `[NonSerialized]`) now excludes a field even when public; primitive
+  fields use the canonical wire names the typeless reader understands
+  (`UInt8`/`SInt64`, not `byte`/`long`); and every sub-4-byte field
+  (bool/char/byte/short) occupies its own 4-byte-aligned cell — including
+  nested-record members and the object's final field — with array element
+  runs still contiguous. Native engine structs whose C# fields are private
+  (`LayerMask`, `Hash128`) get their fixed layouts instead of decoding as
+  zero bytes and shifting every following field. Verified byte-exact
+  round-trips on Raft (46→35 failures), Green Hell (13364→3546 on
+  class-114), and The Forest (550→527).
 - Library: the typed views that build variable-length lists (`GameObject`,
   `Font`, `ComputeShader`, the audio mixer and animator families) take the
   caller's allocator and return `Allocator.Error!T`; they allocated through
