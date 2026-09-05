@@ -13,6 +13,23 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ### Changed
 
+- `managed --trees`: MonoBehaviours that inherit through generic bases and
+  across assemblies now decode. The CLR metadata reader sized the
+  `HasFieldMarshal` and GenericParam coded indices as 2-bit tags (they are
+  1-bit), which shifted every table after FieldMarshal and made all TypeSpec
+  rows unreadable; TypeSpec `extends` rows (a base declared as
+  `class X : Base<Arg>`) were never resolved, so Object-derived detection
+  stopped at the first generic ancestor — Stranded Deep's netcode classes
+  inherit through `Funlabs.MultiplayerBehaviour`1 : Photon.Bolt.
+  EntityEventListener`1<...>`, and every `[SerializeField]` field typed to
+  that family was silently dropped from its tree. Base-chain walks now use
+  one name index over all parsed assemblies instead of a per-assembly
+  linear scan (which also makes tree generation ~30x faster on multi-DLL
+  games). Round trips: Stranded Deep resources.assets class-114 623→540
+  failures while decoding 551 more objects (Beam.Crafting.Connector 489→0),
+  The Forest 478→324, Raft 23→25 with 100 more objects passing, Green Hell
+  unchanged (2617; residual flips are older-authored data per the
+  documented data-age limit).
 - `managed --trees`: MonoBehaviours now round-trip far more real game data.
   Three Unity serialization rules the generator got wrong are fixed: the
   `fdNotSerialized` field flag (the C# compiler's encoding of
