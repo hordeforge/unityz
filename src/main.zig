@@ -5223,7 +5223,7 @@ fn verifySerializedBytesSidecars(arena: std.mem.Allocator, bytes: []const u8, no
         };
         var w: unityz.streams.Writer = .init(obj_arena);
         // preserve the bytes after the tree fields (MonoBehaviour payloads)
-        unityz.object_writer.writeObject(&w, &tree.roots[0], v, data[r.position()..]) catch |err| {
+        unityz.object_writer.writeObjectPreserving(&w, &tree.roots[0], v, data[r.position()..], data) catch |err| {
             if (json) {
                 try recordFailure(report, arena, node, o.path_id, "write failed: {s}", .{@errorName(err)});
             } else {
