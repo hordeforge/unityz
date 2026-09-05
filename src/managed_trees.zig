@@ -267,7 +267,11 @@ fn appendFieldNodes(
         return;
     }
     if (dotnet.elementTypeName(t).len != 0) {
-        try appendNode(out, arena, level, dotnet.elementTypeName(t), field.name, 0);
+        // Emit the canonical wire name the reader/writer understand
+        // ("UInt8", "SInt64", ...), not the CLR name ("byte", "long", ...).
+        const clr_name = dotnet.elementTypeName(t);
+        const wire_name = primitiveWireName(clr_name) orelse clr_name;
+        try appendNode(out, arena, level, wire_name, field.name, 0);
         return;
     }
     // arrays: T[] (szarray) or List<T> (genericinst with generic_arg)
@@ -390,7 +394,7 @@ fn appendClassField(
         if (!info.is_struct and !info.is_serializable) return; // Unity skips the field
         // inline struct / class: its fields, base-first
         try appendNode(out, arena, level, full_name, name, 0);
-        try appendFields(out, arena, level + 1, depth + 1, budget, info.fields, types, warnings);
+        try appendInlineFields(out, arena, level + 1, depth + 1, budget, full_name, info.fields, types, warnings);
         return;
     }
     // not in the assemblies (e.g. a System.* type Unity skips, or an
@@ -461,10 +465,40 @@ fn appendElement(
             return;
         }
         try appendNode(out, arena, level, type_name, name, 0);
-        try appendFields(out, arena, level + 1, depth + 1, budget, info.fields, types, warnings);
+        try appendInlineFields(out, arena, level + 1, depth + 1, budget, type_name, info.fields, types, warnings);
         return;
     }
     try appendNode(out, arena, level, "int", name, 0);
+}
+
+/// Appends an inline record's children. Unity serializes a few engine
+/// native structs (LayerMask, Hash128) from C++ with their own layout even
+/// though their C# fields are private and invisible to metadata-driven
+/// collection; without the fallback such fields decode as zero bytes and
+/// shift every following field.
+fn appendInlineFields(
+    out: *std.ArrayList(typetree.Node),
+    arena: std.mem.Allocator,
+    level: u32,
+    depth: u32,
+    budget: *NodeBudget,
+    full_name: []const u8,
+    fields: []const dotnet.Field,
+    types: *const TypeMap,
+    warnings: *std.ArrayList([]const u8),
+) BuildError!void {
+    if (fields.len == 0) {
+        if (std.mem.eql(u8, full_name, "UnityEngine.LayerMask")) {
+            try appendNode(out, arena, level, "int", "m_Mask", 0);
+            return;
+        }
+        if (std.mem.eql(u8, full_name, "UnityEngine.Hash128")) {
+            try appendNode(out, arena, level, "UInt64", "m_Value0", 0);
+            try appendNode(out, arena, level, "UInt64", "m_Value1", 0);
+            return;
+        }
+    }
+    try appendFields(out, arena, level, depth, budget, fields, types, warnings);
 }
 
 fn primitiveWireName(type_name: []const u8) ?[]const u8 {
@@ -523,34 +557,41 @@ pub fn buildScriptTree(
     return nodes;
 }
 
-/// Unity packs consecutive sub-4-byte fields (bool/char/byte/short runs)
-/// and pads only after the run's last member, before the next value that
-/// needs 4-byte alignment (a string, int, PPtr, or nested record). Real
-/// type trees mark that last member with the 0x4000 align flag. Without
-/// the flag the reader stops right after the small field and skips the
-/// wire padding, misreading everything that follows (every pre-2019
-/// MonoBehaviour whose fields end a small run decoded as Corrupt).
+/// Unity writes every sub-4-byte field (bool/char/byte/short) into its own
+/// 4-byte-aligned cell: one value byte (two for char/short) plus padding,
+/// even for the object's final field and for members of nested records.
+/// Verified on Green Hell's P2PNetworkHash128 (16 byte members, each in its
+/// own cell) and on Raft bools (own slots) with the final bool padded
+/// (`01 00 00 00` trailing cell on Block instances). The one exception is
+/// array element runs, which are contiguous: the byte-array reader
+/// coalesces them and the collection pads as a unit, so element nodes must
+/// not carry the flag.
 fn markSmallRunAlignment(nodes: []typetree.Node) void {
-    const is_packed_small = struct {
+    const is_small = struct {
         fn f(t: []const u8) bool {
-            return std.mem.eql(u8, t, "char") or std.mem.eql(u8, t, "UInt8") or
-                std.mem.eql(u8, t, "SInt8") or std.mem.eql(u8, t, "UInt16") or
-                std.mem.eql(u8, t, "SInt16");
+            return std.mem.eql(u8, t, "bool") or std.mem.eql(u8, t, "char") or
+                std.mem.eql(u8, t, "UInt8") or std.mem.eql(u8, t, "SInt8") or
+                std.mem.eql(u8, t, "UInt16") or std.mem.eql(u8, t, "SInt16");
         }
     }.f;
     for (nodes, 0..) |*node, i| {
-        if (i + 1 >= nodes.len) continue; // object-final field: no pad follows
-        if (std.mem.eql(u8, node.type_name, "bool")) {
-            // MonoBehaviour serialization gives every bool its own
-            // 4-byte-aligned slot (one value byte + padding), verified
-            // across 642 Block instances.
-            node.meta_flags |= align_flag;
-        } else if (is_packed_small(node.type_name)) {
-            // char/byte/short fields pack into runs; the run's last
-            // member aligns before the next non-small value.
-            if (!is_packed_small(nodes[i + 1].type_name)) node.meta_flags |= align_flag;
-        }
+        if (!is_small(node.type_name)) continue;
+        if (parentIsArray(nodes, i)) continue; // element run: contiguous
+        node.meta_flags |= align_flag;
     }
+}
+
+/// Whether node `i` is a direct child of an Array-typed node (a collection
+/// element, or its "size"/"data" helper — never a struct member).
+fn parentIsArray(nodes: []const typetree.Node, i: usize) bool {
+    const level = nodes[i].level;
+    var j = i;
+    while (j > 0) {
+        j -= 1;
+        if (nodes[j].level >= level) continue;
+        return std.mem.eql(u8, nodes[j].type_name, "Array");
+    }
+    return false;
 }
 
 /// The flat tree for the "MonoBehaviour" class: the header only (used to
@@ -603,32 +644,36 @@ pub fn writeJsonString(w: anytype, s: []const u8) !void {
 // Tests
 // ---------------------------------------------------------------------------
 
-test "markSmallRunAlignment: bools align individually, byte runs pack" {
+test "markSmallRunAlignment: every small field gets its own aligned cell" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
     var list: std.ArrayList(typetree.Node) = .empty;
     const n = struct {
-        fn add(l: *std.ArrayList(typetree.Node), al: std.mem.Allocator, t: []const u8) !void {
-            try l.append(al, .{ .level = 1, .type_name = t, .name = "", .meta_flags = 0 });
+        fn add(l: *std.ArrayList(typetree.Node), al: std.mem.Allocator, t: []const u8, lvl: u32) !void {
+            try l.append(al, .{ .level = lvl, .type_name = t, .name = "", .meta_flags = 0 });
         }
     };
-    // bool, bool, string -> both bools get their own 4-byte slot; a
-    // UInt8 run packs with a run-end pad before the string.
-    try n.add(&list, a, "bool");
-    try n.add(&list, a, "bool");
-    try n.add(&list, a, "string");
-    try n.add(&list, a, "UInt8");
-    try n.add(&list, a, "UInt8");
-    try n.add(&list, a, "string");
-    try n.add(&list, a, "char"); // object-final: no pad stored
+    // bools, byte runs, nested-record bytes, and the object-final char all
+    // occupy their own 4-byte cell; array element runs stay contiguous.
+    try n.add(&list, a, "bool", 1);
+    try n.add(&list, a, "bool", 1);
+    try n.add(&list, a, "string", 1);
+    try n.add(&list, a, "UInt8", 1);
+    try n.add(&list, a, "UInt8", 1);
+    try n.add(&list, a, "string", 1);
+    try n.add(&list, a, "char", 1); // object-final: still padded
+    try n.add(&list, a, "Array", 1);
+    try n.add(&list, a, "int", 2); // size helper
+    try n.add(&list, a, "UInt8", 2); // data element: contiguous run
     const nodes = try list.toOwnedSlice(a);
     markSmallRunAlignment(nodes);
     try std.testing.expectEqual(@as(i32, 0x4000), nodes[0].meta_flags); // bool
     try std.testing.expectEqual(@as(i32, 0x4000), nodes[1].meta_flags); // bool
     try std.testing.expectEqual(@as(i32, 0), nodes[2].meta_flags); // string
-    try std.testing.expectEqual(@as(i32, 0), nodes[3].meta_flags); // UInt8 packs with nodes[4]
-    try std.testing.expectEqual(@as(i32, 0x4000), nodes[4].meta_flags); // run end before string
+    try std.testing.expectEqual(@as(i32, 0x4000), nodes[3].meta_flags); // UInt8 own cell
+    try std.testing.expectEqual(@as(i32, 0x4000), nodes[4].meta_flags); // UInt8 own cell
     try std.testing.expectEqual(@as(i32, 0), nodes[5].meta_flags); // string
-    try std.testing.expectEqual(@as(i32, 0), nodes[6].meta_flags); // final char, no pad
+    try std.testing.expectEqual(@as(i32, 0x4000), nodes[6].meta_flags); // final char, padded
+    try std.testing.expectEqual(@as(i32, 0), nodes[9].meta_flags); // array data element
 }

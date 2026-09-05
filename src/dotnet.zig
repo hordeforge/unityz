@@ -30,7 +30,8 @@ pub const Error = error{
 /// One serialized-visible field of a managed class.
 pub const Field = struct {
     name: []const u8,
-    /// CLR field flags: 0x6 = public, 0x10 = static, 0x20 = literal.
+    /// CLR field flags: 0x6 = public, 0x10 = static, 0x20 = literal,
+    /// 0x80 = fdNotSerialized (the C# compiler's encoding of [NonSerialized]).
     flags: u16,
     /// ECMA-335 element type byte of the field signature (ELEMENT_TYPE_*).
     elem_type: u8,
@@ -54,6 +55,11 @@ pub const Field = struct {
     }
     pub fn isLiteral(self: Field) bool {
         return (self.flags & 0x20) != 0;
+    }
+    /// fdNotSerialized (0x80): the IL flag C# emits for [NonSerialized].
+    /// Unity skips such fields even when public or [SerializeField]-marked.
+    pub fn isNotSerialized(self: Field) bool {
+        return (self.flags & 0x80) != 0;
     }
 };
 
@@ -696,8 +702,12 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
         }
     }
 
-    // custom-attribute marks: [SerializeField] / [NonSerialized] /
-    // [HideInInspector] per field row, read from the CustomAttribute table
+    // custom-attribute marks per field row, read from the CustomAttribute
+    // table: [SerializeField] pulls private fields in; [NonSerialized]
+    // (rarely emitted as an attribute row — the C# compiler encodes it as
+    // the fdNotSerialized field flag, handled in collectFields) pushes
+    // public ones out. [HideInInspector] marks nothing here: it hides a
+    // field in the editor but Unity still serializes it.
     const n_fields = table_data.row_counts[tables.field];
     const serialized_rows = try arena.alloc(bool, n_fields);
     const nonserialized_rows = try arena.alloc(bool, n_fields);
@@ -1038,7 +1048,10 @@ fn cumulativeSpanBefore(target: u32, counts: [64]u32, heaps: *const Heaps) u32 {
 /// The serialized-visible fields of a class, base classes first: Unity
 /// serializes base fields before derived ones, and only instance fields
 /// that are public (unless [NonSerialized]) or carry [SerializeField],
-/// never static or const.
+/// never static or const. [NonSerialized] shows up two ways: the
+/// System.NonSerializedAttribute custom attribute, or the fdNotSerialized
+/// field flag the C# compiler emits for it — both stop Unity writing the
+/// field, so both exclude it here.
 pub fn collectFields(arena: std.mem.Allocator, td: TypeDef, type_defs: []const TypeDef, serialized_rows: []const bool, nonserialized_rows: []const bool) ![]const Field {
     // walk the same-assembly base chain into a stack
     var chain: [64]TypeDef = undefined;
@@ -1066,10 +1079,11 @@ pub fn collectFields(arena: std.mem.Allocator, td: TypeDef, type_defs: []const T
         for (chain[i].fields) |f| {
             if (f.isStatic() or f.isLiteral()) continue;
             const serialized = f.row != 0 and f.row <= serialized_rows.len and serialized_rows[f.row - 1];
-            const nonserialized = f.row != 0 and f.row <= nonserialized_rows.len and nonserialized_rows[f.row - 1];
-            if (f.isPublic() and !nonserialized) {
+            const attr_nonserialized = f.row != 0 and f.row <= nonserialized_rows.len and nonserialized_rows[f.row - 1];
+            if (f.isNotSerialized() or attr_nonserialized) continue;
+            if (f.isPublic()) {
                 try out.append(arena, f);
-            } else if (!f.isPublic() and serialized) {
+            } else if (serialized) {
                 try out.append(arena, f);
             }
         }
