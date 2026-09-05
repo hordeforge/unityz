@@ -19,6 +19,13 @@ Nothing in flight.
 
 ## Done
 
+- Built-in engine-class type trees (2026-09-05): `src/builtin_trees.zig`
+  embeds a release-indexed database packed from AssetRipper TypeTreeDumps
+  (`scripts/structsdump-to-builtin.py`; 2022.3.62f2 shipped), `trees
+  --builtin <release>` exports it in the `--trees` shape with byte sizes
+  and versions, and `--builtin` decodes stripped files' built-in classes
+  through it. Exact-release matching only. See "Built-in engine-class
+  trees" in [features.md](features.md).
 - CLI automation contract (PRs #139-#151, 2026-09-04): usage errors exit 2
   and every read, decode, or check failure exits 1, always with the
   diagnostic on stderr and nothing on stdout; batch `--json` wraps each

@@ -238,6 +238,63 @@ A missing or malformed trees file prints a diagnostic and continues
 without the trees; a typeless file without `--trees` reports how many
 objects were skipped and why.
 
+## Built-in engine-class trees (`--builtin`)
+
+unityz embeds a release-indexed database of Unity's built-in class type
+trees (`src/builtin_trees/<release>.bin`, served by
+`src/builtin_trees.zig`). Each file is one release's AssetRipper
+TypeTreeDumps StructsDump packed by `scripts/structsdump-to-builtin.py`;
+the shipped releases are listed by every "no built-in type trees"
+diagnostic. Currently shipped: `2022.3.62f2` (294 concrete classes,
+21755 nodes, 416 KB). Matching is by exact release string: there is no
+nearest-version fallback, because a neighbouring release's tree can
+differ in one field and decode garbage silently. An unknown release or a
+class the release has no tree for is an error, never a guess.
+
+`unityz trees --builtin <release> [--class <id>] [--out <file.json>]`
+exports the database in the `--trees` JSON shape. Every node carries
+`m_Type`, `m_Name`, `m_Level`, `m_MetaFlag` plus `m_ByteSize`,
+`m_Version`, `m_TypeFlags` (Unity's array flag) and `m_Index`, so a
+consumer can write the tree back into a SerializedFile with Unity's own
+sizes and versions; the same fields are now read from any `--trees` file
+that has them and ignored when absent. `__class_ids__` maps class names
+to ids and `__meta__.source` is `builtin`. Unknown release or class: one
+diagnostic on stderr, nothing on stdout, exit 1.
+
+`--builtin` is a global option for `extract`, `show`, `verify`, `find`,
+`skin`, `hierarchy`, `stats`, `edit`, and `diff --fields`. When a
+SerializedFile carries no type trees, its built-in classes resolve from
+the database keyed by the file's own embedded Unity revision; a `--trees`
+file given alongside takes precedence for the classes it names.
+MonoBehaviour (class 114) script fields are not in the database (it holds
+only the plain header), so script trees still come from `--trees` or
+`managed --trees`.
+
+A file whose revision is not shipped prints one diagnostic naming the
+shipped releases and its typeless objects stay skipped, exactly as
+without the flag. Files that embed their trees are unaffected.
+
+Parity evidence: the pipeline-authored 2022.3.62f2 self-test bundle embeds
+UnityPy's TPK trees for 17 classes (AssetBundle, Texture2D, TextAsset,
+GameObject, Transform, Mesh, Material, SkinnedMeshRenderer, BoxCollider,
+CapsuleCollider, AnimationClip, Animation, MeshFilter, MeshRenderer,
+Shader, ParticleSystem, ParticleSystemRenderer; 7507 nodes). Exported with
+`trees` and compared node by node against `trees --builtin 2022.3.62f2`,
+every type, name, level, meta flag, version and byte size is identical.
+The single difference is the array flag on the two `TypelessData` nodes
+(`image data` in Texture2D and Mesh): Unity and the dump set it, the
+pipeline's writer only flags `Array` nodes.
+
+To add a release:
+
+```bash
+curl -sL https://raw.githubusercontent.com/AssetRipper/TypeTreeDumps/main/StructsDump/release/2021.3.45f2.dump -o 2021.3.45f2.dump
+uv run scripts/structsdump-to-builtin.py 2021.3.45f2.dump -o src/builtin_trees/2021.3.45f2.bin
+```
+
+Then add the release to the table in `src/builtin_trees.zig`; the module's
+tests link every class of every shipped file.
+
 ## Editing
 
 `edit` supports dotted-indexed field paths, `--out <file>`, `--verify`
@@ -341,17 +398,16 @@ conversion; unityz decodes in pure Zig. UnityPy only writes PNG; unityz
 adds TGA, BMP, and raw RGBA. UnityPy raises `NotImplementedError` on
 UnityArchive files; unityz detects the container.
 
-UnityPy still carries a release-indexed database of built-in engine-class type
-trees that unityz does not. UnityPy can return a requested class tree for a
-Unity version. unityz can read and reserialize trees present in a file,
-export them with `trees` (from the game's own AssetBundles, which keep
-their trees), and inject trees derived from AssetRipper dumps or managed
-assemblies, but it does not ship that versioned database.
+UnityPy's TPK database covers every Unity release and picks the nearest
+version; unityz's built-in database (`--builtin`, `trees --builtin`) covers
+the releases it ships, currently only 2022.3.62f2, and matches exactly.
+For a shipped release the trees are node-for-node what UnityPy writes
+(see "Built-in engine-class trees"); for any other release a stripped
+SerializedFile still needs caller-supplied `--trees`, and the remaining
+parity step is packing more releases.
 
-That missing database affects two routes. A stripped external SerializedFile
-needs caller-supplied `--trees` for decoded JSON, while UnityPy can fall back to
-its bundled tree. A brand-new object needs a version-matched initial tree and
-serialized value; unityz's writer currently rebuilds an existing
-SerializedFile or container instead of starting its first object table from
-empty input. Embedded-tree reading, extraction, verification, diffing, and
-in-place edits use the trees already present and are unaffected.
+A brand-new object still needs a from-empty writer: unityz's writer
+rebuilds an existing SerializedFile or container instead of starting its
+first object table from empty input. Embedded-tree reading, extraction,
+verification, diffing, and in-place edits use the trees already present
+and are unaffected.

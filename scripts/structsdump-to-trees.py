@@ -17,9 +17,11 @@ The dump's node lines are `<type> <name> // ... MetaFlag{...}`, one tab per
 tree level. Two parse points need care: types may be multi-word
 (`unsigned int`, `long long`), and names may contain spaces (`image data`),
 so the type is matched against the known multi-word set first and the name
-is everything after the type token. Only the four fields the reader uses
-(`m_Type`, `m_Name`, `m_Level`, `m_MetaFlag`) are emitted, plus the
-`__class_ids__` name-to-id map.
+is everything after the type token. The reader's four fields (`m_Type`,
+`m_Name`, `m_Level`, `m_MetaFlag`) are emitted together with `m_ByteSize`,
+`m_Version` and `m_TypeFlags` (the dump's IsArray bit), plus the
+`__class_ids__` name-to-id map. `structsdump-to-builtin.py` packs the same
+result into the binary database unityz embeds.
 
 Verified against the real Unity 2022.3.62f2 7DTD data: 197 textures, 13
 sprites, and 6 meshes export, and 1586/1588 objects in resources.assets
@@ -32,7 +34,10 @@ import sys
 
 MULTI_WORD_TYPES = ["unsigned int", "unsigned long long", "unsigned short", "long long"]
 
-NODE_RE = re.compile(r"^(?P<before>.+?)\s+//\s+.*MetaFlag\{(?P<meta>[0-9a-fA-F]+)\}$")
+NODE_RE = re.compile(
+    r"^(?P<before>.+?)\s+//\s+ByteSize\{(?P<size>[0-9a-fA-F]+)\}, Index\{[0-9a-fA-F]+\}, "
+    r"Version\{(?P<version>[0-9a-fA-F]+)\}, IsArray\{(?P<array>[01])\}, MetaFlag\{(?P<meta>[0-9a-fA-F]+)\}$"
+)
 CLASS_RE = re.compile(r"// classID\{(\d+)\}: (\w+)")
 
 
@@ -79,6 +84,10 @@ def convert(dump_text: str) -> dict:
                 "m_Name": name,
                 "m_Level": tabs,
                 "m_MetaFlag": int(m.group("meta"), 16),
+                # ByteSize is a signed 32-bit hex value: ffffffff means "varies".
+                "m_ByteSize": int.from_bytes(bytes.fromhex(m.group("size").zfill(8)), "big", signed=True),
+                "m_Version": int(m.group("version"), 16),
+                "m_TypeFlags": int(m.group("array")),
             }
         )
     out: dict = {"__class_ids__": class_ids}

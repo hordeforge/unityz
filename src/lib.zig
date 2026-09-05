@@ -41,6 +41,9 @@ pub const lz4 = @import("lz4.zig");
 /// TypeTree parsing (class layout metadata).
 pub const typetree = @import("typetree.zig");
 
+/// Built-in engine-class type trees, indexed by exact Unity release.
+pub const builtin_trees = @import("builtin_trees.zig");
+
 /// SerializedFile parser (`.assets` and friends).
 pub const serialized = @import("serialized.zig");
 

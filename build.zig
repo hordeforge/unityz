@@ -139,6 +139,7 @@ pub fn build(b: *std.Build) void {
         "src/lz4.zig",
         "src/bundle.zig",
         "src/typetree.zig",
+        "src/builtin_trees.zig",
         "src/serialized.zig",
         "src/value.zig",
         "src/object_reader.zig",
