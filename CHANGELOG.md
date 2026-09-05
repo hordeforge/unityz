@@ -11,6 +11,8 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-05
+
 ### Changed
 
 - Object writer/verify: rewrites now preserve an original object's
