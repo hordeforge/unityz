@@ -116,16 +116,19 @@ undecodable. `--trees <file.json>` supplies them, and `extract`, `show`,
 `diff --fields` all decode with the injected trees.
 
 The trees JSON shape is what `TypeTreeGeneratorAPI.get_nodes_as_json()`
-emits. unityz can build one itself three ways. `trees <bundle> --out
-<out.json>` exports the trees a file already carries, and Unity keeps them
-in AssetBundles even when it strips them from the player's `.assets`
-files, so a game's bundles are the closest version-exact source.
-`managed <data-dir> --trees <out.json>` derives the script trees from the game's own assemblies (its
-`Managed/` folder) and the MonoScript objects in its top-level
-serialized files, so the trees match that specific game's layouts. For
-version-generic trees instead, `scripts/structsdump-to-trees.py`
-converts AssetRipper's public type-tree dumps into the format, and
-`scripts/merge-trees.py` joins the two halves for full coverage.
+emits. unityz can build one itself three ways:
+
+- `trees <bundle> --out <out.json>` exports the trees a file already
+  carries. Unity keeps type trees in AssetBundles even when it strips
+  them from the player's `.assets` files, so a game's bundles are the
+  closest version-exact source.
+- `managed <data-dir> --trees <out.json>` derives script trees from the
+  game's own assemblies (its `Managed/` folder) and the MonoScript
+  objects in its top-level serialized files, so the trees match that
+  specific game's layouts.
+- For version-generic trees instead, `scripts/structsdump-to-trees.py`
+  converts AssetRipper's public type-tree dumps into the format, and
+  `scripts/merge-trees.py` joins the two halves for full coverage.
 
 unityz also ships the built-in engine-class trees of specific Unity
 releases (currently 2022.3.62f2) inside the binary. `--builtin` on any of

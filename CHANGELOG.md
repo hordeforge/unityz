@@ -13,43 +13,22 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ### Changed
 
-- `managed --trees`: MonoBehaviours that inherit through generic bases and
-  across assemblies now decode. The CLR metadata reader sized the
-  `HasFieldMarshal` and GenericParam coded indices as 2-bit tags (they are
-  1-bit), which shifted every table after FieldMarshal and made all TypeSpec
-  rows unreadable; TypeSpec `extends` rows (a base declared as
-  `class X : Base<Arg>`) were never resolved, so Object-derived detection
-  stopped at the first generic ancestor — Stranded Deep's netcode classes
-  inherit through `Funlabs.MultiplayerBehaviour`1 : Photon.Bolt.
-  EntityEventListener`1<...>`, and every `[SerializeField]` field typed to
-  that family was silently dropped from its tree. Base-chain walks now use
-  one name index over all parsed assemblies instead of a per-assembly
-  linear scan (which also makes tree generation ~30x faster on multi-DLL
-  games). Round trips: Stranded Deep resources.assets class-114 623→540
-  failures while decoding 551 more objects (Beam.Crafting.Connector 489→0),
-  The Forest 478→324, Raft 23→25 with 100 more objects passing, Green Hell
-  unchanged (2617; residual flips are older-authored data per the
-  documented data-age limit).
-- `managed --trees`: MonoBehaviours now round-trip far more real game data.
-  Three Unity serialization rules the generator got wrong are fixed: the
-  `fdNotSerialized` field flag (the C# compiler's encoding of
-  `[NonSerialized]`) now excludes a field even when public; primitive
-  fields use the canonical wire names the typeless reader understands
-  (`UInt8`/`SInt64`, not `byte`/`long`); and every sub-4-byte field
-  (bool/char/byte/short) occupies its own 4-byte-aligned cell — including
-  nested-record members and the object's final field — with array element
-  runs still contiguous. Native engine structs whose C# fields are private
-  (`LayerMask`, `Hash128`) get their fixed layouts instead of decoding as
-  zero bytes and shifting every following field. Verified byte-exact
-  round-trips on Raft (46→35 failures), Green Hell (13364→3546 on
-  class-114), and The Forest (550→527).
+- `managed --trees` matches more of Unity's MonoBehaviour serialization:
+  `[HideInInspector]` publics serialize, `[NonSerialized]` (via the
+  `fdNotSerialized` field flag) does not, delegates never do, every
+  sub-4-byte field occupies its own 4-byte-aligned cell, strings inside
+  arrays pad per element, native engine structs (`LayerMask`, `Hash128`)
+  use their fixed layouts, and generic/cross-assembly base chains resolve
+  (TypeSpec `extends`, one name index over all assemblies). Class-114
+  verify round trips: Green Hell 21167→2594, Raft 46→23, The Forest
+  550→324, Stranded Deep 623→540 while decoding 551 more objects.
+  Remaining residues are data authored by older class layouts, not tree
+  bugs (documented in features.md).
 - Object reader/writer: strings inside arrays are each 4-aligned, not
-  packed into one run. A `string[]` (or `List<string>`) whose payload is
-  not a multiple of 4 misread every following element — the second string's
-  length landed in the first's padding, an out-of-bounds read on Green
-  Hell's `ConstructionSlot.m_MatchingItems` and a class of byte-differ
-  failures elsewhere. Round trips: Green Hell class-114 3546→2594, Raft
-  level0 35→23, The Forest 527→478.
+  packed into one run. A `string[]` whose payload is not a multiple of 4
+  misread every following element (an out-of-bounds read on Green Hell's
+  `ConstructionSlot.m_MatchingItems`). Round trips: Green Hell class-114
+  3546→2594, Raft level0 35→23, The Forest 527→478.
 - Library: the typed views that build variable-length lists (`GameObject`,
   `Font`, `ComputeShader`, the audio mixer and animator families) take the
   caller's allocator and return `Allocator.Error!T`; they allocated through
