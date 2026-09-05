@@ -124,10 +124,10 @@ fn isEnum(td: dotnet.TypeDef) bool {
     return std.mem.eql(u8, base, "System.Enum");
 }
 
-/// Whether a same-assembly type derives from System.Delegate (a C#
+/// Whether a type derives from System.Delegate (a C#
 /// delegate declaration compiles to such a class). Delegate fields are
 /// never serialized by Unity, so the tree builder must skip them.
-fn isDelegate(arena: std.mem.Allocator, td: dotnet.TypeDef, type_defs: []const dotnet.TypeDef) bool {
+fn isDelegate(td: dotnet.TypeDef, type_defs: []const dotnet.TypeDef, index: *const std.StringHashMapUnmanaged(u32)) bool {
     var seen: usize = 0;
     var current: ?dotnet.TypeDef = td;
     while (current) |c| {
@@ -135,22 +135,15 @@ fn isDelegate(arena: std.mem.Allocator, td: dotnet.TypeDef, type_defs: []const d
         seen += 1;
         const base = c.base_name orelse return false;
         if (std.mem.eql(u8, base, "System.MulticastDelegate") or std.mem.eql(u8, base, "System.Delegate")) return true;
-        var found: ?dotnet.TypeDef = null;
-        for (type_defs) |d| {
-            if (std.mem.eql(u8, d.fullName(arena), base)) {
-                found = d;
-                break;
-            }
-        }
-        if (found == null) return false;
-        current = found;
+        const idx = index.get(base) orelse return false;
+        current = type_defs[idx];
     }
     return false;
 }
 
 /// Whether a type derives (transitively) from UnityEngine.Object, i.e. it
 /// serializes as a PPtr rather than an inline object.
-fn isObjectDerived(arena: std.mem.Allocator, td: dotnet.TypeDef, type_defs: []const dotnet.TypeDef) bool {
+fn isObjectDerived(td: dotnet.TypeDef, type_defs: []const dotnet.TypeDef, index: *const std.StringHashMapUnmanaged(u32)) bool {
     const roots = [_][]const u8{
         "UnityEngine.Object",
         "UnityEngine.Component",
@@ -171,21 +164,45 @@ fn isObjectDerived(arena: std.mem.Allocator, td: dotnet.TypeDef, type_defs: []co
         for (roots) |r| {
             if (std.mem.eql(u8, base, r)) return true;
         }
-        var found: ?dotnet.TypeDef = null;
-        for (type_defs) |d| {
-            if (std.mem.eql(u8, d.fullName(arena), base)) {
-                found = d;
-                break;
-            }
-        }
-        if (found == null) return false;
-        current = found;
+        const idx = index.get(base) orelse return false;
+        current = type_defs[idx];
     }
     return false;
 }
 
+/// Indexes type definitions by full name for O(1) base-chain lookups.
+/// `type_defs` may merge several assemblies, so lookups must not scan the
+/// whole list per type (tens of thousands of definitions times a linear
+/// search per chain step is quadratic and exhausts memory).
+fn indexTypeDefs(arena: std.mem.Allocator, type_defs: []const dotnet.TypeDef) !std.StringHashMapUnmanaged(u32) {
+    var m: std.StringHashMapUnmanaged(u32) = .empty;
+    for (type_defs, 0..) |td, i| {
+        const nm = td.fullName(arena);
+        if (!m.contains(nm)) try m.put(arena, nm, @intCast(i));
+    }
+    return m;
+}
+
 pub fn buildTypeMap(arena: std.mem.Allocator, assemblies: []const dotnet.Assembly) !TypeMap {
     var map: TypeMap = .empty;
+    // One merged view across assemblies: base chains routinely cross into
+    // other DLLs (a MonoBehaviour may inherit through a generic base whose
+    // own base lives in a plugin assembly), and Object-derived detection
+    // must be able to follow them. TypeDef is a plain value type whose
+    // slices point into the shared arena, so a shallow copy is safe.
+    var n_total: usize = 0;
+    for (assemblies) |assembly| n_total += assembly.type_defs.len;
+    const all_defs = try arena.alloc(dotnet.TypeDef, n_total);
+    {
+        var di: usize = 0;
+        for (assemblies) |assembly| {
+            for (assembly.type_defs) |td| {
+                all_defs[di] = td;
+                di += 1;
+            }
+        }
+    }
+    var index = try indexTypeDefs(arena, all_defs);
     for (assemblies) |assembly| {
         for (assembly.type_defs, 0..) |td, tdi| {
             const name = td.fullName(arena);
@@ -195,9 +212,9 @@ pub fn buildTypeMap(arena: std.mem.Allocator, assemblies: []const dotnet.Assembl
                 info.is_enum = true;
             } else {
                 info.fields = try dotnet.collectFields(arena, td, assembly.type_defs, assembly.field_serialized, assembly.field_nonserialized);
-                info.is_object_derived = isObjectDerived(arena, td, assembly.type_defs);
+                info.is_object_derived = isObjectDerived(td, all_defs, &index);
                 info.is_struct = (td.flags & 0x100) != 0; // ValueType
-                info.is_delegate = isDelegate(arena, td, assembly.type_defs);
+                info.is_delegate = isDelegate(td, all_defs, &index);
                 if (tdi < assembly.type_serializable.len) {
                     info.is_serializable = assembly.type_serializable[tdi];
                 }

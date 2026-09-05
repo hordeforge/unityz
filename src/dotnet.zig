@@ -336,7 +336,7 @@ fn tableRowSize(t: u32, counts: [64]u32, heaps: *const Heaps) u32 {
         0x0a => codedSize(member_ref_parent, 3) + s2 + b2, // MemberRef
         0x0b => 2 + codedSize(has_constant, 2) + b2, // Constant
         0x0c => codedSize(has_custom_attr, 5) + codedSize(method_def_or_ref, 3) + b2, // CustomAttribute; Type tag needs 3 bits (MethodDef=2, MemberRef=3)
-        0x0d => codedSize(has_field_marshal, 2) + b2, // FieldMarshal
+        0x0d => codedSize(has_field_marshal, 1) + b2, // FieldMarshal: Field=0, Param=1 (1-bit tag)
         0x0e => 2 + codedSize(has_decl_security, 2) + b2, // DeclSecurity
         0x0f => 2 + 4 + idxWidth(counts[0x02]), // ClassLayout
         0x10 => 4 + idxWidth(counts[0x04]), // FieldLayout
@@ -365,7 +365,7 @@ fn tableRowSize(t: u32, counts: [64]u32, heaps: *const Heaps) u32 {
         0x27 => 4 + 4 + 2 * s2 + codedSize(implementation, 2), // ExportedType
         0x28 => 4 + 4 + s2 + codedSize(implementation, 2), // ManifestResource
         0x29 => 2 * idxWidth(counts[0x02]), // NestedClass
-        0x2a => 2 + 2 + codedSize(type_or_method_def, 2) + s2, // GenericParam
+        0x2a => 2 + 2 + codedSize(type_or_method_def, 1) + s2, // GenericParam: TypeDef=0, MethodDef=1 (1-bit tag)
         0x2b => codedSize(method_def_or_ref, 1) + b2, // MethodSpec
         0x2c => idxWidth(counts[0x2a]) + codedSize(type_def_or_ref, 2), // GenericParamConstraint
         else => 0, // reserved table numbers never appear in a valid mask
@@ -698,6 +698,30 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
                     try std.fmt.allocPrint(arena, "{s}.{s}", .{ tns, tname })
                 else
                     try arena.dupe(u8, tname);
+            }
+        } else if (tag == 2) {
+            // TypeSpec extends: the base is a constructed generic type
+            // (`class X : Base<Arg>`), e.g. Stranded Deep's netcode classes
+            // deriving through `Funlabs.MultiplayerBehaviour`1` whose own
+            // base is `Photon.Bolt.EntityEventListener`1<...>`. Name the
+            // base after the generic type itself (no argument decoration)
+            // so Object-derived detection can keep walking the chain
+            // across assemblies.
+            if (row > 0 and row <= table_data.row_counts[tables.typespec]) {
+                const blob = typeSpecBlob(&table_data, &heaps, row) catch null;
+                if (blob) |b| {
+                    var sr = streams.Reader.init(b);
+                    // genericinst signature: 0x15, class/valuetype marker,
+                    // then the generic type's TypeDefOrRefEncoded.
+                    const e0 = sr.readByte() catch 0;
+                    if (e0 == 0x15) {
+                        const marker = sr.readByte() catch 0;
+                        if (marker == element.class or marker == element.valuetype) {
+                            const coded = readCompressed(&sr) catch 0;
+                            if (coded != 0) d.base_name = resolveTypeName(arena, coded, &table_data, &heaps) catch null;
+                        }
+                    }
+                }
             }
         }
     }
