@@ -1,22 +1,19 @@
 //! unityz — a Zig library for reading, extracting, and editing Unity assets.
 //!
-//! Status: read and write paths are both functional for the modern
-//! formats. WebFiles, UnityFS bundles (LZ4/LZMA blocks), and
-//! SerializedFiles (formats 2-22) parse; objects decode through
-//! their type trees into a JSON-serializable value model and serialize back;
-//! Texture2D/TextAsset objects extract to PNG/files (RGB/RGBA, DXT1/3/5,
-//! BC4/5, BC7, ETC1/ETC2/ETC2-RGBA8, and the crunch variants
-//! ETC_RGB4Crunched/ETC2_RGBA8Crunched/DXT1Crunched/DXT5Crunched, ASTC
-//! incl. HDR; packed sprites merge their separate alpha texture and render
-//! tight/polygon meshes); MonoBehaviours resolve their
-//! MonoScript identity and export the raw serialized script payload;
-//! managed-reference registries decode through their type trees. Shader
-//! (class 48) sub-program blobs decode: per-record parameter blobs (constant
-//! buffers + texture/cbuffer/UAV/sampler entries) and code blobs (38-byte
-//! program-data header, DXBC chunk analysis incl. ISGN/RDEF, ParserBindChannels),
-//! surfaced via `show`/`shader` and round-trip checked by `verify`. Objects
-//! can be edited in place across all supported serialized formats
-//! (2-22).
+//! Containers: WebFile, UnityFS and legacy UnityWeb/UnityRaw bundles (LZ4,
+//! LZMA, LZHAM blocks), and SerializedFiles of formats 2-22 parse, rewrite
+//! byte-exactly, and can be created from scratch (`bundle.create`,
+//! `serialized_writer.create`). Objects decode through their type trees into
+//! a JSON-serializable value model (`object_reader`, `value`) and serialize
+//! back (`object_writer`); `classes` gives typed views over that model.
+//! Trees come from the file itself, from a caller-supplied table, from the
+//! built-in per-release database (`builtin_trees`), or from a Mono game's
+//! assemblies (`dotnet`, `managed_trees`). Textures decode to RGBA8
+//! (`texture`, with PNG/TGA/BMP encoders), FSB5 audio to PCM or Ogg
+//! (`fsb5`, `audio`, `vorbis`), and Shader blobs to their record tables
+//! (`shader`). Every parser allocates from the caller's allocator, prints
+//! nothing, and returns errors instead of panicking; an arena is the
+//! intended usage.
 
 const std = @import("std");
 
@@ -35,7 +32,7 @@ pub const webfile = @import("webfile.zig");
 /// UnityFS bundle parser.
 pub const bundle = @import("bundle.zig");
 
-/// LZ4 block decompression, as used by UnityFS bundle blocks.
+/// LZ4 block decompression and compression, as used by UnityFS bundle blocks.
 pub const lz4 = @import("lz4.zig");
 
 /// TypeTree parsing (class layout metadata).
@@ -90,6 +87,9 @@ pub const serialized_writer = @import("serialized_writer.zig");
 
 /// .NET assembly metadata reader (MonoBehaviour script field layouts).
 pub const dotnet = @import("dotnet.zig");
+
+/// MonoBehaviour type trees built from those assemblies plus the game's
+/// MonoScript objects (`managed --trees`), in the `--trees` JSON shape.
 pub const managed_trees = @import("managed_trees.zig");
 
 /// File extensions of Unity asset files this project intends to support.
@@ -101,6 +101,7 @@ pub const asset_extensions = [_][]const u8{
     ".bundle",
     ".unity3d",
     ".resources",
+    ".resource",
     ".resS",
 };
 
@@ -116,6 +117,7 @@ test "isAssetFileName recognizes known extensions" {
     try std.testing.expect(isAssetFileName("sharedassets0.assets"));
     try std.testing.expect(isAssetFileName("level0.unity3d"));
     try std.testing.expect(isAssetFileName("textures.resS"));
+    try std.testing.expect(isAssetFileName("sharedassets0.resource"));
     try std.testing.expect(!isAssetFileName("level0.txt"));
     try std.testing.expect(!isAssetFileName("sharedassets0.assets.bak"));
     try std.testing.expect(!isAssetFileName(""));

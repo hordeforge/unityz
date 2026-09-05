@@ -1794,7 +1794,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 // layout, so typeless files (Mono builds strip type trees)
                 // decode from the raw layout with no tree.
                 if (o.class_id == 128) {
-                    const f = unityz.classes.Font.fromRaw(data, sf.endian, sf.unity_version) catch |err| {
+                    const f = unityz.classes.Font.fromRaw(arena, data, sf.endian, sf.unity_version) catch |err| {
                         try stdout.print("  object {d} (class 128 Font): decode failed: {s}\n", .{ o.path_id, @errorName(err) });
                         if (summary) |s| s.skipped += 1;
                         skipped += 1;
@@ -1810,7 +1810,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     try writeFontFiles(arena, subdir, o.path_id, o.class_id, f, manifest, &extracted, stdout);
                     continue;
                 }
-                const cs = unityz.classes.ComputeShader.fromRaw(data, sf.endian, sf.unity_version) catch |err| {
+                const cs = unityz.classes.ComputeShader.fromRaw(arena, data, sf.endian, sf.unity_version) catch |err| {
                     try stdout.print("  object {d} (class 72 ComputeShader): decode failed: {s}\n", .{ o.path_id, @errorName(err) });
                     if (summary) |s| s.skipped += 1;
                     skipped += 1;
@@ -2171,11 +2171,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 extracted += 1;
             },
             128 => { // Font
-                const f = unityz.classes.Font.fromValue(v);
+                const f = try unityz.classes.Font.fromValue(arena, v);
                 try writeFontFiles(arena, subdir, o.path_id, o.class_id, f, manifest, &extracted, stdout);
             },
             72 => { // ComputeShader
-                const cs = unityz.classes.ComputeShader.fromValue(v);
+                const cs = try unityz.classes.ComputeShader.fromValue(arena, v);
                 try writeComputeShaderFiles(arena, subdir, o.path_id, cs, manifest, &extracted, stdout);
             },
             89 => { // Cubemap: six faces, each a full mip chain of the same size
@@ -2227,11 +2227,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = unityz.classes.stringField(v, "m_Name") orelse "", .subdir = subdir });
             },
             241 => { // AudioMixerController -> mixer graph JSON
-                const ac = unityz.classes.AudioMixerController.fromValue(v);
+                const ac = try unityz.classes.AudioMixerController.fromValue(arena, v);
                 try writeMixerFiles(arena, subdir, o.path_id, ac, &sf, basename(path), injected, manifest, &extracted, stdout);
             },
             243 => { // AudioMixerGroupController
-                const g = unityz.classes.AudioMixerGroup.fromValue(v);
+                const g = try unityz.classes.AudioMixerGroup.fromValue(arena, v);
                 try writeMixerGroupFiles(arena, subdir, o.path_id, g, manifest, &extracted, stdout);
             },
             245 => { // AudioMixerSnapshotController
@@ -2243,11 +2243,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try writeParticleFiles(arena, subdir, o.path_id, ps, manifest, &extracted, stdout);
             },
             91 => { // AnimatorController -> layer/state summary JSON
-                const ac = unityz.classes.AnimatorController.fromValue(v);
+                const ac = try unityz.classes.AnimatorController.fromValue(arena, v);
                 try writeAnimatorFiles(arena, subdir, o.path_id, ac, manifest, &extracted, stdout);
             },
             221 => { // AnimatorOverrideController -> clip override mapping JSON
-                const oc = unityz.classes.AnimatorOverrideController.fromValue(v);
+                const oc = try unityz.classes.AnimatorOverrideController.fromValue(arena, v);
                 try writeOverrideFiles(arena, subdir, o.path_id, oc, &sf, basename(path), injected, manifest, &extracted, stdout);
             },
             95 => { // Animator -> component summary JSON
@@ -2765,7 +2765,7 @@ fn writeMixerGroupJson(
 ) !void {
     try w.print("{{\"path_id\":{d}", .{path_id});
     if (readObjectValue(arena, sf, path_id, own_basename, injected)) |obj| {
-        const g = unityz.classes.AudioMixerGroup.fromValue(obj);
+        const g = try unityz.classes.AudioMixerGroup.fromValue(arena, obj);
         try w.print(",\"name\":\"{s}\"", .{g.name});
         if (g.children.len != 0 and depth < 32) {
             try w.writeAll(",\"children\":[");

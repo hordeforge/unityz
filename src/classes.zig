@@ -4,6 +4,13 @@
 //! subset needed by extraction and editing, as accessors over
 //! [`value.Value`]. Fields are read by name, so files with stripped or
 //! renamed fields degrade to defaults instead of failing.
+//!
+//! Views borrow strings and byte slices from the value tree they were built
+//! from, so they live exactly as long as it does. A view whose fields are
+//! variable-length lists (`GameObject`, `Font`, `ComputeShader`, the audio
+//! mixer and animator families) takes the caller's allocator for those
+//! lists, like `object_reader`, and fails only on out-of-memory; the rest
+//! allocate nothing and cannot fail.
 
 const std = @import("std");
 const value = @import("value.zig");
@@ -478,6 +485,8 @@ pub const StreamingInfo = struct {
     }
 };
 
+/// Texture2D (class 28): dimensions, format, mip count, and where the pixels
+/// live (embedded `m_ImageData` or a streamed sidecar range).
 pub const Texture2D = struct {
     width: u32 = 0,
     height: u32 = 0,
@@ -509,6 +518,7 @@ pub const Texture2D = struct {
     }
 };
 
+/// TextAsset (class 49): name plus the raw `m_Script` bytes, text or binary.
 pub const TextAsset = struct {
     name: []const u8 = "",
     script: []const u8 = &.{},
@@ -606,7 +616,7 @@ pub const ComputeShader = struct {
         resources_resolved: bool = false,
     };
 
-    pub fn fromValue(v: value.Value) ComputeShader {
+    pub fn fromValue(allocator: std.mem.Allocator, v: value.Value) std.mem.Allocator.Error!ComputeShader {
         var self = ComputeShader{ .name = stringField(v, "m_Name") orelse "" };
         const variants = fieldOf(v, "variants") orelse return self;
         if (variants != .array) return self;
@@ -633,9 +643,9 @@ pub const ComputeShader = struct {
                                         if (tg == .array) {
                                             var tgs: std.ArrayList(u32) = .empty;
                                             for (tg.array) |t| {
-                                                if (t.asInt()) |ti| tgs.append(std.heap.page_allocator, narrow(u32, ti)) catch {};
+                                                if (t.asInt()) |ti| try tgs.append(allocator, narrow(u32, ti));
                                             }
-                                            k.thread_group_size = tgs.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                                            k.thread_group_size = try tgs.toOwnedSlice(allocator);
                                         }
                                     }
                                     for ([_][]const u8{ "cbs", "textures", "inBuffers", "outBuffers" }, 0..) |fname, i| {
@@ -653,9 +663,9 @@ pub const ComputeShader = struct {
                                 }
                             }
                         }
-                        kerns.append(std.heap.page_allocator, k) catch {};
+                        try kerns.append(allocator, k);
                     }
-                    var_.kernels = kerns.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                    var_.kernels = try kerns.toOwnedSlice(allocator);
                 }
             }
             if (fieldOf(vitem, "constantBuffers")) |carr| {
@@ -670,33 +680,33 @@ pub const ComputeShader = struct {
                             if (parr == .array) {
                                 var params: std.ArrayList(Param) = .empty;
                                 for (parr.array) |pitem| {
-                                    params.append(std.heap.page_allocator, .{
+                                    try params.append(allocator, .{
                                         .name = stringField(pitem, "name") orelse "",
                                         .type = narrow(i32, intField(pitem, "type") orelse 0),
                                         .offset = narrow(u32, intField(pitem, "offset") orelse 0),
                                         .array_size = narrow(u32, intField(pitem, "arraySize") orelse 0),
                                         .row_count = narrow(u32, intField(pitem, "rowCount") orelse 0),
                                         .col_count = narrow(u32, intField(pitem, "colCount") orelse 0),
-                                    }) catch {};
+                                    });
                                 }
-                                cb.params = params.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                                cb.params = try params.toOwnedSlice(allocator);
                             }
                         }
-                        cbs.append(std.heap.page_allocator, cb) catch {};
+                        try cbs.append(allocator, cb);
                     }
-                    var_.constant_buffers = cbs.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                    var_.constant_buffers = try cbs.toOwnedSlice(allocator);
                 }
             }
-            list.append(std.heap.page_allocator, var_) catch {};
+            try list.append(allocator, var_);
         }
-        self.variants = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+        self.variants = try list.toOwnedSlice(allocator);
         return self;
     }
 
     /// Raw serialized layout for the modern (2017+) ComputeShader: the
     /// `variants` vector of platform variants, each with kernels, constant
     /// buffers, and the resourcesResolved flag. Older layouts are rejected.
-    pub fn fromRaw(bytes: []const u8, endian: std.builtin.Endian, unity_version: []const u8) !ComputeShader {
+    pub fn fromRaw(allocator: std.mem.Allocator, bytes: []const u8, endian: std.builtin.Endian, unity_version: []const u8) !ComputeShader {
         if (!computeShaderLayoutIsModern(unity_version)) return error.UnsupportedVersion;
         var r = streams.Reader.init(bytes);
         r.endian = endian;
@@ -705,7 +715,7 @@ pub const ComputeShader = struct {
         const nvariants = try r.readInt(i32);
         if (nvariants < 0) return error.Malformed;
         var variants: std.ArrayList(Variant) = .empty;
-        errdefer variants.deinit(std.heap.page_allocator);
+        errdefer variants.deinit(allocator);
         for (0..@as(usize, @intCast(nvariants))) |_| {
             var v = Variant{
                 .target_renderer = try r.readInt(i32),
@@ -714,7 +724,7 @@ pub const ComputeShader = struct {
             const nkernels = try r.readInt(i32);
             if (nkernels < 0) return error.Malformed;
             var kerns: std.ArrayList(Kernel) = .empty;
-            errdefer kerns.deinit(std.heap.page_allocator);
+            errdefer kerns.deinit(allocator);
             for (0..@as(usize, @intCast(nkernels))) |_| {
                 var k = Kernel{ .name = try r.readAlignedStringBorrow() };
                 const nuv = try r.readInt(i32);
@@ -748,7 +758,7 @@ pub const ComputeShader = struct {
                         k.in_buffer_count = @intCast(in_buffer_count);
                         k.out_buffer_count = @intCast(out_buffer_count);
                         const n: usize = @intCast(ntgs);
-                        const tgs_out = std.heap.page_allocator.alloc(u32, n) catch return error.OutOfMemory;
+                        const tgs_out = try allocator.alloc(u32, n);
                         for (0..n) |i| {
                             tgs_out[i] = std.mem.readInt(u32, tgs[i * 4 ..][0..4], .little);
                         }
@@ -765,13 +775,13 @@ pub const ComputeShader = struct {
                 try skipStringVector(&r); // globalKeywords
                 try skipStringVector(&r); // localKeywords
                 try skipStringVector(&r); // dynamicKeywords
-                kerns.append(std.heap.page_allocator, k) catch return error.OutOfMemory;
+                try kerns.append(allocator, k);
             }
-            v.kernels = kerns.toOwnedSlice(std.heap.page_allocator) catch return error.OutOfMemory;
+            v.kernels = try kerns.toOwnedSlice(allocator);
             const ncb = try r.readInt(i32);
             if (ncb < 0) return error.Malformed;
             var cbs: std.ArrayList(ConstantBuffer) = .empty;
-            errdefer cbs.deinit(std.heap.page_allocator);
+            errdefer cbs.deinit(allocator);
             for (0..@as(usize, @intCast(ncb))) |_| {
                 var cb = ConstantBuffer{
                     .name = try r.readAlignedStringBorrow(),
@@ -780,26 +790,26 @@ pub const ComputeShader = struct {
                 const nparams = try r.readInt(i32);
                 if (nparams < 0) return error.Malformed;
                 var params: std.ArrayList(Param) = .empty;
-                errdefer params.deinit(std.heap.page_allocator);
+                errdefer params.deinit(allocator);
                 for (0..@as(usize, @intCast(nparams))) |_| {
-                    params.append(std.heap.page_allocator, .{
+                    try params.append(allocator, .{
                         .name = try r.readAlignedStringBorrow(),
                         .type = try r.readInt(i32),
                         .offset = try r.readInt(u32),
                         .array_size = try r.readInt(u32),
                         .row_count = try r.readInt(u32),
                         .col_count = try r.readInt(u32),
-                    }) catch return error.OutOfMemory;
+                    });
                 }
-                cb.params = params.toOwnedSlice(std.heap.page_allocator) catch return error.OutOfMemory;
-                cbs.append(std.heap.page_allocator, cb) catch return error.OutOfMemory;
+                cb.params = try params.toOwnedSlice(allocator);
+                try cbs.append(allocator, cb);
             }
-            v.constant_buffers = cbs.toOwnedSlice(std.heap.page_allocator) catch return error.OutOfMemory;
+            v.constant_buffers = try cbs.toOwnedSlice(allocator);
             v.resources_resolved = (try r.readByte()) != 0;
             try r.alignTo4(); // bool padded to 4 inside the variants vector
-            variants.append(std.heap.page_allocator, v) catch return error.OutOfMemory;
+            try variants.append(allocator, v);
         }
-        self.variants = variants.toOwnedSlice(std.heap.page_allocator) catch return error.OutOfMemory;
+        self.variants = try variants.toOwnedSlice(allocator);
         return self;
     }
 };
@@ -870,7 +880,7 @@ pub const Font = struct {
     use_legacy_bounds_calculation: bool = false,
     should_round_advance_value: bool = false,
 
-    pub fn fromValue(v: value.Value) Font {
+    pub fn fromValue(allocator: std.mem.Allocator, v: value.Value) std.mem.Allocator.Error!Font {
         var self = Font{
             .name = stringField(v, "m_Name") orelse "",
             .line_spacing = floatField(v, "m_LineSpacing") orelse 0,
@@ -903,9 +913,9 @@ pub const Font = struct {
             if (f == .array) {
                 var names: std.ArrayList([]const u8) = .empty;
                 for (f.array) |item| {
-                    if (item == .string) names.append(std.heap.page_allocator, item.string) catch {};
+                    if (item == .string) try names.append(allocator, item.string);
                 }
-                self.font_names = names.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                self.font_names = try names.toOwnedSlice(allocator);
             }
         }
         if (fieldOf(v, "m_FallbackFonts")) |f| {
@@ -913,10 +923,10 @@ pub const Font = struct {
                 var fonts: std.ArrayList(value.PPtr) = .empty;
                 for (f.array) |item| {
                     if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
-                        fonts.append(std.heap.page_allocator, p) catch {};
+                        try fonts.append(allocator, p);
                     }
                 }
-                self.fallback_fonts = fonts.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                self.fallback_fonts = try fonts.toOwnedSlice(allocator);
             }
         }
         return self;
@@ -925,7 +935,7 @@ pub const Font = struct {
     /// Raw serialized layout for Unity 5.5 and newer (see the struct docs
     /// for the field order). Older fonts use a different pre-5.5 layout and
     /// are rejected rather than misread.
-    pub fn fromRaw(bytes: []const u8, endian: std.builtin.Endian, unity_version: []const u8) !Font {
+    pub fn fromRaw(allocator: std.mem.Allocator, bytes: []const u8, endian: std.builtin.Endian, unity_version: []const u8) !Font {
         if (!fontLayoutIsModern(unity_version)) return error.UnsupportedVersion;
         var r = streams.Reader.init(bytes);
         r.endian = endian;
@@ -964,8 +974,8 @@ pub const Font = struct {
         self.ascent = try r.readFloat(f32);
         self.descent = try r.readFloat(f32);
         self.default_style = try r.readInt(u32);
-        self.font_names = try readStringArray(&r);
-        self.fallback_fonts = try readPPtrArray(&r);
+        self.font_names = try readStringArray(allocator, &r);
+        self.fallback_fonts = try readPPtrArray(allocator, &r);
         self.font_rendering_mode = try r.readInt(i32);
         self.use_legacy_bounds_calculation = (try r.readByte()) != 0;
         // m_ShouldRoundAdvanceValue joined the layout after Unity 2017.1
@@ -990,11 +1000,11 @@ fn readPPtr(r: *streams.Reader) !value.PPtr {
 }
 
 /// Vector of strings: i32 count, then aligned strings.
-fn readStringArray(r: *streams.Reader) ![]const []const u8 {
+fn readStringArray(allocator: std.mem.Allocator, r: *streams.Reader) ![]const []const u8 {
     const count = try r.readInt(i32);
     if (count <= 0) return &.{};
-    const out = std.heap.page_allocator.alloc([]const u8, @intCast(count)) catch return error.OutOfMemory;
-    errdefer std.heap.page_allocator.free(out);
+    const out = try allocator.alloc([]const u8, @intCast(count));
+    errdefer allocator.free(out);
     for (out) |*s| {
         s.* = try r.readAlignedStringBorrow();
     }
@@ -1002,11 +1012,11 @@ fn readStringArray(r: *streams.Reader) ![]const []const u8 {
 }
 
 /// Vector of PPtrs: i32 count, then PPtrs.
-fn readPPtrArray(r: *streams.Reader) ![]const value.PPtr {
+fn readPPtrArray(allocator: std.mem.Allocator, r: *streams.Reader) ![]const value.PPtr {
     const count = try r.readInt(i32);
     if (count <= 0) return &.{};
-    const out = std.heap.page_allocator.alloc(value.PPtr, @intCast(count)) catch return error.OutOfMemory;
-    errdefer std.heap.page_allocator.free(out);
+    const out = try allocator.alloc(value.PPtr, @intCast(count));
+    errdefer allocator.free(out);
     for (out) |*p| {
         p.* = try readPPtr(r);
     }
@@ -1036,7 +1046,7 @@ pub const AudioMixerController = struct {
     snapshots: []const value.PPtr = &.{},
     update_mode: i64 = 0,
 
-    pub fn fromValue(v: value.Value) AudioMixerController {
+    pub fn fromValue(allocator: std.mem.Allocator, v: value.Value) std.mem.Allocator.Error!AudioMixerController {
         var self = AudioMixerController{
             .name = stringField(v, "m_Name") orelse "",
             .master_group = pptrField(v, "m_MasterGroup"),
@@ -1048,22 +1058,24 @@ pub const AudioMixerController = struct {
                 var list: std.ArrayList(value.PPtr) = .empty;
                 for (f.array) |item| {
                     if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
-                        list.append(std.heap.page_allocator, p) catch {};
+                        try list.append(allocator, p);
                     }
                 }
-                self.snapshots = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                self.snapshots = try list.toOwnedSlice(allocator);
             }
         }
         return self;
     }
 };
 
+/// AudioMixerGroupController (class 243): one node of the mixer graph, with
+/// its child groups and owning mixer as PPtrs.
 pub const AudioMixerGroup = struct {
     name: []const u8 = "",
     children: []const value.PPtr = &.{},
     audio_mixer: ?value.PPtr = null,
 
-    pub fn fromValue(v: value.Value) AudioMixerGroup {
+    pub fn fromValue(allocator: std.mem.Allocator, v: value.Value) std.mem.Allocator.Error!AudioMixerGroup {
         var self = AudioMixerGroup{
             .name = stringField(v, "m_Name") orelse "",
             .audio_mixer = pptrField(v, "m_AudioMixer"),
@@ -1073,16 +1085,18 @@ pub const AudioMixerGroup = struct {
                 var list: std.ArrayList(value.PPtr) = .empty;
                 for (f.array) |item| {
                     if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
-                        list.append(std.heap.page_allocator, p) catch {};
+                        try list.append(allocator, p);
                     }
                 }
-                self.children = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                self.children = try list.toOwnedSlice(allocator);
             }
         }
         return self;
     }
 };
 
+/// AudioMixerSnapshotController (class 245): a named snapshot, its
+/// transition time, and how many parameter values it stores.
 pub const AudioMixerSnapshot = struct {
     name: []const u8 = "",
     time: f64 = 0,
@@ -1243,7 +1257,7 @@ pub const AnimatorController = struct {
         return "";
     }
 
-    pub fn fromValue(v: value.Value) AnimatorController {
+    pub fn fromValue(allocator: std.mem.Allocator, v: value.Value) std.mem.Allocator.Error!AnimatorController {
         var self = AnimatorController{ .name = stringField(v, "m_Name") orelse "" };
         if (fieldOf(v, "m_TOS")) |f| {
             if (f == .array) {
@@ -1259,9 +1273,9 @@ pub const AnimatorController = struct {
                         .string => |s| s,
                         else => continue,
                     };
-                    list.append(std.heap.page_allocator, .{ .hash = narrow(u32, hash), .path = path }) catch {};
+                    try list.append(allocator, .{ .hash = narrow(u32, hash), .path = path });
                 }
-                self.tos = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                self.tos = try list.toOwnedSlice(allocator);
             }
         }
         if (fieldOf(v, "m_AnimationClips")) |f| {
@@ -1269,10 +1283,10 @@ pub const AnimatorController = struct {
                 var list: std.ArrayList(value.PPtr) = .empty;
                 for (f.array) |item| {
                     if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
-                        list.append(std.heap.page_allocator, p) catch {};
+                        try list.append(allocator, p);
                     }
                 }
-                self.clips = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                self.clips = try list.toOwnedSlice(allocator);
             }
         }
         const controller = fieldOf(v, "m_Controller") orelse return self;
@@ -1281,15 +1295,15 @@ pub const AnimatorController = struct {
                 var list: std.ArrayList(Layer) = .empty;
                 for (f.array) |item| {
                     const data = fieldOf(item, "data") orelse continue;
-                    list.append(std.heap.page_allocator, .{
+                    try list.append(allocator, .{
                         .state_machine_index = intField(data, "m_StateMachineIndex") orelse 0,
                         .binding = narrow(u32, intField(data, "m_Binding") orelse 0),
                         .blending_mode = intField(data, "(int&)m_LayerBlendingMode") orelse intField(data, "m_LayerBlendingMode") orelse 0,
                         .default_weight = floatField(data, "m_DefaultWeight") orelse 0,
                         .ik_pass = boolField(data, "m_IKPass") orelse false,
-                    }) catch {};
+                    });
                 }
-                self.layers = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                self.layers = try list.toOwnedSlice(allocator);
             }
         }
         if (fieldOf(controller, "m_StateMachineArray")) |f| {
@@ -1316,9 +1330,9 @@ pub const AnimatorController = struct {
                                 if (fieldOf(sdata, "m_BlendTreeConstantArray")) |ba| {
                                     if (ba == .array) st.blend_tree_count = ba.array.len;
                                 }
-                                states.append(std.heap.page_allocator, st) catch {};
+                                try states.append(allocator, st);
                             }
-                            self.states = states.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                            self.states = try states.toOwnedSlice(allocator);
                         }
                     }
                 }
@@ -1348,7 +1362,7 @@ pub const AnimatorOverrideController = struct {
         replacement: ?value.PPtr = null,
     };
 
-    pub fn fromValue(v: value.Value) AnimatorOverrideController {
+    pub fn fromValue(allocator: std.mem.Allocator, v: value.Value) std.mem.Allocator.Error!AnimatorOverrideController {
         var self = AnimatorOverrideController{
             .name = stringField(v, "m_Name") orelse "",
             .controller = pptrField(v, "m_Controller"),
@@ -1357,12 +1371,12 @@ pub const AnimatorOverrideController = struct {
             if (f == .array) {
                 var list: std.ArrayList(Override) = .empty;
                 for (f.array) |item| {
-                    list.append(std.heap.page_allocator, .{
+                    try list.append(allocator, .{
                         .original = pptrField(item, "m_OriginalClip"),
                         .replacement = pptrField(item, "m_OverrideClip"),
-                    }) catch {};
+                    });
                 }
-                self.overrides = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+                self.overrides = try list.toOwnedSlice(allocator);
             }
         }
         return self;
@@ -1404,6 +1418,8 @@ pub const Animator = struct {
     }
 };
 
+/// GameObject (class 1): name, layer, tag, active flag, and the PPtrs of its
+/// components (the first is normally its Transform).
 pub const GameObject = struct {
     name: []const u8 = "",
     layer: i64 = 0,
@@ -1412,7 +1428,7 @@ pub const GameObject = struct {
     /// PPtrs to Component objects.
     components: []const value.PPtr = &.{},
 
-    pub fn fromValue(v: value.Value) GameObject {
+    pub fn fromValue(allocator: std.mem.Allocator, v: value.Value) std.mem.Allocator.Error!GameObject {
         var self = GameObject{
             .name = stringField(v, "m_Name") orelse "",
             .layer = intField(v, "m_Layer") orelse 0,
@@ -1427,14 +1443,16 @@ pub const GameObject = struct {
         var list: std.ArrayList(value.PPtr) = .empty;
         for (arr) |item| {
             if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
-                list.append(std.heap.page_allocator, p) catch {};
+                try list.append(allocator, p);
             }
         }
-        self.components = list.toOwnedSlice(std.heap.page_allocator) catch &.{};
+        self.components = try list.toOwnedSlice(allocator);
         return self;
     }
 };
 
+/// Transform (class 4): local position, rotation (quaternion x,y,z,w), and
+/// scale, plus PPtrs to its GameObject and parent (`m_Father`).
 pub const Transform = struct {
     local_position: [3]f32 = .{ 0, 0, 0 },
     local_rotation: [4]f32 = .{ 0, 0, 0, 1 },
@@ -1462,6 +1480,8 @@ pub const Transform = struct {
     }
 };
 
+/// Sprite (class 213): source texture and optional alpha texture, atlas
+/// rect, pixels-per-unit, and the packing settings bitfield with helpers.
 pub const Sprite = struct {
     name: []const u8 = "",
     texture: ?value.PPtr = null,
@@ -1947,6 +1967,8 @@ pub fn renderSpriteMesh(
     return .{ .data = sprite, .w = @intCast(sprite_w), .h = @intCast(sprite_h) };
 }
 
+/// Material (class 21): name and shader PPtr; property blocks are read by
+/// the extractor straight from the value tree.
 pub const Material = struct {
     name: []const u8 = "",
     shader: ?value.PPtr = null,
@@ -1959,6 +1981,8 @@ pub const Material = struct {
     }
 };
 
+/// MonoBehaviour (class 114): the fixed header (GameObject, enabled,
+/// script PPtr, name) and the serialized script payload as raw bytes.
 pub const MonoBehaviour = struct {
     name: []const u8 = "",
     enabled: bool = true,
@@ -2010,6 +2034,8 @@ pub const MonoScript = struct {
     }
 };
 
+/// AssetBundle (class 142): the bundle's own name; the `m_Container` path
+/// map is exported by the extractor from the value tree.
 pub const AssetBundle = struct {
     name: []const u8 = "",
 
@@ -2173,6 +2199,9 @@ test "monoscript full name trims the trailing nul" {
 }
 
 test "typed views extract fields from a generic value" {
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
     const v = value.Value{ .obj = &[_]value.Field{
         .{ .name = "m_Width", .value = .{ .int = 64 } },
         .{ .name = "m_Height", .value = .{ .int = 32 } },
@@ -2201,7 +2230,7 @@ test "typed views extract fields from a generic value" {
             .{ .pptr = .{ .file_id = 0, .path_id = 9 } },
         } } },
     } };
-    const go = GameObject.fromValue(g);
+    const go = try GameObject.fromValue(allocator, g);
     try std.testing.expectEqualStrings("Player", go.name);
     try std.testing.expect(!go.is_active);
     try std.testing.expectEqual(@as(usize, 2), go.components.len);
@@ -2443,6 +2472,9 @@ test "mesh multi-stream layout and per-vertex reads" {
 }
 
 test "font fromValue reads the type-tree fields" {
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
     const v = value.Value{ .obj = &[_]value.Field{
         .{ .name = "m_Name", .value = .{ .string = "LiberationSans" } },
         .{ .name = "m_LineSpacing", .value = .{ .float = 18.4 } },
@@ -2467,7 +2499,7 @@ test "font fromValue reads the type-tree fields" {
         .{ .name = "m_UseLegacyBoundsCalculation", .value = .{ .bool = false } },
         .{ .name = "m_ShouldRoundAdvanceValue", .value = .{ .bool = true } },
     } };
-    const f = Font.fromValue(v);
+    const f = try Font.fromValue(allocator, v);
     try std.testing.expectEqualStrings("LiberationSans", f.name);
     try std.testing.expectEqual(@as(f64, 18.4), f.line_spacing);
     try std.testing.expectEqual(@as(f64, 16), f.font_size);
@@ -2484,6 +2516,9 @@ test "font fromValue reads the type-tree fields" {
 }
 
 test "font fromRaw parses the serialized 5.5+ layout" {
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     var tmp: [8]u8 = undefined;
@@ -2530,7 +2565,7 @@ test "font fromRaw parses the serialized 5.5+ layout" {
     try putInt(&buf, &tmp, i32, 0); // m_FontRenderingMode
     try buf.appendSlice(std.testing.allocator, &.{ 0, 1 }); // m_UseLegacyBoundsCalculation, m_ShouldRoundAdvanceValue
 
-    const f = try Font.fromRaw(buf.items, .little, "2022.3.62f2");
+    const f = try Font.fromRaw(allocator, buf.items, .little, "2022.3.62f2");
     try std.testing.expectEqualStrings("TestFont", f.name);
     try std.testing.expectEqual(@as(f64, @floatCast(@as(f32, 19.5))), f.line_spacing);
     try std.testing.expectEqual(@as(i64, 126), f.default_material.?.path_id);
@@ -2549,6 +2584,9 @@ test "font fromRaw parses the serialized 5.5+ layout" {
 }
 
 test "font fromRaw: 5.x fonts end before m_ShouldRoundAdvanceValue" {
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
     // m_ShouldRoundAdvanceValue joined the layout after 2017.1 (absent in
     // 5.x/2017 dumps, present from 2018.4). A 5.6 font's serialized body
     // ends after the m_UseLegacyBoundsCalculation bool, so parsing it with
@@ -2590,24 +2628,27 @@ test "font fromRaw: 5.x fonts end before m_ShouldRoundAdvanceValue" {
     try putInt(&buf, &tmp, i32, 0); // m_FontRenderingMode
     try buf.appendSlice(std.testing.allocator, &.{0}); // m_UseLegacyBoundsCalculation only
 
-    const f = try Font.fromRaw(buf.items, .little, "5.6.5p4");
+    const f = try Font.fromRaw(allocator, buf.items, .little, "5.6.5p4");
     try std.testing.expectEqualStrings("TestFont", f.name);
     try std.testing.expectEqual(@as(i64, 126), f.default_material.?.path_id);
     try std.testing.expect(!f.should_round_advance_value);
     // the same body parsed as a modern font needs the extra byte
-    try std.testing.expectError(error.OutOfBounds, Font.fromRaw(buf.items, .little, "2022.3.62f2"));
+    try std.testing.expectError(error.OutOfBounds, Font.fromRaw(allocator, buf.items, .little, "2022.3.62f2"));
 }
 
 test "font fromRaw version gate and truncation" {
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
     // pre-5.5 layouts are rejected, unknown version strings pass
-    try std.testing.expectError(error.UnsupportedVersion, Font.fromRaw(&.{}, .little, "5.4.6f1"));
-    try std.testing.expectError(error.UnsupportedVersion, Font.fromRaw(&.{}, .little, "4.7.2f1"));
+    try std.testing.expectError(error.UnsupportedVersion, Font.fromRaw(allocator, &.{}, .little, "5.4.6f1"));
+    try std.testing.expectError(error.UnsupportedVersion, Font.fromRaw(allocator, &.{}, .little, "4.7.2f1"));
     // empty body: the gate passes and the first field read fails out of
     // bounds - anything else would mean the version gate misfired
-    try std.testing.expectError(error.OutOfBounds, Font.fromRaw(&.{}, .little, "5.5.0f1"));
-    try std.testing.expectError(error.OutOfBounds, Font.fromRaw(&.{}, .little, "2022.3.62f2"));
+    try std.testing.expectError(error.OutOfBounds, Font.fromRaw(allocator, &.{}, .little, "5.5.0f1"));
+    try std.testing.expectError(error.OutOfBounds, Font.fromRaw(allocator, &.{}, .little, "2022.3.62f2"));
     // a body cut short mid-object reads out of bounds
-    try std.testing.expectError(error.OutOfBounds, Font.fromRaw("\x04\x00\x00\x00TEST", .little, "2022.3.62f2"));
+    try std.testing.expectError(error.OutOfBounds, Font.fromRaw(allocator, "\x04\x00\x00\x00TEST", .little, "2022.3.62f2"));
     // a negative character-rect count (corrupt data) is malformed
     // head: name "" + lineSpacing + material + fontSize + texture + spacing
     // ints, ending in the m_CharacterRects count
@@ -2625,10 +2666,13 @@ test "font fromRaw version gate and truncation" {
     std.mem.writeInt(i32, head[48..52], 0, .little); // m_CharacterPadding
     std.mem.writeInt(i32, head[52..56], 0, .little); // m_ConvertCase
     std.mem.writeInt(i32, head[56..60], -1, .little); // m_CharacterRects count = -1
-    try std.testing.expectError(error.Malformed, Font.fromRaw(&head, .little, "2022.3.62f2"));
+    try std.testing.expectError(error.Malformed, Font.fromRaw(allocator, &head, .little, "2022.3.62f2"));
 }
 
 test "computeShader fromValue reads the variant tree" {
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
     const unique = value.Value{ .obj = &[_]value.Field{
         .{ .name = "code", .value = .{ .bytes = "DXBC" } },
         .{ .name = "threadGroupSize", .value = .{ .array = &.{ .{ .uint = 16 }, .{ .uint = 16 }, .{ .uint = 1 } } } },
@@ -2664,7 +2708,7 @@ test "computeShader fromValue reads the variant tree" {
         .{ .name = "m_Name", .value = .{ .string = "Histogram" } },
         .{ .name = "variants", .value = .{ .array = &.{variant} } },
     } };
-    const cs = ComputeShader.fromValue(v);
+    const cs = try ComputeShader.fromValue(allocator, v);
     try std.testing.expectEqualStrings("Histogram", cs.name);
     try std.testing.expectEqual(@as(usize, 1), cs.variants.len);
     try std.testing.expectEqual(@as(i32, 2), cs.variants[0].target_renderer);
@@ -2678,6 +2722,9 @@ test "computeShader fromValue reads the variant tree" {
 }
 
 test "computeShader fromRaw parses the serialized 2017+ layout" {
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     var tmp: [8]u8 = undefined;
@@ -2747,7 +2794,7 @@ test "computeShader fromRaw parses the serialized 2017+ layout" {
     try putInt(&buf, &tmp, u8, 1); // resourcesResolved
     try buf.appendSlice(std.testing.allocator, &.{ 0, 0, 0 }); // struct pad
 
-    const cs = try ComputeShader.fromRaw(buf.items, .little, "2022.3.62f2");
+    const cs = try ComputeShader.fromRaw(allocator, buf.items, .little, "2022.3.62f2");
     try std.testing.expectEqualStrings("TestCS", cs.name);
     try std.testing.expectEqual(@as(usize, 1), cs.variants.len);
     try std.testing.expectEqual(@as(i32, 2), cs.variants[0].target_renderer);
@@ -2763,17 +2810,23 @@ test "computeShader fromRaw parses the serialized 2017+ layout" {
 }
 
 test "computeShader fromRaw version gate" {
-    try std.testing.expectError(error.UnsupportedVersion, ComputeShader.fromRaw(&.{}, .little, "5.6.7f1"));
-    try std.testing.expectError(error.UnsupportedVersion, ComputeShader.fromRaw(&.{}, .little, "2016.4.40f1"));
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
+    try std.testing.expectError(error.UnsupportedVersion, ComputeShader.fromRaw(allocator, &.{}, .little, "5.6.7f1"));
+    try std.testing.expectError(error.UnsupportedVersion, ComputeShader.fromRaw(allocator, &.{}, .little, "2016.4.40f1"));
     // empty body: the gate passes and the first field read fails out of
     // bounds - anything else would mean the version gate misfired
-    try std.testing.expectError(error.OutOfBounds, ComputeShader.fromRaw(&.{}, .little, "2017.1.0f1"));
-    try std.testing.expectError(error.OutOfBounds, ComputeShader.fromRaw(&.{}, .little, "2022.3.62f2"));
+    try std.testing.expectError(error.OutOfBounds, ComputeShader.fromRaw(allocator, &.{}, .little, "2017.1.0f1"));
+    try std.testing.expectError(error.OutOfBounds, ComputeShader.fromRaw(allocator, &.{}, .little, "2022.3.62f2"));
     // a negative variant count is malformed
-    try std.testing.expectError(error.Malformed, ComputeShader.fromRaw("\x01\x00\x00\x00A\x00\x00\x00\x00\xff\xff\xff\xff", .little, "2022.3.62f2"));
+    try std.testing.expectError(error.Malformed, ComputeShader.fromRaw(allocator, "\x01\x00\x00\x00A\x00\x00\x00\x00\xff\xff\xff\xff", .little, "2022.3.62f2"));
 }
 
 test "audio mixer family fromValue reads the graph fields" {
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
     const ctrl = value.Value{ .obj = &[_]value.Field{
         .{ .name = "m_Name", .value = .{ .string = "MasterAudioMixer" } },
         .{ .name = "m_MasterGroup", .value = .{ .pptr = .{ .file_id = 0, .path_id = 613 } } },
@@ -2781,7 +2834,7 @@ test "audio mixer family fromValue reads the graph fields" {
         .{ .name = "m_Snapshots", .value = .{ .array = &[_]value.Value{ .{ .pptr = .{ .file_id = 0, .path_id = 661 } }, .{ .pptr = .{ .file_id = 0, .path_id = 664 } } } } },
         .{ .name = "m_UpdateMode", .value = .{ .int = 0 } },
     } };
-    const ac = AudioMixerController.fromValue(ctrl);
+    const ac = try AudioMixerController.fromValue(allocator, ctrl);
     try std.testing.expectEqualStrings("MasterAudioMixer", ac.name);
     try std.testing.expectEqual(@as(i64, 613), ac.master_group.?.path_id);
     try std.testing.expectEqual(@as(i64, 661), ac.start_snapshot.?.path_id);
@@ -2793,7 +2846,7 @@ test "audio mixer family fromValue reads the graph fields" {
         .{ .name = "m_Children", .value = .{ .array = &[_]value.Value{ .{ .pptr = .{ .file_id = 0, .path_id = 652 } }, .{ .pptr = .{ .file_id = 0, .path_id = 629 } } } } },
         .{ .name = "m_AudioMixer", .value = .{ .pptr = .{ .file_id = 0, .path_id = 606 } } },
     } };
-    const g = AudioMixerGroup.fromValue(group);
+    const g = try AudioMixerGroup.fromValue(allocator, group);
     try std.testing.expectEqualStrings("Master", g.name);
     try std.testing.expectEqual(@as(usize, 2), g.children.len);
     try std.testing.expectEqual(@as(i64, 629), g.children[1].path_id);
@@ -2859,6 +2912,9 @@ test "particleSystem fromValue reads the module summary" {
 }
 
 test "animatorController fromValue resolves TOS names" {
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
     const v = value.Value{ .obj = &[_]value.Field{
         .{ .name = "m_Name", .value = .{ .string = "PlayOnSpawn" } },
         .{ .name = "m_TOS", .value = .{ .array = &[_]value.Value{
@@ -2894,7 +2950,7 @@ test "animatorController fromValue resolves TOS names" {
             } }} } },
         } } },
     } };
-    const ac = AnimatorController.fromValue(v);
+    const ac = try AnimatorController.fromValue(allocator, v);
     try std.testing.expectEqualStrings("PlayOnSpawn", ac.name);
     try std.testing.expectEqual(@as(usize, 2), ac.tos.len);
     try std.testing.expectEqualStrings("Base Layer", ac.tosPath(756556552));
@@ -2915,6 +2971,9 @@ test "animatorController fromValue resolves TOS names" {
 }
 
 test "animatorOverrideController fromValue reads the override pairs" {
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
     const v = value.Value{ .obj = &[_]value.Field{
         .{ .name = "m_Name", .value = .{ .string = "3PWeaponController" } },
         .{ .name = "m_Controller", .value = .{ .pptr = .{ .file_id = 0, .path_id = 129 } } },
@@ -2923,7 +2982,7 @@ test "animatorOverrideController fromValue reads the override pairs" {
             .{ .name = "m_OverrideClip", .value = .{ .pptr = .{ .file_id = 0, .path_id = 67 } } },
         } }} } },
     } };
-    const oc = AnimatorOverrideController.fromValue(v);
+    const oc = try AnimatorOverrideController.fromValue(allocator, v);
     try std.testing.expectEqualStrings("3PWeaponController", oc.name);
     try std.testing.expectEqual(@as(i64, 129), oc.controller.?.path_id);
     try std.testing.expectEqual(@as(usize, 1), oc.overrides.len);

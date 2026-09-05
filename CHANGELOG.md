@@ -11,6 +11,16 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+### Changed
+
+- Library: the typed views that build variable-length lists (`GameObject`,
+  `Font`, `ComputeShader`, the audio mixer and animator families) take the
+  caller's allocator and return `Allocator.Error!T`; they allocated through
+  a hard-coded page allocator that was never freed and swallowed
+  out-of-memory. Every typed view now carries a doc comment, the library
+  root's status paragraph reflects the current module set, and
+  `asset_extensions` includes `.resource`.
+
 ## [0.1.4] - 2026-09-05
 
 Creation and built-in-tree release. Callers can now construct a UnityFS bundle
