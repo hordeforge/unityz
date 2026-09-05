@@ -26,6 +26,13 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
   zero bytes and shifting every following field. Verified byte-exact
   round-trips on Raft (46→35 failures), Green Hell (13364→3546 on
   class-114), and The Forest (550→527).
+- Object reader/writer: strings inside arrays are each 4-aligned, not
+  packed into one run. A `string[]` (or `List<string>`) whose payload is
+  not a multiple of 4 misread every following element — the second string's
+  length landed in the first's padding, an out-of-bounds read on Green
+  Hell's `ConstructionSlot.m_MatchingItems` and a class of byte-differ
+  failures elsewhere. Round trips: Green Hell class-114 3546→2594, Raft
+  level0 35→23, The Forest 527→478.
 - Library: the typed views that build variable-length lists (`GameObject`,
   `Font`, `ComputeShader`, the audio mixer and animator families) take the
   caller's allocator and return `Allocator.Error!T`; they allocated through

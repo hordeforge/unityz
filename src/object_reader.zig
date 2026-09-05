@@ -104,10 +104,12 @@ fn readNode(
     if (std.mem.eql(u8, type_name, "string")) {
         const s = try readLengthBytes(r, 64 * 1024 * 1024);
         // Strings are always 4-aligned in the wire format; the meta flag is
-        // irrelevant (Unity's writer pads unconditionally). Array runs
-        // suppress per-element alignment and promote it to the run end,
-        // which yields identical padding.
-        if (!suppress_align) try r.alignTo4();
+        // irrelevant (Unity's writer pads unconditionally). The alignment
+        // also applies inside arrays: an array of strings is not a
+        // contiguous run, each element is length-prefixed and padded to 4
+        // (a two-string array whose payload is not a multiple of 4 proves
+        // it on Green Hell's ConstructionSlot.m_MatchingItems).
+        try r.alignTo4();
         return .{ .string = s };
     }
     if (std.mem.eql(u8, type_name, "TypelessData")) {
@@ -395,9 +397,10 @@ test "read a rich record: primitives, string, pptr, struct, arrays" {
     try w.writeInt(i32, 2); // m_Names count
     try w.writeInt(i32, 1);
     try w.writeBytes("a");
+    try w.alignTo4(); // each string element pads to 4
     try w.writeInt(i32, 2);
     try w.writeBytes("bb");
-    try w.alignTo4(); // the string array aligns as a unit
+    try w.alignTo4();
 
     var r = streams.Reader.init(w.getWritten());
     const v = try readObject(a, &r, root);

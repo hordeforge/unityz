@@ -60,8 +60,10 @@ fn writeNode(
         };
         try w.writeInt(i32, @intCast(s.len));
         try w.writeBytes(s);
-        // Strings are always 4-aligned in the wire format (see the reader).
-        if (!suppress_align) try w.alignTo4();
+        // Strings are always 4-aligned in the wire format, inside arrays
+        // too (each element is padded, see the reader); the meta flag is
+        // irrelevant.
+        try w.alignTo4();
         return;
     }
     if (std.mem.eql(u8, type_name, "TypelessData")) {
@@ -343,6 +345,7 @@ test "round trip: rich record" {
     try wire.writeInt(i32, 2);
     try wire.writeInt(i32, 1);
     try wire.writeBytes("a");
+    try wire.alignTo4();
     try wire.writeInt(i32, 2);
     try wire.writeBytes("bb");
     try wire.alignTo4();
