@@ -11,6 +11,21 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-05
+
+Creation and built-in-tree release. Callers can now construct a UnityFS bundle
+from empty state and obtain exact engine-class layouts without another Unity
+asset or a separate type-tree package.
+
+### Added
+
+- A release-indexed built-in engine-class type-tree database, initially for
+  Unity 2022.3.62f2; `trees --builtin <release>` exports it and `--builtin`
+  lets reading commands decode stripped built-in classes (#156).
+- `create <spec.json> --out <file>` builds a format-22 SerializedFile and
+  UnityFS archive from declared trees, object values, and an optional resource
+  sidecar, then verifies the result before its atomic write (#157).
+
 ## [0.1.3] - 2026-09-04
 
 CLI contract release. Every command now shares one exit-code and output
