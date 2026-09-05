@@ -152,7 +152,8 @@ rebuilt bundles keep their compression.
   `unityz --help` is the authoritative flag reference.
 
 Targeted formats: SerializedFile (`.assets`), asset bundles (`.unity3d` /
-`.bundle`), and `.resources` / `.resS` sidecar files. The rare
+`.bundle`), WebFile (`UnityWebData1.0`), and `.resources` / `.resource` /
+`.resS` sidecar files. The rare
 UnityArchive container is detected but not yet parsed.
 
 ## Layout
@@ -168,6 +169,9 @@ UnityArchive container is detected but not yet parsed.
 - `src/serialized.zig` - SerializedFile parser (`.assets` and friends)
 - `src/serialized_writer.zig` - SerializedFile rebuild and from-scratch writer
 - `src/typetree.zig` - TypeTree parsing + Unity common-string table
+- `src/builtin_trees.zig` - built-in engine-class type trees indexed by
+  exact Unity release, embedded from `src/builtin_trees/<release>.bin`
+  (packed by `scripts/structsdump-to-builtin.py` from an AssetRipper dump)
 - `src/value.zig` - generic object value model + JSON output
 - `src/object_reader.zig` - type-tree-driven object reader
 - `src/object_writer.zig` - type-tree-driven object writer
