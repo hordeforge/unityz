@@ -222,6 +222,21 @@ plain-class fields whose class lacks `[Serializable]` are omitted, while
 arrays of plain classes serialize regardless. Known layout limits fall
 back to 4-byte `int` placeholders so byte alignment is preserved.
 
+A class's generated tree matches objects only when the data was
+serialized by the same class definition the assemblies describe. Long
+lived games ship assets built by earlier releases: an object whose class
+later gained fields decodes only up to its older layout's last field,
+and `verify` reports it (`OutOfBounds` when the tree runs past the
+object, `bytes differ` when trailing fields were read at shifted
+offsets). No metadata-driven tree can recover those objects — the wire
+carries no field names — so whole-class residues of that shape are data
+age, not a tree bug. Green Hell's `resources.assets` is the measured
+example: after matching every serialization rule above, the remaining
+class-114 objects all over-read by a fixed per-class amount
+(`Construction`, `ConstructionGhost`, `ItemSlot`, `ItemSlotStack`,
+`Decoration`, `AIs.AI`, ...), each stopping cleanly at an older
+field-list boundary.
+
 A typeless file holds built-in objects (Mesh, Texture2D, ...) as well as
 scripts, so full coverage needs both generators' output merged: the
 built-in class trees from the version dump plus the game's script trees.
