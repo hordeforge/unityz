@@ -574,12 +574,14 @@ pub fn buildScriptTree(
     return nodes;
 }
 
-/// Unity writes every sub-4-byte field (bool/char/byte/short) into its own
-/// 4-byte-aligned cell: one value byte (two for char/short) plus padding,
-/// even for the object's final field and for members of nested records.
-/// Verified on Green Hell's P2PNetworkHash128 (16 byte members, each in its
-/// own cell) and on Raft bools (own slots) with the final bool padded
-/// (`01 00 00 00` trailing cell on Block instances). The one exception is
+/// Unity's small-field alignment depends on where the field lives. Bools
+/// always occupy their own 4-byte cell (Raft Block instances store each
+/// bool at a 4-byte stride, the final one padded `01 00 00 00`). Byte,
+/// char, and short fields pack into runs of consecutive same-level fields
+/// only at the MonoBehaviour's own level (Valheim's TMP_FontAsset packs
+/// `italicStyle`/`tabSize` into two bytes); members of nested records get
+/// individual cells instead (Green Hell's P2PNetworkHash128 stores each of
+/// its 16 byte members in its own cell). The one universal exception is
 /// array element runs, which are contiguous: the byte-array reader
 /// coalesces them and the collection pads as a unit, so element nodes must
 /// not carry the flag.
@@ -591,10 +593,25 @@ fn markSmallRunAlignment(nodes: []typetree.Node) void {
                 std.mem.eql(u8, t, "UInt16") or std.mem.eql(u8, t, "SInt16");
         }
     }.f;
+    const is_packable = struct {
+        fn f(t: []const u8) bool {
+            return std.mem.eql(u8, t, "char") or std.mem.eql(u8, t, "UInt8") or
+                std.mem.eql(u8, t, "SInt8") or std.mem.eql(u8, t, "UInt16") or
+                std.mem.eql(u8, t, "SInt16");
+        }
+    }.f;
     for (nodes, 0..) |*node, i| {
         if (!is_small(node.type_name)) continue;
         if (parentIsArray(nodes, i)) continue; // element run: contiguous
-        node.meta_flags |= align_flag;
+        if (std.mem.eql(u8, node.type_name, "bool")) {
+            node.meta_flags |= align_flag;
+        } else if (node.level >= 2 or i + 1 >= nodes.len) {
+            // nested-record member, or the object-final field: own cell
+            node.meta_flags |= align_flag;
+        } else if (!is_packable(nodes[i + 1].type_name)) {
+            // top-level run end before a non-small value: pad the run here
+            node.meta_flags |= align_flag;
+        }
     }
 }
 
@@ -661,7 +678,7 @@ pub fn writeJsonString(w: anytype, s: []const u8) !void {
 // Tests
 // ---------------------------------------------------------------------------
 
-test "markSmallRunAlignment: every small field gets its own aligned cell" {
+test "markSmallRunAlignment: bools and nested bytes get cells, top-level bytes pack" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -671,8 +688,9 @@ test "markSmallRunAlignment: every small field gets its own aligned cell" {
             try l.append(al, .{ .level = lvl, .type_name = t, .name = "", .meta_flags = 0 });
         }
     };
-    // bools, byte runs, nested-record bytes, and the object-final char all
-    // occupy their own 4-byte cell; array element runs stay contiguous.
+    // bools always get their own 4-byte cell; a top-level UInt8 run packs
+    // (only its last member aligns); nested-record members and the
+    // object-final char each align; array element runs stay contiguous.
     try n.add(&list, a, "bool", 1);
     try n.add(&list, a, "bool", 1);
     try n.add(&list, a, "string", 1);
@@ -680,6 +698,9 @@ test "markSmallRunAlignment: every small field gets its own aligned cell" {
     try n.add(&list, a, "UInt8", 1);
     try n.add(&list, a, "string", 1);
     try n.add(&list, a, "char", 1); // object-final: still padded
+    try n.add(&list, a, "SomeRecord", 1);
+    try n.add(&list, a, "UInt8", 2); // nested member
+    try n.add(&list, a, "UInt8", 2); // nested member
     try n.add(&list, a, "Array", 1);
     try n.add(&list, a, "int", 2); // size helper
     try n.add(&list, a, "UInt8", 2); // data element: contiguous run
@@ -688,9 +709,12 @@ test "markSmallRunAlignment: every small field gets its own aligned cell" {
     try std.testing.expectEqual(@as(i32, 0x4000), nodes[0].meta_flags); // bool
     try std.testing.expectEqual(@as(i32, 0x4000), nodes[1].meta_flags); // bool
     try std.testing.expectEqual(@as(i32, 0), nodes[2].meta_flags); // string
-    try std.testing.expectEqual(@as(i32, 0x4000), nodes[3].meta_flags); // UInt8 own cell
-    try std.testing.expectEqual(@as(i32, 0x4000), nodes[4].meta_flags); // UInt8 own cell
+    try std.testing.expectEqual(@as(i32, 0), nodes[3].meta_flags); // UInt8 packs with nodes[4]
+    try std.testing.expectEqual(@as(i32, 0x4000), nodes[4].meta_flags); // run end before string
     try std.testing.expectEqual(@as(i32, 0), nodes[5].meta_flags); // string
     try std.testing.expectEqual(@as(i32, 0x4000), nodes[6].meta_flags); // final char, padded
-    try std.testing.expectEqual(@as(i32, 0), nodes[9].meta_flags); // array data element
+    try std.testing.expectEqual(@as(i32, 0), nodes[7].meta_flags); // record
+    try std.testing.expectEqual(@as(i32, 0x4000), nodes[8].meta_flags); // nested byte: own cell
+    try std.testing.expectEqual(@as(i32, 0x4000), nodes[9].meta_flags); // nested byte: own cell
+    try std.testing.expectEqual(@as(i32, 0), nodes[12].meta_flags); // array data element
 }
