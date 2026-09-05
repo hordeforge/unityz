@@ -12,6 +12,10 @@
 //! - `map` elements are pairs; `PPtr<T>` writes file ID + path ID;
 //! - unknown fixed-size leaves write their raw bytes.
 //!
+//! Byte-array fields (`TypelessData`, 1-byte element arrays, opaque
+//! leaves) accept raw `.bytes` or the base64 string `value.jsonWrite`
+//! exports, so a JSON export writes back without a separate conversion.
+//!
 //! Records require a value for every *named* child. Unnamed children
 //! cannot be reconstructed from a value tree and are rejected; callers
 //! editing real files will not hit them in practice.
@@ -61,10 +65,7 @@ fn writeNode(
         return;
     }
     if (std.mem.eql(u8, type_name, "TypelessData")) {
-        const b = switch (v) {
-            .bytes => |b| b,
-            else => return error.TypeMismatch,
-        };
+        const b = try asBytes(w.allocator, v);
         try w.writeInt(i32, @intCast(b.len));
         try w.writeBytes(b);
         if (!suppress_align and nodeAligned(node)) try w.alignTo4();
@@ -116,10 +117,7 @@ fn writeNode(
         }
         // Opaque fixed-size leaf: raw bytes.
         if (node.byte_size < 0) return error.TypeMismatch;
-        const b = switch (v) {
-            .bytes => |b| b,
-            else => return error.TypeMismatch,
-        };
+        const b = try asBytes(w.allocator, v);
         if (b.len != @as(usize, @intCast(node.byte_size))) return error.TypeMismatch;
         try w.writeBytes(b);
         if (!suppress_align and nodeAligned(node)) try w.alignTo4();
@@ -137,7 +135,7 @@ fn writeNode(
     // coalesced form) or as an array of values (a JSON edit).
     if (element_node.children.len == 0 and element_prim != null and object_reader.isByteKind(element_prim.?)) {
         const b = switch (v) {
-            .bytes => |b| b,
+            .bytes, .string => try asBytes(w.allocator, v),
             .array => |a| blk: {
                 const out = try w.allocator.alloc(u8, a.len);
                 for (a, 0..) |item, i| {
@@ -172,6 +170,22 @@ fn writeNode(
 
     const aligns = nodeAligned(node) or nodeAligned(array_node) or nodeAligned(element_node);
     if (!suppress_align and aligns) try w.alignTo4();
+}
+
+/// Raw bytes of a byte-array value: `.bytes` as read, or a base64 string
+/// as `value.jsonWrite` exports them, so JSON exports feed straight back
+/// into the writer (`edit --patch`, `create`).
+fn asBytes(allocator: std.mem.Allocator, v: value.Value) Error![]const u8 {
+    return switch (v) {
+        .bytes => |b| b,
+        .string => |s| blk: {
+            const size = std.base64.standard.Decoder.calcSizeForSlice(s) catch return error.TypeMismatch;
+            const buf = try allocator.alloc(u8, size);
+            std.base64.standard.Decoder.decode(buf, s) catch return error.TypeMismatch;
+            break :blk buf;
+        },
+        else => error.TypeMismatch,
+    };
 }
 
 fn findField(fields: []const value.Field, name: []const u8) ?value.Value {

@@ -120,6 +120,13 @@ const usage =
     \\                 2022.3.62f2) in the same JSON shape (--class <id>
     \\                 for one class; --out <file.json>); an unknown
     \\                 release or class is a failure
+    \\  create <spec.json> --out <file>  Build a UnityFS bundle from scratch:
+    \\                 a format-22 SerializedFile with the declared type
+    \\                 trees and objects (plus an optional .resource
+    \\                 sidecar) in one archive; the result is re-read and
+    \\                 round-trip-checked before anything is written
+    \\                 (--no-verify skips that); see docs/features.md
+    \\                 for the spec shape
     \\
     \\Global option:
     \\  --builtin      With any command that accepts --trees: decode a
@@ -353,7 +360,7 @@ pub fn main(init: std.process.Init) !void {
     if (verify_failed_flag or command_failed_flag) std.process.exit(1);
 }
 
-const Command = enum { info, extract, edit, verify, stats, find, fsb, show, diff, hash, skin, shader, hierarchy, managed, trees };
+const Command = enum { info, extract, edit, verify, stats, find, fsb, show, diff, hash, skin, shader, hierarchy, managed, trees, create };
 
 fn parseCommand(arg: []const u8) ?Command {
     inline for (std.meta.fields(Command)) |field| {
@@ -401,6 +408,7 @@ fn runCommand(command: Command, path: []const u8, rest: []const []const u8, byte
         .hierarchy => return cmdHierarchy(path, rest, bytes, stdout),
         .managed => return cmdManaged(path, rest, bytes, stdout),
         .trees => return cmdTrees(path, rest, bytes, stdout),
+        .create => return cmdCreate(path, rest, bytes, stdout),
     }
 }
 
@@ -484,7 +492,8 @@ fn encodeImage(arena: std.mem.Allocator, format: ExtractFormat, w: u32, h: u32, 
 ///   "__monoscripts__": [ { "file": "globalgamemanagers.assets",
 ///                          "path_id": 128, "class": "Item_Base" }, ... ],
 ///   "Item_Base": [ { "m_Type": "Item_Base", "m_Name": "Base",
-///                    "m_Level": 0, "m_MetaFlag": 0 }, ... ],
+///                    "m_Level": 0, "m_MetaFlag": 0,
+///                    "m_Version": 1, "m_ByteSize": -1 }, ... ],
 ///   "Texture2D": [ ... ]
 /// }
 /// ```
@@ -665,8 +674,8 @@ fn buildInjectedTrees(arena: std.mem.Allocator, fields: []const unityz.value.Fie
     return out;
 }
 
-/// Parses one flat wire-style node list (`{m_Type,m_Name,m_Level,m_MetaFlag}
-/// entries) into a TypeTree, or prints a diagnostic and returns null on
+/// Parses one flat wire-style node list (`{m_Type,m_Name,m_Level,m_MetaFlag}`
+/// entries, optionally with `m_Version`/`m_ByteSize`) into a TypeTree, or prints a diagnostic and returns null on
 /// invalid input.
 fn buildInjectedTree(arena: std.mem.Allocator, name: []const u8, value: unityz.value.Value, stdout: *Io.Writer) !?*const unityz.typetree.TypeTree {
     const arr = switch (value) {
@@ -8785,6 +8794,9 @@ fn parseJsonValueAlloc(text: []const u8, pos: *usize, depth: u32, allocator: std
     if (std.mem.indexOfAny(u8, token, ".eE") != null) {
         return .{ .float = try std.fmt.parseFloat(f64, token) };
     }
+    // `-0` only exists as a float (Unity exports negative-zero rotations
+    // and positions); an integer parse would drop the sign.
+    if (std.mem.eql(u8, token, "-0")) return .{ .float = -0.0 };
     return .{ .int = try std.fmt.parseInt(i64, token, 10) };
 }
 
@@ -8808,6 +8820,306 @@ fn skipWs(text: []const u8, pos: *usize) void {
 /// trees are keyed by their script's namespace-qualified class name, resolved
 /// through the MonoScript objects inside the same container, and listed in
 /// `__monoscripts__` so a typeless MonoBehaviour can find its tree.
+// ---------------------------------------------------------------------------
+// create: a bundle from empty state.
+// ---------------------------------------------------------------------------
+
+/// `unityz create <spec.json> --out <file> [--no-verify]`. The spec names
+/// the Unity revision, target platform, CAB name, block compression, the
+/// class trees (inline `--trees` shape or a path to one), the objects
+/// (path id, class, value in `show`'s JSON shape), and an optional
+/// resource sidecar file. Every rejection is a stderr diagnostic with exit
+/// 1 and no file written.
+fn cmdCreate(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+    var out_path: ?[]const u8 = null;
+    var verify = true;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        if (std.mem.eql(u8, rest[i], "--out") and i + 1 < rest.len) {
+            if (batch_mode) return usageError("unityz: create --out names one file; run it per spec\n", .{});
+            out_path = rest[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, rest[i], "--no-verify")) {
+            verify = false;
+        } else if (std.mem.eql(u8, rest[i], "--verify")) {
+            verify = true;
+        } else {
+            return usageError("unityz: unknown create option '{s}'\n", .{rest[i]});
+        }
+    }
+    const out_file = out_path orelse return usageError("unityz: create needs --out <file>\n", .{});
+
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = io_global.io;
+
+    const spec = parseJsonLiteralAlloc(arena, bytes) catch |err| {
+        failure("unityz: {s}: bad spec JSON: {s}\n", .{ path, @errorName(err) });
+        return;
+    };
+    const fields = switch (spec) {
+        .obj => |f| f,
+        else => {
+            failure("unityz: {s}: spec must be a JSON object\n", .{path});
+            return;
+        },
+    };
+
+    var revision: []const u8 = "";
+    var cab: []const u8 = "";
+    var platform: i64 = 19; // StandaloneWindows64
+    var compression: unityz.bundle.CreateCompression = .none;
+    var trees_value: ?unityz.value.Value = null;
+    var objects: []const unityz.value.Value = &.{};
+    var resource_file: ?[]const u8 = null;
+    for (fields) |f| {
+        if (std.mem.eql(u8, f.name, "revision")) {
+            if (f.value == .string) revision = f.value.string;
+        } else if (std.mem.eql(u8, f.name, "cab")) {
+            if (f.value == .string) cab = f.value.string;
+        } else if (std.mem.eql(u8, f.name, "platform")) {
+            platform = f.value.asInt() orelse platform;
+        } else if (std.mem.eql(u8, f.name, "compression")) {
+            const s = if (f.value == .string) f.value.string else "";
+            if (std.mem.eql(u8, s, "none")) {
+                compression = .none;
+            } else if (std.mem.eql(u8, s, "lz4")) {
+                compression = .lz4;
+            } else {
+                failure("unityz: {s}: compression must be \"none\" or \"lz4\"\n", .{path});
+                return;
+            }
+        } else if (std.mem.eql(u8, f.name, "trees")) {
+            trees_value = f.value;
+        } else if (std.mem.eql(u8, f.name, "objects")) {
+            if (f.value == .array) objects = f.value.array;
+        } else if (std.mem.eql(u8, f.name, "resource")) {
+            if (f.value == .obj) {
+                for (f.value.obj) |rf| {
+                    if (std.mem.eql(u8, rf.name, "file") and rf.value == .string) resource_file = rf.value.string;
+                }
+            }
+        } else {
+            failure("unityz: {s}: unknown spec key '{s}'\n", .{ path, f.name });
+            return;
+        }
+    }
+    if (revision.len == 0) {
+        failure("unityz: {s}: spec needs a \"revision\" string (e.g. \"2022.3.62f2\")\n", .{path});
+        return;
+    }
+    if (cab.len == 0 or std.mem.indexOfScalar(u8, cab, '/') != null) {
+        failure("unityz: {s}: spec needs a \"cab\" node name without '/'\n", .{path});
+        return;
+    }
+    if (platform < std.math.minInt(i32) or platform > std.math.maxInt(i32)) {
+        failure("unityz: {s}: platform out of range\n", .{path});
+        return;
+    }
+    if (objects.len == 0) {
+        failure("unityz: {s}: spec needs a non-empty \"objects\" array\n", .{path});
+        return;
+    }
+
+    // Trees: inline table or a path to a --trees file.
+    const tv = trees_value orelse {
+        failure("unityz: {s}: spec needs \"trees\" (a --trees table or a path to one)\n", .{path});
+        return;
+    };
+    const tree_fields = switch (tv) {
+        .obj => |f| f,
+        .string => |tp| blk: {
+            const text = std.Io.Dir.cwd().readFileAlloc(io, tp, arena, .unlimited) catch |err| {
+                failure("unityz: {s}: cannot read trees file '{s}': {s}\n", .{ path, tp, @errorName(err) });
+                return;
+            };
+            const v = parseJsonLiteralAlloc(arena, text) catch |err| {
+                failure("unityz: {s}: bad trees JSON in '{s}': {s}\n", .{ path, tp, @errorName(err) });
+                return;
+            };
+            if (v != .obj) {
+                failure("unityz: {s}: trees file '{s}' must be a JSON object\n", .{ path, tp });
+                return;
+            }
+            break :blk v.obj;
+        },
+        else => {
+            failure("unityz: {s}: \"trees\" must be an object or a file path\n", .{path});
+            return;
+        },
+    };
+    const injected = try buildInjectedTrees(arena, tree_fields, stdout);
+
+    // Objects: resolve class -> tree, serialize the value, collect path ids.
+    var types: std.ArrayList(unityz.serialized_writer.CreateType) = .empty;
+    var created: std.ArrayList(unityz.serialized_writer.CreateObject) = .empty;
+    var path_ids: std.AutoHashMapUnmanaged(i64, void) = .empty;
+    var container_count: usize = 0;
+    for (objects, 0..) |ov, idx| {
+        const of = switch (ov) {
+            .obj => |f| f,
+            else => {
+                failure("unityz: {s}: objects[{d}] must be an object\n", .{ path, idx });
+                return;
+            },
+        };
+        var path_id: i64 = 0;
+        var class_value: ?unityz.value.Value = null;
+        var obj_value: ?unityz.value.Value = null;
+        for (of) |f| {
+            if (std.mem.eql(u8, f.name, "pathId")) {
+                path_id = f.value.asInt() orelse 0;
+            } else if (std.mem.eql(u8, f.name, "class")) {
+                class_value = f.value;
+            } else if (std.mem.eql(u8, f.name, "value")) {
+                obj_value = f.value;
+            }
+        }
+        if (path_id == 0) {
+            failure("unityz: {s}: objects[{d}] needs a non-zero \"pathId\"\n", .{ path, idx });
+            return;
+        }
+        if (path_ids.contains(path_id)) {
+            failure("unityz: {s}: duplicate pathId {d}\n", .{ path, path_id });
+            return;
+        }
+        try path_ids.put(arena, path_id, {});
+        // class: an id, or a name from __class_ids__ / the built-in table
+        var class_id: i32 = -1;
+        var class_name: []const u8 = "";
+        if (class_value) |cv| switch (cv) {
+            .string => |s| {
+                class_name = s;
+                var it = injected.class_ids.iterator();
+                while (it.next()) |e| {
+                    if (std.mem.eql(u8, e.value_ptr.*, s)) class_id = e.key_ptr.*;
+                }
+                if (class_id < 0) {
+                    var cid: i32 = 0;
+                    while (cid < 4096) : (cid += 1) {
+                        if (className(cid)) |n| if (std.mem.eql(u8, n, s)) {
+                            class_id = cid;
+                            break;
+                        };
+                    }
+                }
+            },
+            else => {
+                const n = cv.asInt() orelse -1;
+                if (n >= 0 and n <= std.math.maxInt(i32)) class_id = @intCast(n);
+                class_name = injected.class_ids.get(class_id) orelse className(class_id) orelse "";
+            },
+        };
+        if (class_id < 0 or class_name.len == 0) {
+            failure("unityz: {s}: object {d}: unknown class (give a class id or a name listed in the trees' __class_ids__)\n", .{ path, path_id });
+            return;
+        }
+        if (class_id == 142) container_count += 1;
+        const tree = injected.trees.get(class_name) orelse {
+            failure("unityz: {s}: object {d}: no tree for class {s} ({d}) in the spec's trees\n", .{ path, path_id, class_name, class_id });
+            return;
+        };
+        var type_index: ?u32 = null;
+        for (types.items, 0..) |t, ti| {
+            if (t.class_id == class_id) type_index = @intCast(ti);
+        }
+        if (type_index == null) {
+            type_index = @intCast(types.items.len);
+            try types.append(arena, .{ .class_id = class_id, .tree = tree });
+        }
+        const v = obj_value orelse {
+            failure("unityz: {s}: object {d}: needs a \"value\" object\n", .{ path, path_id });
+            return;
+        };
+        var w: unityz.streams.Writer = .init(arena);
+        unityz.object_writer.writeObject(&w, &tree.roots[0], v, "") catch |err| {
+            failure("unityz: {s}: object {d} ({s}): cannot serialize: {s} (every field the tree names must be present with the right shape)\n", .{ path, path_id, class_name, @errorName(err) });
+            return;
+        };
+        try created.append(arena, .{ .path_id = path_id, .type_index = type_index.?, .data = w.getWritten() });
+    }
+    if (container_count != 1) {
+        failure("unityz: {s}: a bundle needs exactly one AssetBundle (class 142) object, found {d}\n", .{ path, container_count });
+        return;
+    }
+    // Dangling in-file references: a PPtr with m_FileID 0 must name an
+    // object in this file. Unity treats a missing target as "no material /
+    // no mesh": it loads and draws nothing, which no later gate sees.
+    for (objects, created.items) |ov, co| {
+        if (findDanglingPPtr(ov, &path_ids)) |target| {
+            failure("unityz: {s}: object {d} references path id {d}, which this bundle does not contain\n", .{ path, co.path_id, target });
+            return;
+        }
+    }
+
+    const sf_bytes = unityz.serialized_writer.create(arena, .{
+        .unity_version = revision,
+        .target_platform = @intCast(platform),
+        .types = types.items,
+        .objects = created.items,
+    }) catch |err| {
+        failure("unityz: {s}: cannot build the serialized file: {s}\n", .{ path, @errorName(err) });
+        return;
+    };
+    var nodes: std.ArrayList(unityz.bundle.CreateNode) = .empty;
+    try nodes.append(arena, .{ .path = cab, .data = sf_bytes, .flags = 4 });
+    if (resource_file) |rf| {
+        const data = std.Io.Dir.cwd().readFileAlloc(io, rf, arena, .unlimited) catch |err| {
+            failure("unityz: {s}: cannot read resource file '{s}': {s}\n", .{ path, rf, @errorName(err) });
+            return;
+        };
+        try nodes.append(arena, .{ .path = try std.fmt.allocPrint(arena, "{s}.resource", .{cab}), .data = data, .flags = 0 });
+    }
+    const bundle_bytes = unityz.bundle.create(arena, .{ .unity_revision = revision, .nodes = nodes.items, .compression = compression }) catch |err| {
+        failure("unityz: {s}: cannot build the bundle: {s}\n", .{ path, @errorName(err) });
+        return;
+    };
+
+    if (verify) {
+        // The round-trip check (objects byte-exact, streamed references
+        // inside the sidecar) reports through the edit path's writer; keep
+        // its lines off stdout, which carries one JSON line on success.
+        var report: std.ArrayList(u8) = .empty;
+        var capture = std.Io.Writer.Allocating.fromArrayList(arena, &report);
+        const ok = try verifyEditResult(arena, bundle_bytes, &capture.writer);
+        try capture.writer.flush();
+        if (!ok) {
+            diagnostic("{s}", .{capture.toArrayList().items});
+            verify_failed_flag = true;
+            return;
+        }
+    }
+    if (!try writeEditOutput(arena, path, out_file, bundle_bytes, false, stdout)) return;
+    try stdout.print("{{\"file\":", .{});
+    try unityz.value.jsonWrite(.{ .string = out_file }, stdout);
+    try stdout.print(",\"bytes\":{d},\"objects\":{d},\"verified\":{s}}}\n", .{ bundle_bytes.len, created.items.len, if (verify) "true" else "false" });
+}
+
+/// The first same-file PPtr target (`m_FileID` 0, non-null `m_PathID`) in
+/// `v` that is not one of `ids`, or null when every reference resolves.
+fn findDanglingPPtr(v: unityz.value.Value, ids: *const std.AutoHashMapUnmanaged(i64, void)) ?i64 {
+    switch (v) {
+        .obj => |fields| {
+            var file: ?i64 = null;
+            var target: ?i64 = null;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "m_FileID")) file = f.value.asInt();
+                if (std.mem.eql(u8, f.name, "m_PathID")) target = f.value.asInt();
+            }
+            if (file != null and target != null) {
+                if (file.? == 0 and target.? != 0 and !ids.contains(target.?)) return target.?;
+                return null;
+            }
+            for (fields) |f| if (findDanglingPPtr(f.value, ids)) |t| return t;
+        },
+        .array => |items| for (items) |item| if (findDanglingPPtr(item, ids)) |t| return t,
+        .pptr => |p| if (p.file_id == 0 and p.path_id != 0 and !ids.contains(p.path_id)) return p.path_id,
+        else => {},
+    }
+    return null;
+}
+
 fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     var out_path: ?[]const u8 = null;
     var i: usize = 0;
@@ -10623,4 +10935,184 @@ test "flattenTree reproduces the flat node list a tree was built from" {
     const reparsed = (try buildInjectedTree(a, "MonoScript", v, &aw.writer)).?;
     try std.testing.expectEqual(tree.roots.len, reparsed.roots.len);
     try std.testing.expectEqual(tree.roots[0].children.len, reparsed.roots[0].children.len);
+}
+
+// ---------------------------------------------------------------------------
+// create: generated acceptance and rejection specs.
+// ---------------------------------------------------------------------------
+
+const create_test_trees =
+    \\"trees":{"__class_ids__":{"AssetBundle":142,"TextAsset":49,"AudioClip":83},
+    \\"AssetBundle":[{"m_Type":"AssetBundle","m_Name":"Base","m_Level":0,"m_MetaFlag":0},
+    \\ {"m_Type":"string","m_Name":"m_Name","m_Level":1,"m_MetaFlag":16384},
+    \\ {"m_Type":"Array","m_Name":"Array","m_Level":2,"m_MetaFlag":16384},
+    \\ {"m_Type":"int","m_Name":"size","m_Level":3,"m_MetaFlag":0},
+    \\ {"m_Type":"char","m_Name":"data","m_Level":3,"m_MetaFlag":0},
+    \\ {"m_Type":"map","m_Name":"m_Container","m_Level":1,"m_MetaFlag":0},
+    \\ {"m_Type":"Array","m_Name":"Array","m_Level":2,"m_MetaFlag":0},
+    \\ {"m_Type":"int","m_Name":"size","m_Level":3,"m_MetaFlag":0},
+    \\ {"m_Type":"pair","m_Name":"data","m_Level":3,"m_MetaFlag":0},
+    \\ {"m_Type":"string","m_Name":"first","m_Level":4,"m_MetaFlag":16384},
+    \\ {"m_Type":"Array","m_Name":"Array","m_Level":5,"m_MetaFlag":16384},
+    \\ {"m_Type":"int","m_Name":"size","m_Level":6,"m_MetaFlag":0},
+    \\ {"m_Type":"char","m_Name":"data","m_Level":6,"m_MetaFlag":0},
+    \\ {"m_Type":"AssetInfo","m_Name":"second","m_Level":4,"m_MetaFlag":0},
+    \\ {"m_Type":"int","m_Name":"preloadIndex","m_Level":5,"m_MetaFlag":0},
+    \\ {"m_Type":"int","m_Name":"preloadSize","m_Level":5,"m_MetaFlag":0},
+    \\ {"m_Type":"PPtr<Object>","m_Name":"asset","m_Level":5,"m_MetaFlag":0},
+    \\ {"m_Type":"int","m_Name":"m_FileID","m_Level":6,"m_MetaFlag":0},
+    \\ {"m_Type":"SInt64","m_Name":"m_PathID","m_Level":6,"m_MetaFlag":0}],
+    \\"TextAsset":[{"m_Type":"TextAsset","m_Name":"Base","m_Level":0,"m_MetaFlag":0},
+    \\ {"m_Type":"string","m_Name":"m_Name","m_Level":1,"m_MetaFlag":16384},
+    \\ {"m_Type":"Array","m_Name":"Array","m_Level":2,"m_MetaFlag":16384},
+    \\ {"m_Type":"int","m_Name":"size","m_Level":3,"m_MetaFlag":0},
+    \\ {"m_Type":"char","m_Name":"data","m_Level":3,"m_MetaFlag":0},
+    \\ {"m_Type":"string","m_Name":"m_Script","m_Level":1,"m_MetaFlag":16384},
+    \\ {"m_Type":"Array","m_Name":"Array","m_Level":2,"m_MetaFlag":16384},
+    \\ {"m_Type":"int","m_Name":"size","m_Level":3,"m_MetaFlag":0},
+    \\ {"m_Type":"char","m_Name":"data","m_Level":3,"m_MetaFlag":0}],
+    \\"AudioClip":[{"m_Type":"AudioClip","m_Name":"Base","m_Level":0,"m_MetaFlag":0},
+    \\ {"m_Type":"string","m_Name":"m_Name","m_Level":1,"m_MetaFlag":16384},
+    \\ {"m_Type":"Array","m_Name":"Array","m_Level":2,"m_MetaFlag":16384},
+    \\ {"m_Type":"int","m_Name":"size","m_Level":3,"m_MetaFlag":0},
+    \\ {"m_Type":"char","m_Name":"data","m_Level":3,"m_MetaFlag":0},
+    \\ {"m_Type":"StreamedResource","m_Name":"m_Resource","m_Level":1,"m_MetaFlag":0},
+    \\ {"m_Type":"string","m_Name":"m_Source","m_Level":2,"m_MetaFlag":16384},
+    \\ {"m_Type":"Array","m_Name":"Array","m_Level":3,"m_MetaFlag":16384},
+    \\ {"m_Type":"int","m_Name":"size","m_Level":4,"m_MetaFlag":0},
+    \\ {"m_Type":"char","m_Name":"data","m_Level":4,"m_MetaFlag":0},
+    \\ {"m_Type":"UInt64","m_Name":"m_Offset","m_Level":2,"m_MetaFlag":0},
+    \\ {"m_Type":"UInt64","m_Name":"m_Size","m_Level":2,"m_MetaFlag":0}]}
+;
+
+const create_test_container =
+    \\{"pathId":1,"class":"AssetBundle","value":{"m_Name":"t","m_Container":[["hello",{"preloadIndex":0,"preloadSize":0,"asset":{"m_FileID":0,"m_PathID":2}}]]}}
+;
+const create_test_text =
+    \\{"pathId":2,"class":49,"value":{"m_Name":"hello","m_Script":"payload"}}
+;
+
+/// Runs `create` on an inline spec; returns stdout. `out` is the output
+/// path relative to the build root.
+fn runCreate(a: std.mem.Allocator, spec: []const u8, out: []const u8) ![]const u8 {
+    command_failed_flag = false;
+    verify_failed_flag = false;
+    var buf: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(a, &buf);
+    try runCommand(.create, "spec.json", &.{ "--out", out }, spec, &aw.writer);
+    try aw.writer.flush();
+    return aw.toArrayList().items;
+}
+
+test "create builds a verified bundle with a resource sidecar" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    io_global.io = io;
+    defer command_failed_flag = false;
+    defer verify_failed_flag = false;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "clip.bin", .data = "0123456789abcdef" });
+    const res = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/clip.bin", .{&tmp.sub_path});
+    const out = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/made.unity3d", .{&tmp.sub_path});
+
+    const spec = try std.fmt.allocPrint(a,
+        \\{{"revision":"2022.3.62f2","platform":19,"cab":"CAB-test","compression":"lz4",{s},
+        \\"objects":[{s},{s},
+        \\{{"pathId":3,"class":"AudioClip","value":{{"m_Name":"clip","m_Resource":{{"m_Source":"archive:/CAB-test/CAB-test.resource","m_Offset":4,"m_Size":8}}}}}}],
+        \\"resource":{{"file":"{s}"}}}}
+    , .{ create_test_trees, create_test_container, create_test_text, res });
+    const stdout = try runCreate(a, spec, out);
+    try std.testing.expect(!command_failed_flag);
+    try std.testing.expect(!verify_failed_flag);
+    try std.testing.expect(std.mem.indexOf(u8, stdout, "\"objects\":3,\"verified\":true}") != null);
+
+    const bytes = try tmp.dir.readFileAlloc(io, "made.unity3d", a, .unlimited);
+    const b = try unityz.bundle.parse(a, bytes);
+    try std.testing.expectEqual(@as(u32, 8), b.version);
+    try std.testing.expectEqualStrings("2022.3.62f2", b.unity_revision);
+    try std.testing.expectEqual(unityz.bundle.CompressionType.lz4, unityz.bundle.blockCompressionType(b.blocks[0].flags));
+    try std.testing.expectEqual(@as(usize, 2), b.nodes.len);
+    try std.testing.expectEqualStrings("CAB-test", b.nodes[0].path);
+    try std.testing.expectEqual(@as(u32, 4), b.nodes[0].flags);
+    try std.testing.expectEqualStrings("CAB-test.resource", b.nodes[1].path);
+    try std.testing.expectEqualStrings("0123456789abcdef", b.nodes[1].data);
+    const sf = try unityz.serialized.parse(a, b.nodes[0].data);
+    try std.testing.expectEqual(@as(u32, 22), sf.version);
+    try std.testing.expectEqualStrings("2022.3.62f2", sf.unity_version);
+    try std.testing.expectEqual(@as(i32, 19), sf.target_platform);
+    try std.testing.expectEqual(@as(usize, 3), sf.types.len);
+    try std.testing.expectEqual(@as(i32, 142), sf.types[0].class_id);
+    try std.testing.expectEqual(@as(usize, 3), sf.objects.len);
+    try std.testing.expectEqual(@as(i32, 83), sf.objects[2].class_id);
+
+    // unityz's own verify accepts the result, including the streamed reference
+    var vbuf: std.ArrayList(u8) = .empty;
+    var vw = std.Io.Writer.Allocating.fromArrayList(a, &vbuf);
+    try runCommand(.verify, out, &.{"--json"}, bytes, &vw.writer);
+    try std.testing.expect(!verify_failed_flag);
+    try std.testing.expect(std.mem.indexOf(u8, vw.toArrayList().items, "\"checked\":3,\"failed\":0") != null);
+
+    // and `show` decodes the text asset back through the embedded tree
+    var sbuf: std.ArrayList(u8) = .empty;
+    var sw = std.Io.Writer.Allocating.fromArrayList(a, &sbuf);
+    try runCommand(.show, out, &.{"CAB-test:2"}, bytes, &sw.writer);
+    try std.testing.expect(std.mem.indexOf(u8, sw.toArrayList().items, "\"m_Script\":\"payload\"") != null);
+}
+
+test "create rejects every malformed spec without writing" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    io_global.io = io;
+    defer command_failed_flag = false;
+    defer verify_failed_flag = false;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/never.unity3d", .{&tmp.sub_path});
+    const head = "{\"revision\":\"2022.3.62f2\",\"cab\":\"CAB-test\"," ++ create_test_trees ++ ",\"objects\":[";
+
+    const cases = [_][]const u8{
+        // no tree for the class
+        head ++ create_test_container ++ ",{\"pathId\":2,\"class\":28,\"value\":{}}]}",
+        // duplicate path id
+        head ++ create_test_container ++ "," ++ create_test_text ++ "," ++ create_test_text ++ "]}",
+        // zero path id
+        head ++ create_test_container ++ ",{\"pathId\":0,\"class\":49,\"value\":{\"m_Name\":\"x\",\"m_Script\":\"y\"}}]}",
+        // a field the tree names is missing
+        head ++ create_test_container ++ ",{\"pathId\":2,\"class\":49,\"value\":{\"m_Name\":\"x\"}}]}",
+        // dangling in-file reference (container names path id 2, absent)
+        head ++ create_test_container ++ "]}",
+        // no AssetBundle object
+        head ++ create_test_text ++ "]}",
+        // streamed reference past the sidecar (no resource at all here)
+        head ++ create_test_container ++ "," ++ create_test_text ++ ",{\"pathId\":3,\"class\":\"AudioClip\",\"value\":{\"m_Name\":\"c\",\"m_Resource\":{\"m_Source\":\"archive:/CAB-test/CAB-test.resource\",\"m_Offset\":0,\"m_Size\":8}}}]}",
+        // unknown compression
+        "{\"revision\":\"2022.3.62f2\",\"cab\":\"CAB-test\",\"compression\":\"lzma\"," ++ create_test_trees ++ ",\"objects\":[" ++ create_test_container ++ "," ++ create_test_text ++ "]}",
+        // missing revision
+        "{\"cab\":\"CAB-test\"," ++ create_test_trees ++ ",\"objects\":[" ++ create_test_container ++ "," ++ create_test_text ++ "]}",
+        // not JSON
+        "{not json",
+    };
+    for (cases) |spec| {
+        const stdout = try runCreate(a, spec, out);
+        try std.testing.expect(command_failed_flag or verify_failed_flag);
+        try std.testing.expectEqual(0, stdout.len);
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "never.unity3d", .{}));
+    }
+
+    // the same objects with the reference satisfied do build
+    const good = head ++ create_test_container ++ "," ++ create_test_text ++ "],\"compression\":\"none\"}";
+    const good_out = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/good.unity3d", .{&tmp.sub_path});
+    const stdout = try runCreate(a, good, good_out);
+    try std.testing.expect(!command_failed_flag and !verify_failed_flag);
+    try std.testing.expect(std.mem.indexOf(u8, stdout, "\"objects\":2,\"verified\":true}") != null);
+    _ = try tmp.dir.statFile(io, "good.unity3d", .{});
+    // usage: --out is required
+    try std.testing.expectError(error.Usage, runCommand(.create, "spec.json", &.{}, good, undefined));
 }

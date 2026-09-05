@@ -405,27 +405,17 @@ pub const NodeReplacement = struct {
 /// written as zeros (parsers accept it). The caller owns the returned
 /// bytes.
 pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []const NodeReplacement) ![]u8 {
-    // resolve the new node payloads
-    const data = allocator.alloc([]const u8, b.nodes.len) catch return error.OutOfMemory;
-    defer allocator.free(data);
+    const nodes = allocator.alloc(CreateNode, b.nodes.len) catch return error.OutOfMemory;
+    defer allocator.free(nodes);
     for (b.nodes, 0..) |n, i| {
-        data[i] = n.data;
+        nodes[i] = .{ .path = n.path, .data = n.data, .flags = n.flags };
         for (replacements) |r| {
             if (std.mem.eql(u8, r.path, n.path)) {
-                data[i] = r.data;
+                nodes[i].data = r.data;
                 break;
             }
         }
     }
-
-    var total: usize = 0;
-    for (data) |d| total += d.len;
-
-    // Keep the source bundle's compression: when any source block was
-    // compressed, the single output block is written LZ4-compressed (the
-    // cheapest encoder; LZMA/LZHAM inputs convert losslessly). If the
-    // compressed form is not smaller, the block stays uncompressed, like
-    // Unity's own writer.
     var any_compressed = false;
     for (b.blocks) |blk| {
         if (blockCompressionType(blk.flags) != .none) {
@@ -433,16 +423,67 @@ pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []c
             break;
         }
     }
+    // A legacy UnityWeb/UnityRaw source (v2-5) is rebuilt as a UnityFS
+    // container, which needs a version >= 6; clamp so the output is valid
+    // rather than inheriting the legacy version.
+    return assemble(allocator, @max(b.version, 6), b.unity_version, b.unity_revision, nodes, if (any_compressed) .lz4 else .none, 0);
+}
+
+/// One directory entry of a bundle built by `create`.
+pub const CreateNode = struct {
+    path: []const u8,
+    data: []const u8,
+    /// Directory flags: 4 marks a serialized file, 0 a raw sidecar
+    /// (`.resource`/`.resS`), as Unity's own directories do.
+    flags: u32 = 4,
+};
+
+/// Block compression `create` applies to its single data block.
+pub const CreateCompression = enum { none, lz4 };
+
+pub const CreateSpec = struct {
+    /// Engine version string in the header; Unity writes `5.x.x`.
+    unity_version: []const u8 = "5.x.x",
+    /// The exact Unity revision (e.g. `2022.3.62f2`).
+    unity_revision: []const u8,
+    nodes: []const CreateNode,
+    compression: CreateCompression = .none,
+};
+
+pub const CreateError = error{ NoNodes, DuplicateNodePath, EmptyNodePath, OutOfMemory };
+
+/// Builds a UnityFS format-8 bundle from scratch: one data block holding
+/// every node in order, the block/directory table at the head of the
+/// archive (uncompressed), the 16-byte data hash zero. The caller owns the
+/// returned bytes.
+pub fn create(allocator: std.mem.Allocator, spec: CreateSpec) CreateError![]u8 {
+    if (spec.nodes.len == 0) return error.NoNodes;
+    for (spec.nodes, 0..) |n, i| {
+        if (n.path.len == 0) return error.EmptyNodePath;
+        for (spec.nodes[0..i]) |prev| if (std.mem.eql(u8, prev.path, n.path)) return error.DuplicateNodePath;
+    }
+    return assemble(allocator, 8, spec.unity_version, spec.unity_revision, spec.nodes, spec.compression, header_flag_combined) catch return error.OutOfMemory;
+}
+
+/// The shared archive assembler behind `rebuild` and `create`. With `.lz4`
+/// the single block is LZ4-compressed unless that does not shrink it, in
+/// which case it stays uncompressed like Unity's own writer.
+/// `header_flags` is the archive flags word: `rebuild` keeps writing 0,
+/// `create` writes the combined-info bit Unity's own bundles carry.
+fn assemble(allocator: std.mem.Allocator, version: u32, unity_version: []const u8, unity_revision: []const u8, nodes: []const CreateNode, compression: CreateCompression, header_flags: u32) ![]u8 {
+    var total: usize = 0;
+    for (nodes) |n| total += n.data.len;
+
     // One owner per buffer: `compressed` holds the LZ4 block, `raw_payload`
     // the fallback uncompressed copy; `block_data` borrows whichever applies.
     var compressed: ?[]u8 = null;
     defer if (compressed) |c| allocator.free(c);
     var raw_payload: ?[]u8 = null;
     defer if (raw_payload) |p| allocator.free(p);
-    if (any_compressed) {
+    if (compression == .lz4) {
         var sw: streams.Writer = .init(allocator);
         defer sw.deinit();
-        for (data) |d| try sw.writeBytes(d);
+        for (nodes) |n| try sw.writeBytes(n.data);
         const payload = sw.getWritten();
         const c = try lz4.compress(allocator, payload);
         if (c.len < total) {
@@ -464,14 +505,14 @@ pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []c
     try info.writeInt(u32, @intCast(total));
     try info.writeInt(u32, @intCast(if (compressed) |c| c.len else total));
     try info.writeInt(u16, block_flags); // 0 uncompressed, 0x40|lz4 compressed
-    try info.writeInt(u32, @intCast(b.nodes.len));
+    try info.writeInt(u32, @intCast(nodes.len));
     var offset: u64 = 0;
-    for (b.nodes, 0..) |n, i| {
+    for (nodes) |n| {
         try info.writeInt(i64, @intCast(offset));
-        try info.writeInt(i64, @intCast(data[i].len));
+        try info.writeInt(i64, @intCast(n.data.len));
         try info.writeInt(u32, n.flags);
         try info.writeStringToNull(n.path);
-        offset += data[i].len;
+        offset += n.data.len;
     }
     const info_bytes = info.getWritten();
 
@@ -480,20 +521,17 @@ pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []c
     defer out.deinit();
     out.endian = .big;
     try out.writeStringToNull(unityfs_signature);
-    // A legacy UnityWeb/UnityRaw source (v2-5) is rebuilt as a UnityFS
-    // container, which needs a version >= 6; clamp so the output is valid
-    // rather than inheriting the legacy version.
-    try out.writeInt(u32, @max(b.version, 6));
+    try out.writeInt(u32, version);
     // The parser reads both version strings for every UnityFS version
-    // (including format-6 bundles from Unity 5.x/2017/2018); the rebuild
+    // (including format-6 bundles from Unity 5.x/2017/2018); the writer
     // must write them unconditionally too, or v6 output misparses.
-    try out.writeStringToNull(b.unity_version);
-    try out.writeStringToNull(b.unity_revision);
+    try out.writeStringToNull(unity_version);
+    try out.writeStringToNull(unity_revision);
     try out.writeInt(i64, 0); // size placeholder
     try out.writeInt(u32, @intCast(info_bytes.len));
     try out.writeInt(u32, @intCast(info_bytes.len));
-    try out.writeInt(u32, 0); // flags: uncompressed, info at start
-    if (b.version >= 7) {
+    try out.writeInt(u32, header_flags); // low 6 bits zero: the info block is uncompressed
+    if (version >= 7) {
         const rem = out.getWritten().len % 16;
         for (0..(16 - rem) % 16) |_| try out.writeByte(0);
     }
@@ -501,15 +539,11 @@ pub fn rebuild(allocator: std.mem.Allocator, b: *const Bundle, replacements: []c
     if (block_data.len != 0) {
         try out.writeBytes(block_data);
     } else {
-        for (data) |d| try out.writeBytes(d);
+        for (nodes) |n| try out.writeBytes(n.data);
     }
 
     // patch the size field: after signature(8) + version(4) [+ unity + revision]
-    var size_off: usize = 12;
-    {
-        size_off += b.unity_version.len + 1;
-        size_off += b.unity_revision.len + 1;
-    }
+    const size_off: usize = 12 + unity_version.len + 1 + unity_revision.len + 1;
     const written = out.getWritten();
     var fixed = try allocator.dupe(u8, written);
     std.mem.writeInt(i64, fixed[size_off..][0..8], @intCast(fixed.len), .big);
@@ -524,7 +558,7 @@ fn compressionType(flags: u32) CompressionType {
 /// low 6 bits of its flags (0 none, 1 LZMA, 2 LZ4, 3 LZ4HC), independent
 /// of the header's compression (verified against UnityPy, which decodes
 /// every block with `flags & 0x3F`).
-fn blockCompressionType(block_flags: u16) CompressionType {
+pub fn blockCompressionType(block_flags: u16) CompressionType {
     return @enumFromInt(block_flags & 0x3F);
 }
 
@@ -855,6 +889,45 @@ test "rebuild replaces a node and stays parseable" {
     var b3 = try parse(a, rebuilt2);
     defer b3.deinit(a);
     try std.testing.expectEqualStrings("CAB-abcdefgh", b3.nodes[0].data);
+}
+
+test "create builds a parseable UnityFS v8 bundle, stored and lz4" {
+    const a = std.testing.allocator;
+    const payload = "SERIALIZED-FILE-BYTES-" ** 8;
+    const nodes = [_]CreateNode{
+        .{ .path = "CAB-abc", .data = payload, .flags = 4 },
+        .{ .path = "CAB-abc.resource", .data = "resource-bytes", .flags = 0 },
+    };
+    for ([_]CreateCompression{ .none, .lz4 }) |comp| {
+        const bytes = try create(a, .{ .unity_revision = "2022.3.62f2", .nodes = &nodes, .compression = comp });
+        defer a.free(bytes);
+        var b = try parse(a, bytes);
+        defer b.deinit(a);
+        try std.testing.expectEqual(@as(u32, 8), b.version);
+        try std.testing.expectEqualStrings("5.x.x", b.unity_version);
+        try std.testing.expectEqualStrings("2022.3.62f2", b.unity_revision);
+        try std.testing.expectEqual(@as(u64, bytes.len), @as(u64, @intCast(b.size)));
+        try std.testing.expectEqual(header_flag_combined, b.flags & ~@as(u32, 0x3F));
+        try std.testing.expectEqual(@as(usize, 1), b.blocks.len);
+        try std.testing.expectEqual(comp == .lz4, blockCompressionType(b.blocks[0].flags) == .lz4);
+        try std.testing.expectEqual(@as(usize, 2), b.nodes.len);
+        try std.testing.expectEqualStrings("CAB-abc", b.nodes[0].path);
+        try std.testing.expectEqual(@as(u32, 4), b.nodes[0].flags);
+        try std.testing.expectEqualStrings(payload, b.nodes[0].data);
+        try std.testing.expectEqualStrings("CAB-abc.resource", b.nodes[1].path);
+        try std.testing.expectEqual(@as(u32, 0), b.nodes[1].flags);
+        try std.testing.expectEqualStrings("resource-bytes", b.nodes[1].data);
+    }
+}
+
+test "create rejects an empty or duplicate directory" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.NoNodes, create(a, .{ .unity_revision = "2022.3.62f2", .nodes = &.{} }));
+    try std.testing.expectError(error.DuplicateNodePath, create(a, .{ .unity_revision = "2022.3.62f2", .nodes = &.{
+        .{ .path = "CAB-a", .data = "x" },
+        .{ .path = "CAB-a", .data = "y" },
+    } }));
+    try std.testing.expectError(error.EmptyNodePath, create(a, .{ .unity_revision = "2022.3.62f2", .nodes = &.{.{ .path = "", .data = "x" }} }));
 }
 
 test "parse rejects bad signature" {

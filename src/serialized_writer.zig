@@ -245,7 +245,7 @@ fn deriveDataAlign(sf: *const serialized.SerializedFile) usize {
     return 4; // unreachable: everything is 1-aligned
 }
 
-fn alignTo(w: *streams.Writer, n: usize) Error!void {
+fn alignTo(w: *streams.Writer, n: usize) error{OutOfMemory}!void {
     const pad = (n - (w.getWritten().len % n)) % n;
     var i: usize = 0;
     while (i < pad) : (i += 1) try w.writeByte(0);
@@ -787,4 +787,213 @@ test "rewrite survives mutated parsed files and hostile replacements" {
         const out2 = rewrite(a, &sf, &.{.{ .path_id = 100, .data = buf[0..repl_len] }}) catch continue;
         if (out2.len > 0) _ = serialized.parse(a, out2) catch {};
     }
+}
+
+// ---------------------------------------------------------------------------
+// Creation from empty state (format 22, the layout Unity 2022.3 writes).
+// ---------------------------------------------------------------------------
+
+const typetree = @import("typetree.zig");
+
+pub const CreateError = error{
+    NoObjects,
+    NoTypes,
+    ZeroPathId,
+    DuplicatePathId,
+    TypeIndexOutOfRange,
+    UnsupportedEncoding,
+    TooDeep,
+    OutOfMemory,
+};
+
+pub const CreateType = struct {
+    class_id: i32,
+    tree: *const typetree.TypeTree,
+};
+
+pub const CreateObject = struct {
+    path_id: i64,
+    /// Index into `CreateSpec.types`.
+    type_index: u32,
+    /// The object's serialized bytes (from `object_writer.writeObject`).
+    data: []const u8,
+};
+
+pub const CreateSpec = struct {
+    unity_version: []const u8,
+    target_platform: i32,
+    types: []const CreateType,
+    objects: []const CreateObject,
+    /// External file references (`PPtr.m_FileID` > 0 indexes them 1-based).
+    externals: []const []const u8 = &.{},
+};
+
+/// The format-22 file version `create` writes.
+pub const create_version: u32 = 22;
+/// Object data alignment in created files, as Unity 2022.3 writes.
+pub const create_data_align: usize = 8;
+
+/// Builds a brand-new little-endian format-22 SerializedFile: type trees
+/// embedded (old type hashes zero, no dependencies), a 4-aligned object
+/// table, no script or reference types, the given externals, empty user
+/// information. Objects are laid out 8-aligned in declaration order. The
+/// caller owns the returned bytes.
+pub fn create(allocator: std.mem.Allocator, spec: CreateSpec) CreateError![]u8 {
+    if (spec.types.len == 0) return error.NoTypes;
+    if (spec.objects.len == 0) return error.NoObjects;
+    for (spec.objects, 0..) |o, i| {
+        if (o.path_id == 0) return error.ZeroPathId;
+        if (o.type_index >= spec.types.len) return error.TypeIndexOutOfRange;
+        for (spec.objects[0..i]) |prev| if (prev.path_id == o.path_id) return error.DuplicatePathId;
+    }
+
+    var meta: streams.Writer = .init(allocator);
+    defer meta.deinit();
+    try meta.writeStringToNull(spec.unity_version);
+    try meta.writeInt(i32, spec.target_platform);
+    try meta.writeByte(1); // type trees embedded
+    try meta.writeInt(i32, @intCast(spec.types.len));
+    for (spec.types) |t| {
+        try meta.writeInt(i32, t.class_id);
+        try meta.writeByte(0); // not stripped
+        try meta.writeInt(i16, -1); // no script type
+        if (t.class_id == 114) try meta.writeBytes(&[_]u8{0} ** 16); // script id
+        try meta.writeBytes(&[_]u8{0} ** 16); // old type hash
+        try typetree.writeBlob(&meta, t.tree, create_version);
+        try meta.writeInt(i32, 0); // type dependencies
+    }
+
+    var data: streams.Writer = .init(allocator);
+    defer data.deinit();
+    try meta.writeInt(i32, @intCast(spec.objects.len));
+    for (spec.objects) |o| {
+        try alignTo(&data, create_data_align);
+        try meta.alignTo4();
+        try meta.writeInt(i64, o.path_id);
+        try meta.writeInt(i64, @intCast(data.getWritten().len));
+        try meta.writeInt(u32, @intCast(o.data.len));
+        try meta.writeInt(u32, o.type_index);
+        try data.writeBytes(o.data);
+    }
+    try meta.writeInt(i32, 0); // script types
+    try meta.writeInt(i32, @intCast(spec.externals.len));
+    for (spec.externals) |path| {
+        try meta.writeStringToNull(""); // temp_empty
+        try meta.writeBytes(&[_]u8{0} ** 16); // guid
+        try meta.writeInt(i32, 0); // type
+        try meta.writeStringToNull(path);
+    }
+    try meta.writeInt(i32, 0); // reference types
+    try meta.writeStringToNull(""); // user information
+
+    const header_size = headerSize(create_version);
+    const meta_len = meta.getWritten().len;
+    const data_offset = alignUp(header_size + meta_len, create_data_align);
+    const file_size = data_offset + data.getWritten().len;
+
+    var out: streams.Writer = .init(allocator);
+    defer out.deinit();
+    const be = std.builtin.Endian.big;
+    try out.writeIntWith(u32, 0, be); // legacy metadata size
+    try out.writeIntWith(u32, 0, be); // legacy file size
+    try out.writeIntWith(u32, create_version, be);
+    try out.writeIntWith(u32, 0, be); // legacy data offset
+    try out.writeByte(0); // little endian
+    try out.writeBytes(&[_]u8{ 0, 0, 0 });
+    try out.writeIntWith(u32, @intCast(meta_len), be);
+    try out.writeIntWith(i64, @intCast(file_size), be);
+    try out.writeIntWith(i64, @intCast(data_offset), be);
+    try out.writeIntWith(i64, 0, be);
+    try out.writeBytes(meta.getWritten());
+    for (0..@intCast(data_offset - header_size - meta_len)) |_| try out.writeByte(0);
+    try out.writeBytes(data.getWritten());
+    return allocator.dupe(u8, out.getWritten());
+}
+
+test "create builds a parseable v22 file whose objects round-trip" {
+    const object_reader = @import("object_reader.zig");
+    const object_writer = @import("object_writer.zig");
+    const value = @import("value.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const flat = [_]typetree.Node{
+        .{ .level = 0, .type_name = "TextAsset", .name = "Base", .byte_size = -1 },
+        .{ .level = 1, .type_name = "string", .name = "m_Name", .byte_size = -1, .meta_flags = 0x4000 },
+        .{ .level = 2, .type_name = "Array", .name = "Array", .byte_size = -1, .meta_flags = 0x4000 },
+        .{ .level = 3, .type_name = "int", .name = "size", .byte_size = 4 },
+        .{ .level = 3, .type_name = "char", .name = "data", .byte_size = 1 },
+        .{ .level = 1, .type_name = "string", .name = "m_Script", .byte_size = -1, .meta_flags = 0x4000 },
+        .{ .level = 2, .type_name = "Array", .name = "Array", .byte_size = -1, .meta_flags = 0x4000 },
+        .{ .level = 3, .type_name = "int", .name = "size", .byte_size = 4 },
+        .{ .level = 3, .type_name = "char", .name = "data", .byte_size = 1 },
+    };
+    const tree = try typetree.fromFlatNodes(a, &flat);
+
+    const v: value.Value = .{ .obj = &.{
+        .{ .name = "m_Name", .value = .{ .string = "hello" } },
+        .{ .name = "m_Script", .value = .{ .string = "payload text" } },
+    } };
+    var ow: streams.Writer = .init(a);
+    defer ow.deinit();
+    try object_writer.writeObject(&ow, &tree.roots[0], v, "");
+
+    const types = [_]CreateType{.{ .class_id = 49, .tree = &tree }};
+    const objects = [_]CreateObject{
+        .{ .path_id = 1, .type_index = 0, .data = ow.getWritten() },
+        .{ .path_id = 7, .type_index = 0, .data = ow.getWritten() },
+    };
+    const bytes = try create(a, .{ .unity_version = "2022.3.62f2", .target_platform = 19, .types = &types, .objects = &objects, .externals = &.{"library/unity default resources"} });
+
+    const sf = try serialized.parse(a, bytes);
+    try std.testing.expectEqual(@as(u32, 22), sf.version);
+    try std.testing.expectEqual(streams.Endian.little, sf.endian);
+    try std.testing.expectEqualStrings("2022.3.62f2", sf.unity_version);
+    try std.testing.expectEqual(@as(i32, 19), sf.target_platform);
+    try std.testing.expect(sf.enable_type_tree);
+    try std.testing.expectEqual(@as(usize, 1), sf.types.len);
+    try std.testing.expectEqual(@as(i32, 49), sf.types[0].class_id);
+    try std.testing.expectEqual(@as(usize, 2), sf.objects.len);
+    try std.testing.expectEqual(@as(i64, 7), sf.objects[1].path_id);
+    try std.testing.expectEqual(@as(u64, 0), sf.data_offset % 8);
+    try std.testing.expectEqual(@as(u64, 0), sf.objects[1].byte_start % 8);
+    try std.testing.expectEqual(@as(usize, 1), sf.externals.len);
+    try std.testing.expectEqualStrings("library/unity default resources", sf.externals[0].path);
+    try std.testing.expectEqual(bytes.len, @as(usize, @intCast(sf.file_size)));
+
+    // the embedded tree decodes the object back to the same value
+    const data = sf.objectData(&sf.objects[1]).?;
+    var r = streams.Reader.init(data);
+    const back = try object_reader.readObject(a, &r, &sf.types[0].type_tree.roots[0]);
+    try std.testing.expectEqualStrings("payload text", value.fieldOf(back, "m_Script").?.string);
+    // and the rewrite path accepts the created file (one more consumer)
+    _ = try rewrite(a, &sf, &.{});
+}
+
+test "create rejects malformed specs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const flat = [_]typetree.Node{.{ .level = 0, .type_name = "Object", .name = "Base" }};
+    const tree = try typetree.fromFlatNodes(a, &flat);
+    const types = [_]CreateType{.{ .class_id = 0, .tree = &tree }};
+    const one = [_]CreateObject{.{ .path_id = 1, .type_index = 0, .data = "" }};
+    const base: CreateSpec = .{ .unity_version = "2022.3.62f2", .target_platform = 19, .types = &types, .objects = &one };
+
+    var s = base;
+    s.types = &.{};
+    try std.testing.expectError(error.NoTypes, create(a, s));
+    s = base;
+    s.objects = &.{};
+    try std.testing.expectError(error.NoObjects, create(a, s));
+    s = base;
+    s.objects = &.{.{ .path_id = 0, .type_index = 0, .data = "" }};
+    try std.testing.expectError(error.ZeroPathId, create(a, s));
+    s = base;
+    s.objects = &.{ .{ .path_id = 3, .type_index = 0, .data = "" }, .{ .path_id = 3, .type_index = 0, .data = "" } };
+    try std.testing.expectError(error.DuplicatePathId, create(a, s));
+    s = base;
+    s.objects = &.{.{ .path_id = 1, .type_index = 1, .data = "" }};
+    try std.testing.expectError(error.TypeIndexOutOfRange, create(a, s));
 }
