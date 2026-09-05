@@ -316,6 +316,13 @@ The single difference is the array flag on the two `TypelessData` nodes
 (`image data` in Texture2D and Mesh): Unity and the dump set it, the
 pipeline's writer only flags `Array` nodes.
 
+Real-data check: 7 Days to Die ships the same release (2022.3.62f2),
+and `verify data.unity3d --builtin` round-trips all 8460 built-in
+objects in the bundle byte-exactly (zero failures across its 15 nodes:
+GameObjects, transforms, meshes, materials, textures, audio clips and
+more), confirming the shipped trees against a shipped game, not just a
+synthetic bundle.
+
 To add a release:
 
 ```bash
