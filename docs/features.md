@@ -180,8 +180,9 @@ file already carries, adding `m_Version` and `m_ByteSize` per node so a
 writer (`create`) can embed the tree with its original metadata; the
 reader ignores both when absent. Unity keeps type trees in AssetBundles but strips
 them from a player's serialized files, so a game's own bundles are the
-closest version-exact source of trees for its typeless `.assets`. Built-in
-classes are keyed by class name; a MonoBehaviour tree is keyed by its
+closest version-exact source of trees for its typeless `.assets`.
+
+Built-in classes are keyed by class name; a MonoBehaviour tree is keyed by its
 script's namespace-qualified class, resolved by following `m_Script` to a
 MonoScript object inside the same container, and listed in
 `__monoscripts__`. A MonoBehaviour whose MonoScript lives outside the file
@@ -304,12 +305,13 @@ declared type trees embedded, an 8-aligned object table, no script or
 reference types, and an optional `.resource` sidecar, packed into one
 format-8 archive (`5.x.x` plus the exact revision in the header, the
 block/directory table at the head, the data hash zero - the layout Unity
-2022.3 itself writes). Before anything reaches disk the result is
-re-parsed and every object is round-trip checked, and every streamed
-reference is checked against the sidecar, exactly as `verify` does;
-`--no-verify` skips that. Output is written to a sibling temp file and
-renamed into place. On success stdout carries one JSON line,
-`{"file":...,"bytes":N,"objects":N,"verified":true}`.
+2022.3 itself writes).
+
+Before anything reaches disk the result is re-parsed and every object is
+round-trip checked, and every streamed reference is checked against the
+sidecar, exactly as `verify` does; `--no-verify` skips that. Output is
+written to a sibling temp file and renamed into place. On success stdout
+carries one JSON line, `{"file":...,"bytes":N,"objects":N,"verified":true}`.
 
 The spec is one JSON object:
 
