@@ -26,16 +26,20 @@ Nothing in flight.
   and versions, and `--builtin` decodes stripped files' built-in classes
   through it. Exact-release matching only. See "Built-in engine-class
   trees" in [features.md](features.md).
-- MonoBehaviour serialization rules (PRs #160-#164, 2026-09-05):
-  `managed --trees` now matches Unity's field rules for real game data:
-  `[HideInInspector]` publics and the `fdNotSerialized` flag, delegate
-  skipping, per-field 4-byte cells for every sub-4-byte field, per-string
-  array alignment, native engine structs (`LayerMask`, `Hash128`), and
-  generic/cross-assembly base chains. Class-114 decode failures drop on
-  Raft (46 -> 23), Green Hell (21167 -> 2594), The Forest (550 -> 324),
-  and Stranded Deep (623 -> 540 while decoding 551 more objects). The
-  residue in every game is data authored by older class layouts : a
-  documented data-age limit, not a tree bug (see features.md).
+- MonoBehaviour serialization rules (PRs #160-#169, 2026-09-05):
+  `managed --trees` matches Unity's field rules for real data:
+  `[HideInInspector]`/`[NonSerialized]` handling, delegate skipping,
+  per-field cells for sub-4-byte fields (top-level byte/char/short runs
+  pack, nested-record bytes get cells), per-string array alignment,
+  native engine structs (`LayerMask`, `Hash128`), and generic and
+  cross-assembly base chains.
+- Verify accuracy (PRs #168-#169): rewrites reproduce Unity's own bytes
+  (nonzero padding, nonzero `true` bools) and NaN payloads compare
+  equal, so `verify` bytes-differ is zero across all five test games.
+  Remaining class-114 failures are read failures from data authored by
+  older class layouts (Green Hell 1698, Stranded Deep 386, Raft 50,
+  The Forest 20, Valheim 1): a documented data-age limit, not a tree
+  bug (see features.md).
 - Creation from empty state (2026-09-05): `create <spec.json> --out
   <file>` builds a format-22 SerializedFile and a UnityFS v8 bundle from
   declared type trees, JSON object values, and an optional `.resource`

@@ -35,12 +35,11 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
   while top-level byte/char/short runs pack, strings inside arrays pad
   per element, native engine structs (`LayerMask`, `Hash128`) use their
   fixed layouts, and generic/cross-assembly base chains resolve
-  (TypeSpec `extends`, one name index over all assemblies). Class-114
-  verify round trips: Green Hell 21167→2594, Raft 46→23, The Forest
-  550→324, Stranded Deep 623→540 while decoding 551 more objects,
-  Valheim 8→1 (TMPro fonts).
-  Remaining residues are data authored by older class layouts, not tree
-  bugs (documented in features.md).
+  (TypeSpec `extends`, one name index over all assemblies).
+  Every class-114 object that reads now round-trips byte-exactly
+  (bytes-differ zero across all five test games). The remaining
+  failures are read failures from data authored by older class layouts
+  (documented in features.md).
 - Object reader/writer: strings inside arrays are each 4-aligned, not
   packed into one run. A `string[]` whose payload is not a multiple of 4
   misread every following element (an out-of-bounds read on Green Hell's
