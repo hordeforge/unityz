@@ -41,7 +41,16 @@ pub const Error = error{
 /// script graph of a MonoBehaviour); UnityPy preserves them the same way,
 /// so rewrites do not silently drop payload data.
 pub fn writeObject(w: *streams.Writer, root: *const typetree.Node, root_value: value.Value, tail: []const u8) Error!void {
-    try writeNode(w, root, root_value, false);
+    try writeObjectPreserving(w, root, root_value, tail, null);
+}
+
+/// Like `writeObject`, but alignment padding bytes are copied from
+/// `original` instead of zero-filled. Unity's writer leaves whatever was
+/// in memory in a struct's padding, so a byte-exact rewrite against an
+/// original object must reproduce those bytes: verify uses this so a
+/// correct decode does not fail on meaningless nonzero padding.
+pub fn writeObjectPreserving(w: *streams.Writer, root: *const typetree.Node, root_value: value.Value, tail: []const u8, original: ?[]const u8) Error!void {
+    try writeNode(w, root, root_value, false, original);
     try w.writeBytes(tail);
 }
 
@@ -50,6 +59,7 @@ fn writeNode(
     node: *const typetree.Node,
     v: value.Value,
     suppress_align: bool,
+    original: ?[]const u8,
 ) Error!void {
     const type_name = node.type_name;
 
@@ -63,20 +73,20 @@ fn writeNode(
         // Strings are always 4-aligned in the wire format, inside arrays
         // too (each element is padded, see the reader); the meta flag is
         // irrelevant.
-        try w.alignTo4();
+        try padAlign(w, original);
         return;
     }
     if (std.mem.eql(u8, type_name, "TypelessData")) {
         const b = try asBytes(w.allocator, v);
         try w.writeInt(i32, @intCast(b.len));
         try w.writeBytes(b);
-        if (!suppress_align and nodeAligned(node)) try w.alignTo4();
+        if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
         return;
     }
     if (object_reader.primitiveKind(type_name)) |prim| {
         if (node.children.len != 0) return error.TypeMismatch;
-        try writePrimitive(w, prim, v);
-        if (!suppress_align and nodeAligned(node)) try w.alignTo4();
+        try writePrimitive(w, prim, v, original);
+        if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
         return;
     }
     if (std.mem.eql(u8, type_name, "pair")) {
@@ -86,13 +96,13 @@ fn writeNode(
             else => return error.TypeMismatch,
         };
         if (items.len != 2) return error.TypeMismatch;
-        try writeNode(w, &node.children[0], items[0], false);
-        try writeNode(w, &node.children[1], items[1], false);
-        if (!suppress_align and nodeAligned(node)) try w.alignTo4();
+        try writeNode(w, &node.children[0], items[0], false, original);
+        try writeNode(w, &node.children[1], items[1], false, original);
+        if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
         return;
     }
     if (object_reader.isPPtrType(type_name)) {
-        try writePPtr(w, node, v, suppress_align);
+        try writePPtr(w, node, v, suppress_align, original);
         return;
     }
     if (std.mem.eql(u8, type_name, "ReferencedObject") or
@@ -112,9 +122,9 @@ fn writeNode(
             for (node.children) |*child| {
                 if (child.name.len == 0) return error.UnnamedChild;
                 const child_value = findField(fields, child.name) orelse return error.MissingField;
-                try writeNode(w, child, child_value, false);
+                try writeNode(w, child, child_value, false, original);
             }
-            if (!suppress_align and nodeAligned(node)) try w.alignTo4();
+            if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
             return;
         }
         // Opaque fixed-size leaf: raw bytes.
@@ -122,7 +132,7 @@ fn writeNode(
         const b = try asBytes(w.allocator, v);
         if (b.len != @as(usize, @intCast(node.byte_size))) return error.TypeMismatch;
         try w.writeBytes(b);
-        if (!suppress_align and nodeAligned(node)) try w.alignTo4();
+        if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
         return;
     };
 
@@ -150,7 +160,7 @@ fn writeNode(
         try w.writeInt(i32, @intCast(b.len));
         try w.writeBytes(b);
         const aligns = nodeAligned(node) or nodeAligned(array_node) or nodeAligned(element_node);
-        if (!suppress_align and aligns) try w.alignTo4();
+        if (!suppress_align and aligns) try padAlign(w, original);
         return;
     }
 
@@ -161,17 +171,17 @@ fn writeNode(
     try w.writeInt(i32, @intCast(items.len));
     if (element_node.children.len == 0 and element_prim != null) {
         for (items) |item| {
-            try writePrimitive(w, element_prim.?, item);
+            try writePrimitive(w, element_prim.?, item, original);
         }
     } else {
         const suppress_element = nodeAligned(element_node);
         for (items) |item| {
-            try writeNode(w, element_node, item, suppress_element);
+            try writeNode(w, element_node, item, suppress_element, original);
         }
     }
 
     const aligns = nodeAligned(node) or nodeAligned(array_node) or nodeAligned(element_node);
-    if (!suppress_align and aligns) try w.alignTo4();
+    if (!suppress_align and aligns) try padAlign(w, original);
 }
 
 /// Raw bytes of a byte-array value: `.bytes` as read, or a base64 string
@@ -201,13 +211,26 @@ fn nodeAligned(node: *const typetree.Node) bool {
     return (node.meta_flags & object_reader.align_flag) != 0;
 }
 
-fn writePrimitive(w: *streams.Writer, prim: object_reader.Primitive, v: value.Value) Error!void {
+fn writePrimitive(w: *streams.Writer, prim: object_reader.Primitive, v: value.Value, original: ?[]const u8) Error!void {
     switch (prim) {
         .bool => {
             const b = switch (v) {
                 .bool => |b| b,
                 else => return error.TypeMismatch,
             };
+            if (b) {
+                // Preserve the original byte when rewriting an existing
+                // object: Unity stores `true` as any nonzero byte, and a
+                // normalized 0x01 would differ from a 0x02 original. Only
+                // verify passes `original`; edits write 0x01.
+                if (original) |o| {
+                    const pos = w.getWritten().len;
+                    if (pos < o.len and o[pos] != 0) {
+                        try w.writeByte(o[pos]);
+                        return;
+                    }
+                }
+            }
             try w.writeByte(@intFromBool(b));
         },
         .i8 => try w.writeInt(i8, try narrowInt(i8, try asInt(v))),
@@ -256,7 +279,7 @@ fn asFloat(v: value.Value) Error!f64 {
     };
 }
 
-fn writePPtr(w: *streams.Writer, node: *const typetree.Node, v: value.Value, suppress_align: bool) Error!void {
+fn writePPtr(w: *streams.Writer, node: *const typetree.Node, v: value.Value, suppress_align: bool, original: ?[]const u8) Error!void {
     if (node.children.len == 0) return error.Corrupt;
 
     const p = switch (v) {
@@ -274,11 +297,11 @@ fn writePPtr(w: *streams.Writer, node: *const typetree.Node, v: value.Value, sup
     for (node.children) |*child| {
         if (object_reader.isFileIdName(child.name)) {
             const prim = object_reader.primitiveKind(child.type_name) orelse return error.Corrupt;
-            try writePrimitive(w, prim, .{ .int = p.file_id });
+            try writePrimitive(w, prim, .{ .int = p.file_id }, original);
             file_written = true;
         } else if (object_reader.isPathIdName(child.name)) {
             const prim = object_reader.primitiveKind(child.type_name) orelse return error.Corrupt;
-            try writePrimitive(w, prim, .{ .int = p.path_id });
+            try writePrimitive(w, prim, .{ .int = p.path_id }, original);
             path_written = true;
         } else {
             // Extra fields: take from the object form when present.
@@ -286,11 +309,29 @@ fn writePPtr(w: *streams.Writer, node: *const typetree.Node, v: value.Value, sup
                 .obj => |fields| findField(fields, child.name),
                 else => null,
             } orelse return error.MissingField;
-            try writeNode(w, child, extra, false);
+            try writeNode(w, child, extra, false, original);
         }
     }
     if (!file_written or !path_written) return error.Corrupt;
-    if (!suppress_align and nodeAligned(node)) try w.alignTo4();
+    if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
+}
+
+/// Aligns the writer to 4 bytes. When `original` is present, the padding
+/// bytes are copied from it at the matching offset (Unity leaves struct
+/// memory in padding, and a byte-exact rewrite must reproduce it);
+/// otherwise the pad is zero-filled.
+fn padAlign(w: *streams.Writer, original: ?[]const u8) !void {
+    const pos = w.getWritten().len;
+    const pad = (4 - (pos % 4)) % 4;
+    if (pad == 0) return;
+    if (original) |o| {
+        if (pos + pad <= o.len) {
+            try w.writeBytes(o[pos .. pos + pad]);
+            return;
+        }
+    }
+    const zeros = [_]u8{0} ** 4;
+    try w.writeBytes(zeros[0..pad]);
 }
 
 // ---------------------------------------------------------------------------
@@ -471,4 +512,39 @@ fn allocNode(
         node.children = arr;
     }
     return node;
+}
+
+test "writeObjectPreserving copies nonzero pads and bool bytes" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // Record: bool (aligned cell) then UInt8 (aligned cell) then int.
+    const root = try allocNode(a, "SomeClass", "Base", 0, &.{
+        try allocNode(a, "bool", "flag", object_reader.align_flag, &.{}),
+        try allocNode(a, "UInt8", "small", object_reader.align_flag, &.{}),
+        try allocNode(a, "int", "count", 0, &.{}),
+    });
+
+    // A wire Unity might write: true stored as 0x02, garbage in the pads.
+    const original = [_]u8{ 0x02, 0x5a, 0x00, 0x00, 0x07, 0x2b, 0x00, 0x00, 0x2a, 0x00, 0x00, 0x00 };
+
+    var out: streams.Writer = .init(a);
+    defer out.deinit();
+    try writeObjectPreserving(&out, root, .{ .obj = &[_]value.Field{
+        .{ .name = "flag", .value = .{ .bool = true } },
+        .{ .name = "small", .value = .{ .int = 7 } },
+        .{ .name = "count", .value = .{ .int = 42 } },
+    } }, &.{}, &original);
+    try std.testing.expectEqualSlices(u8, &original, out.getWritten());
+
+    // Without the original the pads zero and the bool normalizes to 1.
+    var plain: streams.Writer = .init(a);
+    defer plain.deinit();
+    try writeObject(&plain, root, .{ .obj = &[_]value.Field{
+        .{ .name = "flag", .value = .{ .bool = true } },
+        .{ .name = "small", .value = .{ .int = 7 } },
+        .{ .name = "count", .value = .{ .int = 42 } },
+    } }, &.{});
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x00, 0x00 }, plain.getWritten());
 }

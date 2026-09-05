@@ -13,6 +13,15 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ### Changed
 
+- Object writer/verify: rewrites now preserve an original object's
+  alignment-padding bytes and nonzero `true` bool bytes. Unity leaves
+  struct memory in padding and stores a bool as any nonzero byte, so
+  zero-padded rewrites differed from the original in those meaningless
+  bytes and `verify` reported correct decodes as failures. `verify`
+  passes the original buffer through (`writeObjectPreserving`); edits
+  still write normalized zero pads. Class-114 verify round trips after
+  the fix: The Forest 324→20, Green Hell 2617→1698, Stranded Deep
+  540→386, Raft sharedassets0 354→74, Raft level0 25→21.
 - `managed --trees` matches more of Unity's MonoBehaviour serialization:
   `[HideInInspector]` publics serialize, `[NonSerialized]` (via the
   `fdNotSerialized` field flag) does not, delegates never do, bools and
