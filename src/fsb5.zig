@@ -154,7 +154,10 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Bank {
             if (name_pos + 4 > table_end) break;
             const off = std.mem.readInt(u32, data[name_pos..][0..4], .little);
             name_pos += 4;
-            const str_start = table_start + off;
+            // `off` is a u32 file field, so the sum needs 33 bits: on a
+            // 32-bit target it wraps back to a low address the `>= table_end`
+            // check below then accepts.
+            const str_start = std.math.add(usize, table_start, off) catch continue;
             // A name lives inside the name table, so both the offset and the
             // NUL scan are bounded by the table's own end. Bounding the scan
             // by `data.len` instead lets an unterminated final string - or an

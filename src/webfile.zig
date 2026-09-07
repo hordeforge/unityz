@@ -157,8 +157,11 @@ pub fn parse(allocator: std.mem.Allocator, data_in: []const u8) ParseError!WebFi
         const length = try r.readInt(u32);
         const path_len = try r.readInt(u32);
         const path = try r.readSlice(path_len);
-        const start: usize = offset;
-        const end = start + length;
+        // offset and length are u32 header fields, so their sum needs 33
+        // bits: on a 32-bit target the add wraps and slips past the bounds
+        // check below instead of being rejected by it.
+        const start = std.math.cast(usize, offset) orelse return error.OutOfBounds;
+        const end = std.math.add(usize, start, length) catch return error.OutOfBounds;
         if (end > data.len) return error.OutOfBounds;
         entries.append(allocator, .{ .path = path, .data = data[start..end] }) catch return error.OutOfMemory;
     }

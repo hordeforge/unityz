@@ -218,9 +218,13 @@ fn parseLegacy(allocator: std.mem.Allocator, data: []const u8, signature: []cons
         n.size = try dr.readInt(u32);
     }
     for (nodes) |*n| {
+        // offset/size are u32 fields of the file table, so their sum needs
+        // 33 bits: on a 32-bit target `off + len` overflows usize and panics
+        // instead of rejecting the range, the way the v6+ loop below does.
         if (n.offset < 0 or n.size < 0) continue;
-        const off: usize = @intCast(n.offset);
-        const end = off + @as(usize, @intCast(n.size));
+        const off = std.math.cast(usize, n.offset) orelse continue;
+        const len = std.math.cast(usize, n.size) orelse continue;
+        const end = std.math.add(usize, off, len) catch continue;
         if (end <= stream.len) n.data = stream[off..end];
     }
 

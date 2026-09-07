@@ -978,11 +978,16 @@ fn dxbcAnalyze(arena: std.mem.Allocator, data: []const u8) !DxbcInfo {
 
     for (0..count) |i| {
         const off: usize = @as(usize, std.mem.readInt(u32, data[0x20 + i * 4 ..][0..4], .little));
-        if (off + 8 > data.len) return error.Truncated;
+        // Chunk offset and size are u32 file fields, so every sum here needs
+        // 33 bits: on a 32-bit target `off + 8 + size` wraps and slips past
+        // the truncation checks instead of being rejected by them.
+        const body = std.math.add(usize, off, 8) catch return error.Truncated;
+        if (body > data.len) return error.Truncated;
         const fourcc = data[off .. off + 4];
         const size: usize = std.mem.readInt(u32, data[off + 4 ..][0..4], .little);
-        if (off + 8 + size > data.len) return error.Truncated;
-        const payload = data[off + 8 .. off + 8 + size];
+        const payload_end = std.math.add(usize, body, size) catch return error.Truncated;
+        if (payload_end > data.len) return error.Truncated;
+        const payload = data[body..payload_end];
         // record fourcc once
         var seen = false;
         for (names.items) |n| {
@@ -1178,12 +1183,16 @@ pub fn openD3d11Blob(arena: std.mem.Allocator, v: value.Value) !?D3d11Blob {
     if (off0 < 0 or comp0 < 0 or decomp0 < 0) return null;
     const start: usize = @intCast(off0);
     const comp_len: usize = @intCast(comp0);
-    if (start + comp_len > blob.len) return null;
+    // offset and compressedLength are u32 fields, so their sum needs 33
+    // bits: on a 32-bit target `start + comp_len` wraps and slips past this
+    // bounds check instead of being rejected by it.
+    const comp_end = std.math.add(usize, start, comp_len) catch return null;
+    if (comp_end > blob.len) return null;
     const needs_lz4 = comp_len != @as(usize, @intCast(decomp0));
     const data = if (needs_lz4)
-        try lz4.decompress(arena, blob[start .. start + comp_len], @intCast(decomp0))
+        try lz4.decompress(arena, blob[start..comp_end], @intCast(decomp0))
     else
-        blob[start .. start + comp_len];
+        blob[start..comp_end];
     const records = try parseRecords(arena, data);
     return .{ .data = data, .records = records };
 }
