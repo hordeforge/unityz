@@ -1,3 +1,12 @@
 # Normalize line endings on checkin; check out LF everywhere so shell
 # scripts and Zig sources stay byte-identical across platforms.
 * text=auto eol=lf
+
+# The embedded databases (src/builtin_trees/*.bin, src/vorbis_headers.bin)
+# are generated blobs. Under `text=auto` alone they escape CRLF->LF
+# normalization only because git's heuristic happens to find a NUL in
+# their first 8000 bytes; both start with a header followed by an ASCII
+# string table, so a regenerated dump that is NUL-free that far in would
+# be silently rewritten on checkin. Say "binary" instead of relying on
+# the guess.
+*.bin binary

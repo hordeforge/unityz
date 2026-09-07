@@ -28,13 +28,24 @@ zig build
 
 Linux (x86_64) and macOS (aarch64) are built and tested in CI. The Zig
 parsers make no host-endianness or word-size assumptions - every integer
-read and written names its byte order - so other **little-endian** targets
-`zig build -Dtarget=...` accepts should work, but are not covered by CI.
-Big-endian hosts are not supported: the vendored LZHAM decoder
-(`src/vendor/lzham`) hardcodes `LZHAM_LITTLE_ENDIAN_CPU` and unaligned
-integer loads for every non-MSVC target, so UnityFS block compression
-type 4 would decode wrong there. CI also blocks on formatting and shell
-lint:
+read and written names its byte order - so other **little-endian POSIX**
+targets `zig build -Dtarget=...` accepts should work, but are not covered
+by CI. `x86_64-linux-musl`, `aarch64-linux-gnu`, `x86-linux-gnu` (32-bit)
+and `x86_64-macos` are known to build; nothing beyond CI's two targets is
+known to *pass tests*.
+
+Two families are **not** supported, both because of the vendored LZHAM
+decoder (`src/vendor/lzham`), which UnityFS block compression type 4
+needs:
+
+- **Windows.** `lzham_platform.cpp` defines `sprintf_s` / `vsprintf_s` for
+  every compiler that is not MSVC, and mingw-w64's `sec_api/stdio_s.h`
+  already defines both, so `-Dtarget=x86_64-windows-gnu` fails to compile.
+- **Big-endian hosts.** `lzham_core.h` hardcodes
+  `LZHAM_LITTLE_ENDIAN_CPU` and unaligned integer loads for every
+  non-MSVC target, so type 4 blocks would decode wrong there.
+
+CI also blocks on formatting and shell lint:
 
 ```bash
 zig fmt --check build.zig build.zig.zon src
