@@ -45,9 +45,12 @@
         "build.zig.zon",
         "src",
         "LICENSE",
-        // Attribution for the vendored ZLIB-licensed unitycrunch sources
-        // under src/vendor/. It has to travel with the package: the ZLIB
-        // grant is what lets consumers redistribute those files.
+        // Attribution for every third-party component bundled here: the
+        // ZLIB-licensed unitycrunch and MIT-licensed lzham sources under
+        // src/vendor/, the Fmod5Sharp-derived Vorbis header table, and the
+        // AssetRipper-derived built-in tree database under src/builtin_trees/.
+        // It has to travel with the package: those grants are what let
+        // consumers redistribute the files.
         "NOTICE",
         "README.md",
     },

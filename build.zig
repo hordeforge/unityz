@@ -65,8 +65,9 @@ pub fn build(b: *std.Build) void {
     // the default Debug build, and its `-O0` debug path is not stable. An
     // optimized vendored lib decodes identically.
     lzham_lib.root_module.optimize = .ReleaseFast;
-    // The vendored LZHAM decoder (public-domain / zlib) compiles with the
-    // same warnings-as-errors posture as the unitycrunch decoder above.
+    // The vendored LZHAM decoder (MIT, per src/vendor/lzham/LICENSE.txt and
+    // the grant at the end of lzham.h) compiles with the same
+    // warnings-as-errors posture as the unitycrunch decoder above.
     // The single exclusion covers one vendored construct, never the shim:
     // the prefix-coding table copy in `lzham_prefix_coding.h` memcpies a
     // non-trivially copyable type, which clang's `-Wnontrivial-memcall`

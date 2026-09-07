@@ -10,15 +10,22 @@ lzham -- LZHAM decompressor (UnityFS block compression type 4)
 Location in this distribution: src/vendor/lzham/
   (all lzham_*.h and lzham_*.cpp sources, plus LICENSE.txt)
 
-Copyright (c) 2009-2012 Richard Geldreich, Jr.
+Copyright (c) 2009-2012 Richard Geldreich, Jr. <richgel99@gmail.com>
 License: MIT (https://opensource.org/licenses/MIT)
 
 The grant is embedded at the end of src/vendor/lzham/lzham.h and is also
-carried by the LICENSE.txt vendored alongside the sources.
+carried by the LICENSE.txt vendored alongside the sources. LICENSE.txt
+states the same MIT grant under a 2009-2011 copyright line; lzham.h states
+2009-2012, and the wider range is the one reproduced below.
+
+Version identifier carried by the vendored sources:
+  LZHAM_DLL_VERSION 0x1008  (lzham.h)
+The upstream revision these files were taken from is not recorded; the
+identifier above is the only provenance the sources themselves carry.
 
 MIT LICENSE, as carried by the vendored sources:
 
-  Copyright (c) 2009-2012 Richard Geldreich, Jr.
+  Copyright (c) 2009-2012 Richard Geldreich, Jr. <richgel99@gmail.com>
 
   Permission is hereby granted, free of charge, to any person obtaining a
   copy of this software and associated documentation files (the "Software"),
@@ -129,4 +136,27 @@ the MIT License:
 The table itself is encoder-generated data (Vorbis codebook and mode
 configuration packets) extracted from FMOD-produced FSB5 banks; it contains
 no audio content.
+================================================================================
+
+================================================================================
+builtin_trees -- embedded Unity engine-class type-tree database
+Location in this distribution: src/builtin_trees/2022.3.62f2.bin
+  (embedded into the built library and CLI by src/builtin_trees.zig, so it
+  travels in binary releases as well as in the source package)
+
+The file is a repack of the Unity 2022.3.62f2 StructsDump published by the
+AssetRipper TypeTreeDumps project
+(https://github.com/AssetRipper/TypeTreeDumps), produced by
+scripts/structsdump-to-builtin.py, whose header records the exact source
+path and the command used. No AssetRipper source code is vendored here --
+only the dumped layout table, re-encoded into this project's own binary
+format.
+
+The content is Unity's own engine-class field layout metadata (per node:
+type name, field name, nesting level, version, byte size and serializer
+flags) as emitted by Unity's serializer. It carries no Unity code, no
+AssetRipper code, and no game content.
+
+The dump's own distribution terms are not recorded in this tree. Anyone
+redistributing the shipped .bin should confirm them at the origin above.
 ================================================================================
