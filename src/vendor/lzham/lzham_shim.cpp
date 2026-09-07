@@ -1,4 +1,5 @@
-// Thin C wrapper over the vendored LZHAM decompressor (public-domain / zlib).
+// Thin C wrapper over the vendored LZHAM decompressor (MIT, per
+// src/vendor/lzham/LICENSE.txt and the grant at the end of lzham.h).
 // Exposes one entry point unityz calls for UnityFS block compression type 4.
 #include "lzham_decomp.h"
 #include "lzham_core.h"

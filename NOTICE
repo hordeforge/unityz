@@ -8,7 +8,8 @@ required by the licenses of that code and apply only to the files listed.
 ===============================================================================
 lzham -- LZHAM decompressor (UnityFS block compression type 4)
 Location in this distribution: src/vendor/lzham/
-  (all lzham_*.h and lzham_*.cpp sources, plus LICENSE.txt)
+  (all lzham_*.h and lzham_*.cpp sources except lzham_shim.cpp, plus
+  LICENSE.txt)
 
 Copyright (c) 2009-2012 Richard Geldreich, Jr. <richgel99@gmail.com>
 License: MIT (https://opensource.org/licenses/MIT)
@@ -22,6 +23,11 @@ Version identifier carried by the vendored sources:
   LZHAM_DLL_VERSION 0x1008  (lzham.h)
 The upstream revision these files were taken from is not recorded; the
 identifier above is the only provenance the sources themselves carry.
+
+The wrapper src/vendor/lzham/lzham_shim.cpp is original work of this
+project and is covered by this project's MIT license, not by the grant
+below. It matches the lzham_*.cpp glob above but carries no upstream code,
+so the copyright line below does not apply to it.
 
 MIT LICENSE, as carried by the vendored sources:
 
@@ -159,4 +165,26 @@ AssetRipper code, and no game content.
 
 The dump's own distribution terms are not recorded in this tree. Anyone
 redistributing the shipped .bin should confirm them at the origin above.
+================================================================================
+
+================================================================================
+texture2ddecoder -- block-format decode routines
+Location in this distribution: src/texture.zig
+
+No texture2ddecoder source is vendored here. Four of the block decoders in
+src/texture.zig are ports or transcriptions of its routines rather than
+independent implementations, and each says so at its own definition:
+
+  - BC6H                    ported from bcn.cpp
+  - PVRTC                   ported from pvrtc.cpp
+  - ATC and EAC             ported from atc.cpp and etc.cpp
+  - ETC extraction formulas transcribed from the same decoder
+
+The other formats in that file are implemented from the public format
+descriptions and only cross-validated against texture2ddecoder for
+byte-exactness. Cross-validation is not derivation and is not covered here.
+
+texture2ddecoder's own distribution terms are not recorded in this tree, nor
+is the upstream revision the ports were taken from. Anyone redistributing
+src/texture.zig should confirm them at the origin.
 ================================================================================
