@@ -582,7 +582,17 @@ fn decompressRawInto(
             if (out.len != dst.len) return error.Corrupt;
             @memcpy(dst, out);
         },
-        .lzham => return error.UnsupportedCompression,
+        // Neither decoder writes into a caller-supplied buffer, so both go
+        // through a scratch allocation. This is the path block data takes,
+        // and the vendored LZHAM decoder is linked in precisely so LZHAM
+        // blocks decode (see build.zig); refusing it here left type 4
+        // working for the header-info block only.
+        .lzham => {
+            const out = lzhamDecompress(allocator, raw, @intCast(dst.len)) catch return error.DecompressFailed;
+            defer allocator.free(out);
+            if (out.len != dst.len) return error.Corrupt;
+            @memcpy(dst, out);
+        },
         else => return error.UnsupportedCompression,
     }
 }

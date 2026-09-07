@@ -117,11 +117,17 @@ pub fn rewrite(allocator: std.mem.Allocator, sf: *const serialized.SerializedFil
         }
         try table.writeInt(u32, new_sizes[i]);
         if (version < 16) {
-            // raw type id + class bits (zero-extended u16 as stored)
+            // Raw type id, then the class bits. The two are *not* the same
+            // field: legacy tables give MonoBehaviour-style objects a
+            // negative type id that keys into the SerializedType table,
+            // while the u16 alongside it still holds the real class (114).
+            // Deriving the u16 from the type id would rewrite 114 as
+            // `type_id & 0xFFFF`, so take it from the value the parser read
+            // off the wire into `class_id`.
             const type_index = o.type_index orelse return error.MissingTypeIndex;
             if (type_index >= sf.types.len) return error.MissingTypeIndex;
             try table.writeInt(i32, sf.types[type_index].class_id);
-            try table.writeInt(u16, @intCast(sf.types[type_index].class_id & 0xFFFF));
+            try table.writeInt(u16, @intCast(o.class_id & 0xFFFF));
         } else if (version == 16) {
             // Only the type index here; the script identity and stripped
             // flag are the shared tail fields written below.
