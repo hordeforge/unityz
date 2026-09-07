@@ -327,7 +327,9 @@ pub fn rebuildOgg(
     const flags = (try BlockFlags.parse(allocator, setup.header, setup.seek_bit)) orelse return error.Corrupt;
     defer allocator.free(flags.flags);
 
-    const start: usize = @intCast(data_start + sample.data_offset);
+    // usize sum, as in audio.decodeSample: file-supplied u32s whose add
+    // would overflow ahead of the bounds check.
+    const start: usize = @as(usize, data_start) + @as(usize, sample.data_offset);
     if (start > raw.len) return error.Corrupt;
     const data = raw[start..];
 

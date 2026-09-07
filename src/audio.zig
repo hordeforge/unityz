@@ -64,7 +64,10 @@ pub fn decodeSample(allocator: std.mem.Allocator, raw: []const u8, data_start: u
     if (!decodable(mode)) return error.UnsupportedMode;
     const channels: usize = @intCast(sample.channels);
     if (channels == 0 or channels > 2 and mode == 7) return error.UnsupportedChannels;
-    const start: usize = @intCast(data_start + sample.data_offset);
+    // Both come from the bank header and each can reach maxInt(u32), so the
+    // sum is taken in usize: as a u32 add it overflows before the bounds
+    // check below can reject it.
+    const start: usize = @as(usize, data_start) + @as(usize, sample.data_offset);
     const total: usize = @as(usize, sample.sample_count) * channels;
     if (start > raw.len) return error.Corrupt;
     const data = raw[start..];

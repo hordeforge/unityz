@@ -149,7 +149,9 @@ const Section = struct { virtual_address: u32, raw_offset: u32, raw_size: u32 };
 fn parsePeSections(bytes: []const u8, arena: std.mem.Allocator) Error![]const Section {
     var r = streams.Reader.init(bytes);
     try r.seek(0x3C);
-    const e_lfanew = try r.readInt(u32);
+    // Widened to usize before any arithmetic: e_lfanew comes from the file
+    // and near-maxInt values would overflow the u32 add below.
+    const e_lfanew: usize = try r.readInt(u32);
     if (e_lfanew + 4 > bytes.len) return error.NotPe;
     try r.seek(e_lfanew);
     const sig = try r.readInt(u32);
@@ -174,10 +176,19 @@ fn parsePeSections(bytes: []const u8, arena: std.mem.Allocator) Error![]const Se
     return sections;
 }
 
-fn rvaToOffset(rva: u32, sections: []const Section) ?u32 {
+/// Maps an RVA to a file offset, or null when no section covers it.
+///
+/// Every section field is file-supplied, so the arithmetic is overflow-safe
+/// and the result is checked against the file length: `raw_offset` is not
+/// validated anywhere in the PE header, and an offset past the end would
+/// otherwise reach a caller that slices `bytes` with it.
+fn rvaToOffset(rva: u32, sections: []const Section, file_len: usize) ?usize {
     for (sections) |s| {
-        if (rva >= s.virtual_address and rva < s.virtual_address + s.raw_size) {
-            return s.raw_offset + (rva - s.virtual_address);
+        const v_end = std.math.add(u32, s.virtual_address, s.raw_size) catch continue;
+        if (rva >= s.virtual_address and rva < v_end) {
+            const off = std.math.add(u32, s.raw_offset, rva - s.virtual_address) catch return null;
+            if (off > file_len) return null;
+            return off;
         }
     }
     return null;
@@ -291,7 +302,7 @@ fn parseTableStream(bytes: []const u8, heaps: *Heaps) Error!TableData {
         out.row_counts[cur] = counts[cur];
         out.row_sizes[cur] = row_size;
         out.offsets[cur] = off;
-        off +%= row_size * counts[cur];
+        off +%= row_size *% counts[cur];
     }
     return out;
 }
@@ -397,8 +408,13 @@ fn codedSize(max_count: u32, tag_bits: u32) u32 {
 
 /// A reader positioned at the start of one table row.
 fn rowReader(td: *const TableData, t: u32, row: u32) streams.Reader {
-    const start = td.offsets[t] + (row - 1) * td.row_sizes[t];
-    const end = @min(start + td.row_sizes[t], td.bytes.len);
+    // Offsets and row counts come from the `#~` header, so a stream that is
+    // shorter than its declared tables puts `start` past the end. Computed in
+    // usize and clamped at both ends: an out-of-range row yields an empty
+    // reader whose first read fails, rather than an invalid slice.
+    const row_size: usize = td.row_sizes[t];
+    const start = @min(@as(usize, td.offsets[t]) + @as(usize, row -| 1) * row_size, td.bytes.len);
+    const end = @min(start + row_size, td.bytes.len);
     return streams.Reader.init(td.bytes[start..end]);
 }
 
@@ -553,7 +569,9 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
     // optional header data directory 14 = CLI header
     var r = streams.Reader.init(bytes);
     try r.seek(0x3C);
-    const e_lfanew = try r.readInt(u32);
+    // usize before arithmetic, as in parsePeSections: the raw u32 is
+    // file-supplied and the offsets derived from it below would overflow.
+    const e_lfanew: usize = try r.readInt(u32);
     try r.seek(e_lfanew + 4);
     try r.skip(4); // machine + num sections
     try r.skip(4); // timestamp
@@ -572,13 +590,13 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
     try r.seek(dd_offset + 14 * 8);
     const cli_rva = try r.readInt(u32);
     try r.skip(4); // cli size
-    const cli_off = rvaToOffset(cli_rva, sections) orelse return error.NoCliHeader;
+    const cli_off = rvaToOffset(cli_rva, sections, bytes.len) orelse return error.NoCliHeader;
     if (cli_off + 16 > bytes.len) return error.NoCliHeader;
 
     try r.seek(cli_off + 8); // metadata RVA/size at CLI header offset 8
     const meta_rva = try r.readInt(u32);
     try r.skip(4); // metadata size
-    const meta_off = rvaToOffset(meta_rva, sections) orelse return error.NoMetadata;
+    const meta_off = rvaToOffset(meta_rva, sections, bytes.len) orelse return error.NoMetadata;
 
     var heaps: Heaps = .{};
     var table_data: TableData = .{ .bytes = &.{} };
@@ -600,7 +618,13 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
             while (try mr.readByte() != 0) {}
             const name_end = mr.position() - 1;
             const sname = bytes[meta_off + name_start .. meta_off + name_end];
-            const sb = bytes[meta_off + off .. meta_off + off + size];
+            // `off`/`size` are unvalidated u32s from the stream directory.
+            // Unchecked they slice past the end of the file, and the result
+            // becomes the #Strings/#Blob heap, so out-of-bounds heap bytes
+            // would be handed back as type and field names.
+            const heap_start = std.math.add(usize, meta_off, off) catch return error.NoMetadata;
+            if (heap_start > bytes.len or size > bytes.len - heap_start) return error.NoMetadata;
+            const sb = bytes[heap_start..][0..size];
             if (std.mem.eql(u8, sname, "#Strings")) {
                 heaps.strings = sb;
             } else if (std.mem.eql(u8, sname, "#Blob")) {
