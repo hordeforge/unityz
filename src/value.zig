@@ -309,7 +309,17 @@ fn jsonParseValue(text: []const u8, pos: *usize, depth: u32, allocator: std.mem.
     // `-0` only exists as a float (Unity exports negative-zero rotations
     // and positions); an integer parse would drop the sign.
     if (std.mem.eql(u8, token, "-0")) return .{ .float = -0.0 };
-    return .{ .int = try std.fmt.parseInt(i64, token, 10) };
+    // `.uint` spans the whole u64 range and `jsonWrite` emits it in full, so
+    // an i64-only parse cannot read back what this module writes: a UInt64
+    // field above maxInt(i64) came out of `extract --json` as a plain decimal
+    // and returned as `error.Overflow` from `edit --patch`. Fall back to the
+    // unsigned variant for exactly that range, keeping `.int` for everything
+    // an i64 holds so the common case is unchanged.
+    const signed = std.fmt.parseInt(i64, token, 10) catch |err| switch (err) {
+        error.Overflow => return .{ .uint = try std.fmt.parseInt(u64, token, 10) },
+        else => return err,
+    };
+    return .{ .int = signed };
 }
 
 fn skipWs(text: []const u8, pos: *usize) void {
@@ -364,9 +374,13 @@ test "jsonParse round-trips jsonWrite" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const text =
-        \\{"m_Enabled":true,"m_Name":"a\\u0000b","n":-0,"i":7,"f":1.5,"a":[1,null,{}],"e":[]}
+        \\{"m_Enabled":true,"m_Name":"a\\u0000b","n":-0,"i":7,"f":1.5,"a":[1,null,{}],"e":[],"u":18446744073709551615}
     ;
     const v = try jsonParse(arena.allocator(), text);
+    // A UInt64 field past maxInt(i64) has to come back as `.uint`, not fail:
+    // `jsonWrite` emits the full u64 range.
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), fieldOf(v, "u").?.uint);
+    try std.testing.expectEqual(@as(i64, 7), fieldOf(v, "i").?.int);
 
     var buf: [512]u8 = undefined;
     var bw = std.Io.Writer.fixed(&buf);
