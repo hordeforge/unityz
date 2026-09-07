@@ -251,17 +251,6 @@ fn delegateTyped(field: dotnet.Field, types: *const TypeMap) bool {
     return false;
 }
 
-/// Unity skips a SINGLE field whose type is a plain (non-Object,
-/// non-struct, non-enum, non-delegate) class lacking [Serializable].
-/// Arrays and lists of such classes serialize regardless (verified on
-/// Raft: BlockSurface[] is on the wire though BlockSurface has no
-/// [Serializable], while a single GameToFolderConnection field is not).
-fn classNotSerializable(type_name: []const u8, types: *const TypeMap) bool {
-    const info = types.get(type_name) orelse return false; // unknown/external: keep the placeholder path
-    if (info.is_enum or info.is_object_derived or info.is_struct or info.is_delegate) return false;
-    return !info.is_serializable;
-}
-
 /// Appends one flat node (and its children) for a managed field.
 /// `types` resolves class/valuetype names; `warn` collects unsupported
 /// types so the caller can report them.

@@ -2013,7 +2013,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 if (resolution < 2) continue;
                 // heights are (res+1)^2 SInt16 samples; the image is a square
                 // of the square root's side
-                const side_u = isqrt(hv.array.len);
+                const side_u = std.math.sqrt(hv.array.len);
                 if (side_u < 2) continue;
                 const side: u32 = @intCast(side_u);
                 var min_h: i64 = std.math.maxInt(i64);
@@ -2660,18 +2660,6 @@ fn basename(path: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| return path[i + 1 ..];
     if (std.mem.lastIndexOfScalar(u8, path, '\\')) |i| return path[i + 1 ..];
     return path;
-}
-
-/// Integer square root (Newton), used to size the heightmap image.
-fn isqrt(n: usize) usize {
-    if (n < 2) return n;
-    var x: usize = n;
-    var y: usize = (x + 1) / 2;
-    while (y < x) {
-        x = y;
-        y = (x + n / x) / 2;
-    }
-    return x;
 }
 
 /// Forces a file-supplied name to stay one path component: an asset's
@@ -3503,33 +3491,12 @@ fn pptrPathId(v: unityz.value.Value) ?i64 {
     };
 }
 
-/// Adapter so `value.jsonWrite` (which expects `writeAll`/`writeByte`/`print`)
-/// can emit a value into an arena-backed `streams.Writer`.
-const JsonWriterAdapter = struct {
-    inner: unityz.streams.Writer,
-
-    pub fn init(arena: std.mem.Allocator) JsonWriterAdapter {
-        return .{ .inner = unityz.streams.Writer.init(arena) };
-    }
-    pub fn writeByte(self: *JsonWriterAdapter, b: u8) !void {
-        try self.inner.writeByte(b);
-    }
-    pub fn writeAll(self: *JsonWriterAdapter, bytes: []const u8) !void {
-        try self.inner.writeBytes(bytes);
-    }
-    pub fn print(self: *JsonWriterAdapter, comptime fmt: []const u8, args: anytype) !void {
-        try self.inner.print(fmt, args);
-    }
-    fn get(self: *JsonWriterAdapter) []const u8 {
-        return self.inner.getWritten();
-    }
-};
-
 /// Serializes a value tree to compact JSON in the arena.
 fn writeValueJson(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u8 {
-    var ad = JsonWriterAdapter.init(arena);
-    try unityz.value.jsonWrite(v, &ad);
-    return arena.dupe(u8, ad.get());
+    var buf: std.ArrayList(u8) = .empty;
+    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    try unityz.value.jsonWrite(v, &aw.writer);
+    return aw.toArrayList().items;
 }
 
 /// Major component of a Unity version string like "2022.3.62f2".
@@ -4086,13 +4053,8 @@ fn writeFace(
 ) !void {
     if ((slot + per_face) * idx_bytes > index_buffer.len) return;
     var refs: [4]u64 = undefined;
-    for (0..per_face) |k| {
-        const idx: u64 = if (idx_bytes == 4)
-            std.mem.readInt(u32, index_buffer[(slot + k) * 4 ..][0..4], endian)
-        else
-            std.mem.readInt(u16, index_buffer[(slot + k) * 2 ..][0..2], endian);
-        refs[k] = idx + 1; // OBJ is 1-based
-    }
+    // OBJ indices are 1-based
+    for (0..per_face) |k| refs[k] = readIndex(index_buffer, idx_bytes, slot + k, endian) + 1;
     if (per_face == 4) {
         // quads become two triangles; winding reversed for the X mirror
         try writeFaceLine(w, &[_]u64{ refs[2], refs[1], refs[0] }, has_n, has_t);
@@ -4121,7 +4083,6 @@ fn writeFaceLine(w: *unityz.streams.Writer, refs: []const u64, has_n: bool, has_
     try w.print("\n", .{});
 }
 
-/// Readable text summary of a Material (name, shader, saved properties).
 /// Names a Unity binding attribute: the transform components map to the
 /// first twelve values, everything else stays numeric.
 fn bindingAttributeName(attr: i64) []const u8 {
@@ -4142,6 +4103,7 @@ fn bindingAttributeName(attr: i64) []const u8 {
     };
 }
 
+/// Readable text summary of a Material (name, shader, saved properties).
 fn writeMaterialText(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u8 {
     // arena-owned buffer; see writeMeshObj for why it is never deinit'd
     var w: unityz.streams.Writer = .init(arena);
@@ -5454,9 +5416,6 @@ fn shaderObjectValue(arena: std.mem.Allocator, sf: *const unityz.serialized.Seri
     return unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch null;
 }
 
-/// A minimal append-only writer exposing the interface `value.jsonWrite`
-/// needs, backed by an arena ArrayList, so the merged base JSON can be
-/// captured and extended with a derived field.
 /// The shader stage a d3d11 `ShaderGpuProgramType` names.
 fn shaderStageName(gpu_type: u32) []const u8 {
     return switch (gpu_type) {
