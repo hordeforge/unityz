@@ -685,6 +685,13 @@ fn buildInjectedTree(arena: std.mem.Allocator, name: []const u8, value: unityz.v
         .array => |a| a,
         else => return null,
     };
+    // An empty list links to a tree with no roots, and every consumer of an
+    // injected tree reads `roots[0]`. Reject it here, where the entry enters,
+    // rather than at each of those reads.
+    if (arr.len == 0) {
+        try stdout.print("unityz: trees entry '{s}': empty node list\n", .{name});
+        return null;
+    }
     const nodes = try arena.alloc(unityz.typetree.Node, arr.len);
     for (arr, 0..) |e, i| {
         var node = unityz.typetree.Node{ .level = 0 };
@@ -8007,26 +8014,64 @@ fn cmdEditBundle(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs: 
     failure("unityz: object {d} not found in bundle\n", .{sel.path_id});
 }
 
-/// Edits one object of a serialized file, returning the rewritten file
-/// bytes. `error.ObjectNotFound` when the path id is absent.
-fn editSerializedObject(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, pairs: []const []const u8, own_name: []const u8, injected: ?*const InjectedTrees) ![]u8 {
-    const sf = try unityz.serialized.parse(arena, bytes);
+/// One object of a serialized file, decoded and ready to edit: the value
+/// tree, the type-tree root it was decoded against, and the bytes past the
+/// tree's fields (a MonoBehaviour's raw script graph) that a rewrite must
+/// carry over verbatim.
+const EditableObject = struct {
+    root: *const unityz.typetree.Node,
+    value: unityz.value.Value,
+    tail: []const u8,
+};
+
+/// Decodes one object of `sf` for an in-place edit. Typeless Mono files
+/// decode through the injected tree table; without one there is no tree to
+/// decode against. `error.ObjectNotFound` when the path id is absent.
+fn readEditableObject(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    path_id: i64,
+    own_name: []const u8,
+    injected: ?*const InjectedTrees,
+) !EditableObject {
     const o = sf.findObject(path_id) orelse return error.ObjectNotFound;
     const type_index = o.type_index orelse return error.MissingTypeIndex;
     if (type_index >= sf.types.len) return error.MissingTypeIndex;
     var tree = sf.types[type_index].type_tree;
+    const data = sf.objectData(o) orelse return error.OutOfMemory;
     if (tree.roots.len == 0) {
         // Typeless Mono file: decode from the injected table.
-        if (injected) |inj| {
-            const d0 = sf.objectData(o) orelse return error.OutOfMemory;
-            tree = (injectedTreeFor(arena, inj, &sf, own_name, o.class_id, d0) orelse return error.MissingTypeIndex).*;
-        } else return error.MissingTypeIndex;
+        const inj = injected orelse return error.MissingTypeIndex;
+        tree = (injectedTreeFor(arena, inj, sf, own_name, o.class_id, data) orelse return error.MissingTypeIndex).*;
     }
-    const data = sf.objectData(o) orelse return error.OutOfMemory;
     var r = unityz.streams.Reader.init(data);
     r.endian = sf.endian;
     const root = &tree.roots[0];
-    var edited = try unityz.object_reader.readObject(arena, &r, root);
+    const value = try unityz.object_reader.readObject(arena, &r, root);
+    return .{ .root = root, .value = value, .tail = data[r.position()..] };
+}
+
+/// Reserializes an edited object with the file's own endianness. Both edit
+/// paths go through here so neither can write a big-endian file's fields
+/// little-endian.
+fn writeEditedObject(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    obj: EditableObject,
+    edited: unityz.value.Value,
+) ![]const u8 {
+    var out: unityz.streams.Writer = .init(arena);
+    out.endian = sf.endian;
+    try unityz.object_writer.writeObject(&out, obj.root, edited, obj.tail);
+    return out.getWritten();
+}
+
+/// Edits one object of a serialized file, returning the rewritten file
+/// bytes. `error.ObjectNotFound` when the path id is absent.
+fn editSerializedObject(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, pairs: []const []const u8, own_name: []const u8, injected: ?*const InjectedTrees) ![]u8 {
+    const sf = try unityz.serialized.parse(arena, bytes);
+    const obj = try readEditableObject(arena, &sf, path_id, own_name, injected);
+    var edited = obj.value;
 
     var pair: usize = 0;
     while (pair + 1 < pairs.len) : (pair += 2) {
@@ -8039,10 +8084,8 @@ fn editSerializedObject(arena: std.mem.Allocator, bytes: []const u8, path_id: i6
         std.heap.page_allocator.free(segs);
     }
 
-    var out: unityz.streams.Writer = .init(arena);
-    out.endian = sf.endian;
-    try unityz.object_writer.writeObject(&out, root, edited, data[r.position()..]);
-    return unityz.serialized_writer.rewrite(arena, &sf, &.{.{ .path_id = path_id, .data = out.getWritten() }});
+    const written = try writeEditedObject(arena, &sf, obj, edited);
+    return unityz.serialized_writer.rewrite(arena, &sf, &.{.{ .path_id = path_id, .data = written }});
 }
 
 /// Applies a JSON patch file: `{"<path_id>": {"<field>": <value>, ...}, ...}`.
@@ -8415,22 +8458,8 @@ fn editSerializedPatches(arena: std.mem.Allocator, bytes: []const u8, entries: [
             .obj => |f| f,
             else => return error.BadPath,
         };
-        const o = sf.findObject(path_id) orelse return error.ObjectNotFound;
-        const type_index = o.type_index orelse return error.MissingTypeIndex;
-        if (type_index >= sf.types.len) return error.MissingTypeIndex;
-        var tree = sf.types[type_index].type_tree;
-        if (tree.roots.len == 0) {
-            // Typeless Mono file: decode from the injected table.
-            if (injected) |inj| {
-                const d0 = sf.objectData(o) orelse return error.OutOfMemory;
-                tree = (injectedTreeFor(arena, inj, &sf, own_name, o.class_id, d0) orelse return error.MissingTypeIndex).*;
-            } else return error.MissingTypeIndex;
-        }
-        const data = sf.objectData(o) orelse return error.OutOfMemory;
-        var r = unityz.streams.Reader.init(data);
-        r.endian = sf.endian;
-        const root = &tree.roots[0];
-        var edited = try unityz.object_reader.readObject(arena, &r, root);
+        const obj = try readEditableObject(arena, &sf, path_id, own_name, injected);
+        var edited = obj.value;
         for (fields) |f| {
             const segs = try parseFieldPath(f.name);
             edited = setFieldPath(arena, edited, segs, 0, f.value) catch |err| {
@@ -8439,9 +8468,7 @@ fn editSerializedPatches(arena: std.mem.Allocator, bytes: []const u8, entries: [
             };
             std.heap.page_allocator.free(segs);
         }
-        var out: unityz.streams.Writer = .init(arena);
-        try unityz.object_writer.writeObject(&out, root, edited, data[r.position()..]);
-        try replacements.append(arena, .{ .path_id = path_id, .data = out.getWritten() });
+        try replacements.append(arena, .{ .path_id = path_id, .data = try writeEditedObject(arena, &sf, obj, edited) });
     }
     return unityz.serialized_writer.rewrite(arena, &sf, replacements.items);
 }

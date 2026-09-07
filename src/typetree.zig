@@ -201,69 +201,18 @@ fn parseBlob(
     }
     if (n == 0) return .{ .version = format_version, .roots = &.{} };
 
-    // Pass 1: validate levels, count children per node, count roots.
-    const child_counts = allocator.alloc(usize, n) catch return error.OutOfMemory;
-    @memset(child_counts, 0);
-    var parent_at_level: [max_depth + 1]usize = undefined;
-    var root_count: usize = 0;
-    var prev_level: ?u32 = null;
-    for (flat, 0..) |*node, i| {
-        if (node.level > max_depth) return error.Corrupt;
-        if (prev_level) |prev| {
-            if (node.level > prev + 1) return error.Corrupt;
-        } else if (node.level != 0) {
-            return error.Corrupt;
-        }
-        prev_level = node.level;
-        if (node.level == 0) {
-            root_count += 1;
-        } else {
-            child_counts[parent_at_level[node.level - 1]] += 1;
-        }
-        parent_at_level[node.level] = i;
-    }
-
-    // Pass 2: allocate each node's children array (only parents need one).
-    for (flat, 0..) |*node, i| {
-        if (child_counts[i] > 0) {
-            node.children = allocator.alloc(Node, child_counts[i]) catch return error.OutOfMemory;
-        }
-    }
-
-    // Pass 3: stack-walk the flat table and attach children to parents.
-    const roots = allocator.alloc(Node, root_count) catch return error.OutOfMemory;
-    var open: [max_depth + 1]usize = undefined; // index of the open node at each level
-    var written: [max_depth + 1]usize = undefined; // children already attached per level
-    @memset(&written, 0);
-    var root_pos: usize = 0;
-    for (flat, 0..) |*node, i| {
-        if (node.level == 0) {
-            roots[root_pos] = node.*;
-            root_pos += 1;
-        } else {
-            const parent = &flat[open[node.level - 1]];
-            const pos = written[node.level - 1];
-            parent.children[pos] = node.*;
-            written[node.level - 1] = pos + 1;
-        }
-        // This node is now the open node at its level; its own children will
-        // come next and start filling its children array from zero.
-        written[node.level] = 0;
-        open[node.level] = i;
-    }
-    std.debug.assert(root_pos == root_count);
-
     return .{
         .version = format_version,
-        .roots = roots,
+        .roots = try linkFlatNodes(allocator, flat),
         .string_buffer = string_buffer,
     };
 }
 
 /// Builds a TypeTree from a flat, depth-ordered node list (level 0 = the
 /// root, each following node is the next child/preorder step), e.g. nodes
-/// parsed from an external trees JSON. Mirrors `parseBlob`'s linking passes
-/// so externally supplied trees behave exactly like wire-embedded ones.
+/// parsed from an external trees JSON. Links through the same
+/// `linkFlatNodes` as `parseBlob`, so externally supplied trees behave
+/// exactly like wire-embedded ones.
 /// The input nodes are copied; all allocations come from `allocator` (an
 /// arena is the intended usage).
 pub fn fromFlatNodes(allocator: std.mem.Allocator, flat: []const Node) ParseError!TypeTree {
@@ -272,6 +221,20 @@ pub fn fromFlatNodes(allocator: std.mem.Allocator, flat: []const Node) ParseErro
     const nodes = allocator.alloc(Node, n) catch return error.OutOfMemory;
     @memcpy(nodes, flat);
 
+    return .{
+        .version = 0,
+        .roots = try linkFlatNodes(allocator, nodes),
+    };
+}
+
+/// Links a flat, depth-ordered node table in place and returns its roots.
+/// Level 0 starts a root; every following node is a child of the last node
+/// one level up, so the table must start at level 0 and never jump more
+/// than one level deeper - anything else is `error.Corrupt`. Shared by the
+/// wire blob and the external-JSON path so both link identically.
+fn linkFlatNodes(allocator: std.mem.Allocator, nodes: []Node) ParseError![]Node {
+    const n = nodes.len;
+    std.debug.assert(n != 0);
     // Pass 1: validate levels, count children per node, count roots.
     const child_counts = allocator.alloc(usize, n) catch return error.OutOfMemory;
     @memset(child_counts, 0);
@@ -323,11 +286,7 @@ pub fn fromFlatNodes(allocator: std.mem.Allocator, flat: []const Node) ParseErro
         open[node.level] = i;
     }
     std.debug.assert(root_pos == root_count);
-
-    return .{
-        .version = 0,
-        .roots = roots,
-    };
+    return roots;
 }
 
 /// Resolves a blob string offset against the local buffer or the common
