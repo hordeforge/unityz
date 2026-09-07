@@ -102,10 +102,13 @@ compressed codecs decode to WAV, Vorbis banks remux to playable Ogg, and
 VideoClip streams export to MP4.
 
 AudioClip data is now extracted (container detection, raw PCM wrapped in
-a WAV header) rather than skipped. The other four non-goals still
-hold: class database download/caching, asset bundle encryption variants,
-asset bundle building from scratch (`bundle.rebuild`/`webfile.rebuild`
-rewrite a parsed container, they do not author one), and .NET assembly
+a WAV header) rather than skipped. Building from scratch was reopened
+after this plan closed: `create <spec.json> --out <file>`
+(`serialized_writer.create` and `bundle.create`) authors a format-22
+SerializedFile and a UnityFS format-8 bundle from declared type trees and
+object values, where `bundle.rebuild`/`webfile.rebuild` only rewrite a
+parsed container. The other three non-goals still hold: class database
+download/caching, asset bundle encryption variants, and .NET assembly
 extraction beyond raw bytes.
 
 ## Decisions and unknowns
