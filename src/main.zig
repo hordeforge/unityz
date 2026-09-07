@@ -6441,7 +6441,14 @@ fn diffValueTree(a: unityz.value.Value, b: unityz.value.Value, path_id: i64, buf
             for (af) |f| {
                 if (reported.* >= 10) return;
                 const bv = unityz.classes.fieldOf(b, f.name) orelse {
-                    try emitField(path_id, path, f.name, try renderValue(f.value), "<absent>", reported, collect, stdout);
+                    // Only the collecting branch hands the rendering to a list
+                    // that outlives the call; printing borrows it, and nothing
+                    // frees a page_allocator buffer later, so a directory diff
+                    // would keep a page per added/removed field of every
+                    // changed object for the rest of the run.
+                    const rendered = try renderValue(f.value);
+                    defer if (collect == null) std.heap.page_allocator.free(rendered);
+                    try emitField(path_id, path, f.name, rendered, "<absent>", reported, collect, stdout);
                     continue;
                 };
                 const new_len = try appendPath(buf, len, f.name);
@@ -6451,7 +6458,9 @@ fn diffValueTree(a: unityz.value.Value, b: unityz.value.Value, path_id: i64, buf
             for (b.obj) |f| {
                 if (reported.* >= 10) return;
                 if (unityz.classes.fieldOf(a, f.name) == null) {
-                    try emitField(path_id, path, f.name, "<absent>", try renderValue(f.value), reported, collect, stdout);
+                    const rendered = try renderValue(f.value);
+                    defer if (collect == null) std.heap.page_allocator.free(rendered);
+                    try emitField(path_id, path, f.name, "<absent>", rendered, reported, collect, stdout);
                 }
             }
         },

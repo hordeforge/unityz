@@ -287,6 +287,12 @@ fn parseTableStream(bytes: []const u8, heaps: *Heaps) Error!TableData {
     while (t < 64) : (t += 1) {
         if ((heaps.valid_mask & (@as(u64, 1) << @as(u6, @intCast(t)))) != 0) {
             counts[t] = try r.readInt(u32);
+            // Every row occupies at least one byte of this stream, so a
+            // count past its length is corrupt. Rejecting it here stops a
+            // bogus u32 from sizing the per-table allocations below (a
+            // TypeDef row count of 2^32-1 asks for hundreds of gigabytes
+            // before any row is read).
+            if (counts[t] > bytes.len) return error.Corrupt;
         }
     }
     for (counts, 0..) |c, i| {

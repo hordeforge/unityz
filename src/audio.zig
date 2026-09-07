@@ -71,6 +71,14 @@ pub fn decodeSample(allocator: std.mem.Allocator, raw: []const u8, data_start: u
     const total: usize = @as(usize, sample.sample_count) * channels;
     if (start > raw.len) return error.Corrupt;
     const data = raw[@intCast(start)..];
+    // `sample_count` is a 30-bit header field, so `total` alone would size a
+    // multi-gigabyte buffer from a few bytes of file. Every supported mode is
+    // bounded by its own per-sample input cost - one byte per sample for PCM8,
+    // 8 bytes per 14 samples for GCADPCM, 36 bytes per 64 for XBOX IMA - so no
+    // valid sample yields more than two output values per remaining input
+    // byte. The per-mode `data.len` checks below still reject the rest; this
+    // one only has to run before the allocation.
+    if (total > data.len *| 2) return error.Corrupt;
     const out = allocator.alloc(i16, total) catch return error.OutOfMemory;
     errdefer allocator.free(out);
     switch (mode) {

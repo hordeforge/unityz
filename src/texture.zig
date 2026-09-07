@@ -226,10 +226,14 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
     // pixel) can overflow into a short allocation.
     const pixels = std.math.mul(usize, w, h) catch return error.BadSize;
     if (pixels > std.math.maxInt(usize) / 16) return error.BadSize;
-    var out = try allocator.alloc(u8, pixels * 4);
-    errdefer allocator.free(out);
+    // The dimensions are file-supplied and the RGBA8 buffer is four bytes per
+    // pixel, so a header claiming 65535x65535 asks for 17 GB. Check the input
+    // against the format's own size first: it bounds the dimensions by the
+    // bytes actually present, so the allocation can never outrun the file.
     const expected = expectedSize(tex_format, width, height) orelse return error.UnsupportedFormat;
     if (data.len < expected) return error.BadSize;
+    var out = try allocator.alloc(u8, pixels * 4);
+    errdefer allocator.free(out);
 
     switch (tex_format) {
         format.alpha8 => copyPixels(out, data, w, h, 1, struct {
