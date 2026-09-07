@@ -1708,9 +1708,9 @@ fn fontMetadataJson(arena: std.mem.Allocator, path_id: i64, class_id: i32, f: un
 /// Extension for a ComputeShader kernel payload, from its magic: DXBC
 /// (D3D11/12), SPIR-V (Vulkan), or the `#version`-prefixed GLSL source.
 fn computeCodeExt(code: []const u8) []const u8 {
-    if (code.len >= 4 and std.mem.eql(u8, code[0..4], "DXBC")) return "dxbc";
-    if (code.len >= 4 and std.mem.eql(u8, code[0..4], "\x03\x02\x23\x07")) return "spirv";
-    if (code.len >= 8 and std.mem.startsWith(u8, code, "#version")) return "glsl";
+    if (std.mem.startsWith(u8, code, "DXBC")) return "dxbc";
+    if (std.mem.startsWith(u8, code, "\x03\x02\x23\x07")) return "spirv";
+    if (std.mem.startsWith(u8, code, "#version")) return "glsl";
     return "bin";
 }
 
@@ -5205,7 +5205,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                     }
                 }
                 if (!json) try stdout.print("node {s}:\n", .{n.path});
-                _ = try verifySerializedBytesSidecars(arena, n.data, n.path, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars.items, basename(n.path), injected);
+                _ = try verifySerializedBytes(arena, n.data, n.path, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars.items, basename(n.path), injected);
             }
         },
         .webfile => {
@@ -5234,7 +5234,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                     }
                 }
                 if (!json) try stdout.print("entry {s}:\n", .{e.path});
-                _ = try verifySerializedBytesSidecars(arena, e.data, e.path, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars.items, basename(e.path), injected);
+                _ = try verifySerializedBytes(arena, e.data, e.path, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars.items, basename(e.path), injected);
             }
         },
         .serialized => {
@@ -5244,7 +5244,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                 }
             }
             const sidecars = try diskSidecars(arena, path);
-            _ = try verifySerializedBytesSidecars(arena, bytes, null, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars, basename(path), injected);
+            _ = try verifySerializedBytes(arena, bytes, null, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars, basename(path), injected);
         },
         .archive => {
             if (json) {
@@ -5285,13 +5285,6 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
     }
 }
 
-/// Reads every object of a serialized file through its type tree, writes
-/// it back, and compares bytes. Text mode prints per-object failures and
-/// a per-node summary; JSON mode records failures in the report instead.
-fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, class_filter: ?i32, path_filter: ?i64, json: bool, report: *VerifyReport, stdout: *Io.Writer, own_name: []const u8, injected: ?*const InjectedTrees) !void {
-    try verifySerializedBytesSidecars(arena, bytes, node, class_filter, path_filter, json, report, stdout, &.{}, own_name, injected);
-}
-
 /// Byte equality for round-trip verification. NaN payload bytes are
 /// ignored: an f32 NaN widened to the value tree's f64 and cast back does
 /// not reproduce the original payload, and Unity's data legitimately
@@ -5324,11 +5317,13 @@ fn bytesEqualIgnoringNanPayloads(written: []const u8, data: []const u8) bool {
     return true;
 }
 
-/// `verifySerializedBytes` plus the sibling sidecar nodes (`sidecars`),
-/// so streamed references (`m_StreamData`/`m_Resource`) can be checked
-/// against the data they point into. Without sidecars (a bare serialized
-/// file) only path-less same-file references are checked.
-fn verifySerializedBytesSidecars(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, class_filter: ?i32, path_filter: ?i64, json: bool, report: *VerifyReport, stdout: *Io.Writer, sidecars: []const Sidecar, own_name: []const u8, injected: ?*const InjectedTrees) !void {
+/// Reads every object of a serialized file through its type tree, writes
+/// it back, and compares bytes. Text mode prints per-object failures and
+/// a per-node summary; JSON mode records failures in the report instead.
+/// `sidecars` names the sibling nodes streamed references
+/// (`m_StreamData`/`m_Resource`) point into; pass an empty slice for a bare
+/// serialized file, and only path-less same-file references get checked.
+fn verifySerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, class_filter: ?i32, path_filter: ?i64, json: bool, report: *VerifyReport, stdout: *Io.Writer, sidecars: []const Sidecar, own_name: []const u8, injected: ?*const InjectedTrees) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         if (json) {
             try recordFailure(report, arena, node, -1, "serialized parse failed: {s}", .{@errorName(err)});
@@ -6137,22 +6132,10 @@ fn writeBatchJson(stdout: *Io.Writer, file: []const u8, output: []const u8, resu
     try stdout.print("}}\n", .{});
 }
 
-fn writeJsonString(stdout: *Io.Writer, s: []const u8) !void {
-    try stdout.writeByte('"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try stdout.writeAll("\\\""),
-            '\\' => try stdout.writeAll("\\\\"),
-            '\n' => try stdout.writeAll("\\n"),
-            '\r' => try stdout.writeAll("\\r"),
-            '\t' => try stdout.writeAll("\\t"),
-            else => {
-                if (c < 0x20) try stdout.print("\\u{x:0>4}", .{c}) else try stdout.writeByte(c);
-            },
-        }
-    }
-    try stdout.writeByte('"');
-}
+/// Prints `s` as a JSON string literal, escaping the C0 controls Unity
+/// strings carry (trailing NULs in particular). Same escaper the library
+/// uses for its own tree JSON, so both outputs agree byte for byte.
+const writeJsonString = unityz.managed_trees.writeJsonString;
 
 /// Prints a JSON array of string literals.
 fn writeJsonStringList(stdout: *Io.Writer, items: []const []const u8) !void {
@@ -8445,7 +8428,7 @@ fn verifyEditResult(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Wri
             }
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                try verifySerializedBytesSidecars(arena, n.data, null, null, null, true, &report, stdout, sidecars.items, "", null);
+                try verifySerializedBytes(arena, n.data, null, null, null, true, &report, stdout, sidecars.items, "", null);
             }
         },
         .webfile => {
@@ -8461,10 +8444,10 @@ fn verifyEditResult(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Wri
             }
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try verifySerializedBytesSidecars(arena, e.data, null, null, null, true, &report, stdout, sidecars.items, "", null);
+                try verifySerializedBytes(arena, e.data, null, null, null, true, &report, stdout, sidecars.items, "", null);
             }
         },
-        .serialized => try verifySerializedBytes(arena, bytes, null, null, null, true, &report, stdout, "", null),
+        .serialized => try verifySerializedBytes(arena, bytes, null, null, null, true, &report, stdout, &.{}, "", null),
         else => {
             failure("verify failed: result is not a recognized asset file\n", .{});
             return false;

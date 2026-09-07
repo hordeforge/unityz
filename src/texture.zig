@@ -2364,17 +2364,8 @@ fn astcSetEndpointHdrClamp(e: *[8]i32, r1: i32, g1: i32, b1: i32, a1: i32, r2: i
     e[7] = std.math.clamp(a2, 0, 0xfff);
 }
 
-fn astcSetEndpointHdr(e: *[8]i32, r1: i32, g1: i32, b1: i32, a1: i32, r2: i32, g2: i32, b2: i32, a2: i32) void {
-    e[0] = r1;
-    e[1] = g1;
-    e[2] = b1;
-    e[3] = a1;
-    e[4] = r2;
-    e[5] = g2;
-    e[6] = b2;
-    e[7] = a2;
-}
-
+/// Stores an endpoint pair verbatim. Serves the HDR modes too: only the
+/// clamping variants differ between LDR and HDR, by their value range.
 fn astcSetEndpoint(e: *[8]i32, r1: i32, g1: i32, b1: i32, a1: i32, r2: i32, g2: i32, b2: i32, a2: i32) void {
     e[0] = r1;
     e[1] = g1;
@@ -2564,7 +2555,7 @@ fn astcDecodeEndpointsHdr7(endpoints: *[8]i32, v: []i32) void {
 fn astcDecodeEndpointsHdr11(endpoints: *[8]i32, v: []i32, alpha1: i32, alpha2: i32) void {
     const major_component = (v[4] >> 7) | ((v[5] >> 6) & 2);
     if (major_component == 3) {
-        astcSetEndpointHdr(
+        astcSetEndpoint(
             endpoints,
             v[0] << 4,
             v[2] << 4,
@@ -2769,7 +2760,7 @@ fn astcDecodeEndpoints(buf: []const u8, data: *AstcBlockData) void {
             2 => {
                 const y0: i32 = if (vv[0] <= vv[1]) vv[0] << 4 else (vv[1] << 4) +% 8;
                 const y1: i32 = if (vv[0] <= vv[1]) vv[1] << 4 else (vv[0] << 4) -% 8;
-                astcSetEndpointHdr(&data.endpoints[cem_i], y0, y0, y0, 0x780, y1, y1, y1, 0x780);
+                astcSetEndpoint(&data.endpoints[cem_i], y0, y0, y0, 0x780, y1, y1, y1, 0x780);
             },
             3 => {
                 const y0: i32 = if (vv[0] & 0x80 != 0)
@@ -2778,7 +2769,7 @@ fn astcDecodeEndpoints(buf: []const u8, data: *AstcBlockData) void {
                     ((vv[1] & 0xf0) << 4) | ((vv[0] & 0x7f) << 1);
                 const d: i32 = if (vv[0] & 0x80 != 0) (vv[1] & 0x1f) << 2 else (vv[1] & 0x0f) << 1;
                 const y1 = std.math.clamp(y0 +% d, 0, 0xfff);
-                astcSetEndpointHdr(&data.endpoints[cem_i], y0, y0, y0, 0x780, y1, y1, y1, 0x780);
+                astcSetEndpoint(&data.endpoints[cem_i], y0, y0, y0, 0x780, y1, y1, y1, 0x780);
             },
             4 => astcSetEndpoint(&data.endpoints[cem_i], vv[0], vv[0], vv[0], vv[2], vv[1], vv[1], vv[1], vv[3]),
             5 => {
