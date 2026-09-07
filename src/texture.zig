@@ -618,6 +618,13 @@ fn copyPixels(out: []u8, data: []const u8, w: usize, h: usize, stride: usize, co
 pub fn expectedSize(tex_format: i32, width: u32, height: u32) ?usize {
     const w: usize = @intCast(width);
     const h: usize = @intCast(height);
+    // Same bound `decode` applies, repeated here because callers reach
+    // this directly with the file's own dimensions: the widest stride
+    // below is 16 bytes per pixel, so without it `w * h * 16` overflows
+    // (e.g. 0x80000000 x 0x80000000 in rgba_float) instead of reporting
+    // an unusable size.
+    const pixels = std.math.mul(usize, w, h) catch return null;
+    if (pixels > std.math.maxInt(usize) / 16) return null;
     return switch (tex_format) {
         format.alpha8, format.r8 => w * h,
         format.rgb24 => w * h * 3,

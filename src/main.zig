@@ -1408,6 +1408,26 @@ fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.Serial
     return null;
 }
 
+/// Range-checks a clip's own header fields, then wraps interleaved
+/// little-endian PCM with `unityz.wav.encode`. `bits` is the source sample
+/// width (16 for decoded FSB5 samples; the raw AudioClip path passes its
+/// own width).
+///
+/// `channels`, `rate` and `bits` are the clip's own fields, so they are
+/// whatever the file said - `m_Channels` alone reaches 0xffffffff. Every
+/// header field they feed is narrower than that, and the byte-rate product
+/// overflows u32 far earlier still (0xffffffff Hz stereo 16-bit is 32x the
+/// field), so each is range-checked in u64 here rather than cast blind on
+/// the way into the encoder.
+fn wavPcm16(arena: std.mem.Allocator, pcm: []const u8, channels: u32, rate: u32, bits: u32) ![]u8 {
+    const block_align = @as(u64, channels) * bits / 8;
+    const byte_rate = @as(u64, rate) * channels * bits / 8;
+    if (channels > std.math.maxInt(u16) or bits > std.math.maxInt(u16)) return error.WavFieldOverflow;
+    if (block_align > std.math.maxInt(u16) or byte_rate > std.math.maxInt(u32)) return error.WavFieldOverflow;
+    if (pcm.len > std.math.maxInt(u32) - 36) return error.WavFieldOverflow;
+    return unityz.wav.encode(arena, pcm, @intCast(channels), rate, @intCast(bits));
+}
+
 const FsbMetadata = struct { json: []u8, valid: bool };
 
 fn fsbSampleDecodes(audio: []const u8, bank: unityz.fsb5.Bank, sample: unityz.fsb5.Sample) bool {
@@ -1533,7 +1553,7 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
                 try stdout.print("  sample {d} ({s}): decode failed: {s}\n", .{ si, s.name, @errorName(err) });
                 continue;
             };
-            const wav = unityz.wav.encode(arena, try unityz.wav.pcm16LeBytes(arena, pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
+            const wav = wavPcm16(arena, try unityz.wav.pcm16LeBytes(arena, pcm), s.channels, s.frequency, 16) catch |err| {
                 try stdout.print("  sample {d} ({s}): WAV wrapping failed: {s}\n", .{ si, s.name, @errorName(err) });
                 continue;
             };
@@ -2023,14 +2043,19 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     min_h = @min(min_h, hv_i);
                     max_h = @max(max_h, hv_i);
                 }
-                const range = max_h - min_h;
+                // The heights are SInt16 in every Unity build, but the
+                // element width comes from the file's own type tree, and a
+                // 64-bit one makes both `max_h - min_h` and the 65535x
+                // numerator below overflow i64. Subtract checked and scale
+                // in i128; the quotient is still bounded by 65535.
+                const range = std.math.sub(i64, max_h, min_h) catch continue;
                 var hbuf: std.ArrayList(u8) = .empty;
                 var haw = std.Io.Writer.Allocating.fromArrayList(arena, &hbuf);
                 const hw = &haw.writer;
                 try hw.print("P5\n{d} {d}\n65535\n", .{ side, side });
                 for (hv.array) |h| {
                     const hv_i = h.asInt() orelse 0;
-                    const v16: u16 = if (range == 0) 0 else @intCast(@divTrunc((hv_i - min_h) * 65535, range));
+                    const v16: u16 = if (range == 0) 0 else @intCast(@divTrunc((@as(i128, hv_i) - min_h) * 65535, @as(i128, range)));
                     try hw.writeByte(@intCast(v16 >> 8));
                     try hw.writeByte(@intCast(v16 & 0xff));
                 }
@@ -2083,9 +2108,9 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 var wav_buf: std.ArrayList(u8) = .empty;
                 if (std.mem.eql(u8, ext, "bin") and ac.compression_format == 0) {
                     // wrap raw PCM in a WAV container
-                    const bits: u16 = @intCast(if (ac.bits_per_sample == 0) 16 else ac.bits_per_sample);
-                    const ch: u16 = @intCast(if (ac.channels == 0) 1 else ac.channels);
-                    wav_buf.appendSlice(arena, unityz.wav.encode(arena, audio, ch, ac.frequency, bits) catch |err| {
+                    const bits: u32 = if (ac.bits_per_sample == 0) 16 else ac.bits_per_sample;
+                    const ch: u32 = if (ac.channels == 0) 1 else ac.channels;
+                    wav_buf.appendSlice(arena, wavPcm16(arena, audio, ch, ac.frequency, bits) catch |err| {
                         try stdout.print("  audio {d}: WAV wrapping failed: {s}\n", .{ o.path_id, @errorName(err) });
                         continue;
                     }) catch continue;
@@ -2122,7 +2147,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                                     skipped += 1;
                                     continue;
                                 };
-                                const wav = unityz.wav.encode(arena, try unityz.wav.pcm16LeBytes(arena, pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
+                                const wav = wavPcm16(arena, try unityz.wav.pcm16LeBytes(arena, pcm), s.channels, s.frequency, 16) catch |err| {
                                     try stdout.print("  audio {d}: WAV wrapping failed: {s}\n", .{ o.path_id, @errorName(err) });
                                     skipped += 1;
                                     continue;

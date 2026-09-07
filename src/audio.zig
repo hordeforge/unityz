@@ -70,7 +70,7 @@ pub fn decodeSample(allocator: std.mem.Allocator, raw: []const u8, data_start: u
     const start: usize = @as(usize, data_start) + @as(usize, sample.data_offset);
     const total: usize = @as(usize, sample.sample_count) * channels;
     if (start > raw.len) return error.Corrupt;
-    const data = raw[start..];
+    const data = raw[@intCast(start)..];
     const out = allocator.alloc(i16, total) catch return error.OutOfMemory;
     errdefer allocator.free(out);
     switch (mode) {
@@ -137,8 +137,8 @@ fn decodeGcadpcm(out: []i16, data: []const u8, channels: usize, sample_count: u3
     const block_samples: usize = 14;
     const block_size: usize = 8;
     var produced: usize = 0;
-    var hist1: i32 = 0;
-    var hist2: i32 = 0;
+    var hist1: i64 = 0;
+    var hist2: i64 = 0;
     var block: usize = 0;
     while (produced < sample_count) : (block += 1) {
         const boff = block * block_size;
@@ -153,8 +153,12 @@ fn decodeGcadpcm(out: []i16, data: []const u8, channels: usize, sample_count: u3
             const nibbles = data[boff + 1 + i / 2];
             var nib: i8 = if (i & 1 == 0) @as(i8, @bitCast(nibbles >> 4)) else @as(i8, @bitCast(nibbles & 0xf));
             nib = (nib << 4) >> 4; // sign-extend the 4-bit nibble
-            var v: i32 = @as(i32, nib) * scale << 11;
-            v = (v + 1024 + c1 * hist1 + c2 * hist2) >> 11;
+            // i64 for the filter sum: the coefficients are file-supplied
+            // s16 and the history is only clamped to i16, so a pair of
+            // 0x8000 coefficients makes c1*hist1 + c2*hist2 reach 2^31 and
+            // overflow an i32 before the >>11 brings it back in range.
+            const raw_sample: i64 = @as(i64, nib) * scale << 11;
+            const v: i64 = (raw_sample + 1024 + @as(i64, c1) * hist1 + @as(i64, c2) * hist2) >> 11;
             const clamped = std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16));
             hist2 = hist1;
             hist1 = clamped;
@@ -235,6 +239,37 @@ test "PCMFLOAT decode promotes to f64 before truncation" {
     const pcm = try decodeSample(a, &raw, 0, s, 5);
     defer a.free(pcm);
     try std.testing.expectEqual(@as(i16, 31120), pcm[0]);
+}
+
+test "GCADPCM survives extreme DSPCOEFS without overflowing" {
+    const a = std.testing.allocator;
+    // The coefficients come straight out of the file's DSPCOEFS chunk, so
+    // a pair can be (32767, 32767). Scale exponent 15 with every nibble at
+    // -8 pins both history slots at -32768 by the third sample, and the
+    // filter sum is then
+    //   (-8*32768 << 11) + 1024 + 32767*-32768 + 32767*-32768
+    //   = -2684288000
+    // which is past i32's -2147483648: computing it in i32 traps in a safe
+    // build and wraps to a positive sample in a fast one.
+    var coefs = [_]i16{0} ** 16;
+    coefs[0] = std.math.maxInt(i16);
+    coefs[1] = std.math.maxInt(i16);
+    const data = [_]u8{ 0x0f, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88 };
+    const s = fsb5.Sample{ .data_offset = 0, .sample_count = 14, .channels = 1, .frequency = 8000, .dsp_coefs = &coefs };
+    const pcm = try decodeSample(a, &data, 0, s, 6);
+    defer a.free(pcm);
+    // -2684288000 >> 11 is -1310688, so every sample pins at the low clamp.
+    try std.testing.expectEqualSlices(i16, &(.{std.math.minInt(i16)} ** 14), pcm);
+}
+
+test "a sample offset past u32 is rejected, not wrapped" {
+    const a = std.testing.allocator;
+    // data_offset is a 28-bit field scaled by 16, so it reaches
+    // 0xfffffff0; added to any non-zero data_start the u32 sum wraps back
+    // into the buffer and the bound check would pass on garbage.
+    const raw = [_]u8{0} ** 64;
+    const s = fsb5.Sample{ .data_offset = 0xfffffff0, .sample_count = 4, .channels = 1, .frequency = 8000 };
+    try std.testing.expectError(error.Corrupt, decodeSample(a, &raw, 32, s, 2));
 }
 
 test "IMA decode matches a hand-computed block" {

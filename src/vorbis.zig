@@ -331,7 +331,7 @@ pub fn rebuildOgg(
     // would overflow ahead of the bounds check.
     const start: usize = @as(usize, data_start) + @as(usize, sample.data_offset);
     if (start > raw.len) return error.Corrupt;
-    const data = raw[start..];
+    const data = raw[@intCast(start)..];
 
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
