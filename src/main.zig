@@ -6513,9 +6513,13 @@ fn diffValueTree(a: unityz.value.Value, b: unityz.value.Value, path_id: i64, buf
 fn renderValue(v: unityz.value.Value) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     var aw = std.Io.Writer.Allocating.fromArrayList(std.heap.page_allocator, &buf);
+    // Only the truncated copy leaves this function, so the full rendering is
+    // dead on return. `diff` renders two values per reported field of every
+    // changed object and nothing frees a page_allocator buffer later, so
+    // keeping it would cost a page per render for the rest of the run.
+    defer aw.deinit();
     try unityz.value.jsonWrite(v, &aw.writer);
-    const out = aw.toArrayList();
-    return try std.heap.page_allocator.dupe(u8, truncateLeaf(out.items));
+    return try std.heap.page_allocator.dupe(u8, truncateLeaf(aw.written()));
 }
 
 fn emitField(path_id: i64, path: []const u8, name: []const u8, old: []const u8, new: []const u8, reported: *usize, collect: ?*std.ArrayList(FieldDiff), stdout: *Io.Writer) !void {
@@ -6526,6 +6530,9 @@ fn emitField(path_id: i64, path: []const u8, name: []const u8, old: []const u8, 
     if (collect) |c| {
         try c.append(std.heap.page_allocator, .{ .path_id = path_id, .path = full_path, .old = old, .new = new });
     } else {
+        // Nothing holds the path once it is printed, and only the collecting
+        // branch hands it to a list that outlives the call.
+        defer std.heap.page_allocator.free(full_path);
         try stdout.print("    {s} ({s} -> {s})\n", .{ full_path, old, new });
     }
     reported.* += 1;
@@ -6537,6 +6544,9 @@ fn reportLeaf(a: unityz.value.Value, b: unityz.value.Value, path_id: i64, path: 
     if (collect) |c| {
         try c.append(std.heap.page_allocator, .{ .path_id = path_id, .path = try std.heap.page_allocator.dupe(u8, path), .old = old, .new = new });
     } else {
+        // Same as `emitField`: the renderings are only borrowed by the print.
+        defer std.heap.page_allocator.free(old);
+        defer std.heap.page_allocator.free(new);
         try stdout.print("    {s} ({s} -> {s})\n", .{ path, old, new });
     }
     reported.* += 1;

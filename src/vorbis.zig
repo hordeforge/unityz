@@ -194,6 +194,7 @@ const OggStream = struct {
     }
 
     /// Returns the next page (header + body), or null when no page is due.
+    /// The page is a fresh allocation the caller owns and must free.
     fn pageOut(self: *OggStream, allocator: std.mem.Allocator, force: bool) Error!?[]u8 {
         const max_values = @min(self.lacing.items.len, 255);
         if (max_values == 0) return null;
@@ -338,10 +339,16 @@ pub fn rebuildOgg(
 
     // header packets: BOS page (info) then comment + setup
     try stream.packetIn(allocator, &buildInfoPacket(@intCast(sample.channels), sample.frequency), 0, false);
-    if (try stream.pageOut(allocator, true)) |p| try out.appendSlice(allocator, p);
+    if (try stream.pageOut(allocator, true)) |p| {
+        defer allocator.free(p);
+        try out.appendSlice(allocator, p);
+    }
     try stream.packetIn(allocator, &buildCommentPacket(), 0, false);
     try stream.packetIn(allocator, setup.header, 0, false);
-    if (try stream.pageOut(allocator, true)) |p| try out.appendSlice(allocator, p);
+    if (try stream.pageOut(allocator, true)) |p| {
+        defer allocator.free(p);
+        try out.appendSlice(allocator, p);
+    }
 
     // audio packets: [u16 size][packet] until size 0/0xFFFF, the sample's
     // declared sample_count is reached, or the data ends. FMOD does not
@@ -389,10 +396,16 @@ pub fn rebuildOgg(
         previous_block_size = block_size;
 
         try stream.packetIn(allocator, packet, granule_pos, is_last);
-        if (try stream.pageOut(allocator, is_last)) |p| try out.appendSlice(allocator, p);
+        if (try stream.pageOut(allocator, is_last)) |p| {
+            defer allocator.free(p);
+            try out.appendSlice(allocator, p);
+        }
         if (granule_pos == sample.sample_count) break;
     }
-    if (try stream.pageOut(allocator, true)) |p| try out.appendSlice(allocator, p);
+    if (try stream.pageOut(allocator, true)) |p| {
+        defer allocator.free(p);
+        try out.appendSlice(allocator, p);
+    }
     return try out.toOwnedSlice(allocator);
 }
 
