@@ -1388,6 +1388,16 @@ fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.Serial
     return null;
 }
 
+/// Serializes decoded 16-bit samples as the little-endian bytes a WAV
+/// `data` chunk requires. `sliceAsBytes` over the `[]i16` would emit host
+/// order, which silently byte-swaps every sample on a big-endian host while
+/// the header it pairs with is written little-endian throughout.
+fn pcm16LeBytes(arena: std.mem.Allocator, pcm: []const i16) ![]u8 {
+    const out = try arena.alloc(u8, pcm.len * 2);
+    for (pcm, 0..) |s, i| std.mem.writeInt(i16, out[i * 2 ..][0..2], s, .little);
+    return out;
+}
+
 /// Wraps interleaved little-endian PCM in a WAV container. `bits` is the
 /// source sample width (16 for decoded FSB5 samples; the raw AudioClip
 /// path passes its own width).
@@ -1537,7 +1547,7 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
                 try stdout.print("  sample {d} ({s}): decode failed: {s}\n", .{ si, s.name, @errorName(err) });
                 continue;
             };
-            const wav = wavPcm16(arena, std.mem.sliceAsBytes(pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
+            const wav = wavPcm16(arena, try pcm16LeBytes(arena, pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
                 try stdout.print("  sample {d} ({s}): WAV wrapping failed: {s}\n", .{ si, s.name, @errorName(err) });
                 continue;
             };
@@ -2126,7 +2136,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                                     skipped += 1;
                                     continue;
                                 };
-                                const wav = wavPcm16(arena, std.mem.sliceAsBytes(pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
+                                const wav = wavPcm16(arena, try pcm16LeBytes(arena, pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
                                     try stdout.print("  audio {d}: WAV wrapping failed: {s}\n", .{ o.path_id, @errorName(err) });
                                     skipped += 1;
                                     continue;

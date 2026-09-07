@@ -1609,7 +1609,9 @@ fn decodeEacChannelBlock(block: []const u8, channel: usize, dst: *[16][4]u8, sig
     const table = etcAlphaTables[block[1] & 0xf];
     var l = std.mem.readInt(u64, block[0..8], .big); // EAC blocks are big-endian
     for (0..16) |i| {
-        const idx = l & 7;
+        // Narrowed to usize explicitly: the 3-bit selector indexes `table`,
+        // and a bare `u64` index only coerces where usize is 64-bit.
+        const idx: usize = @intCast(l & 7);
         const val: i32 = if (signed_fmt)
             @as(i32, @as(i8, @bitCast(block[0]))) * 8 + @as(i32, @intCast(mult)) * table[idx] + 1023
         else
@@ -2004,16 +2006,23 @@ fn astcBitReverseU8(c: u8, bits: u8) u8 {
     return astcBitReverseTable[c] >> @intCast(8 -% bits);
 }
 
-/// Reverses the low `bits` bits of a 64-bit value.
+/// Reverses the low `bits` bits of a 64-bit value. Each byte selector is
+/// narrowed to usize before indexing: a `u64` index only coerces on targets
+/// where usize is 64-bit, so the bare form fails to build for 32-bit ones.
 fn astcBitReverseU64(d: u64, bits: usize) u64 {
-    const ret = (std.math.shl(u64, @as(u64, astcBitReverseTable[d & 0xff]), 56)) |
-        (@as(u64, astcBitReverseTable[(d >> 8) & 0xff]) << 48) |
-        (@as(u64, astcBitReverseTable[(d >> 16) & 0xff]) << 40) |
-        (@as(u64, astcBitReverseTable[(d >> 24) & 0xff]) << 32) |
-        (@as(u64, astcBitReverseTable[(d >> 32) & 0xff]) << 24) |
-        (@as(u64, astcBitReverseTable[(d >> 40) & 0xff]) << 16) |
-        (@as(u64, astcBitReverseTable[(d >> 48) & 0xff]) << 8) |
-        @as(u64, astcBitReverseTable[(d >> 56) & 0xff]);
+    const byte = struct {
+        fn at(v: u64, shift: u6) usize {
+            return @intCast((v >> shift) & 0xff);
+        }
+    }.at;
+    const ret = (std.math.shl(u64, @as(u64, astcBitReverseTable[byte(d, 0)]), 56)) |
+        (@as(u64, astcBitReverseTable[byte(d, 8)]) << 48) |
+        (@as(u64, astcBitReverseTable[byte(d, 16)]) << 40) |
+        (@as(u64, astcBitReverseTable[byte(d, 24)]) << 32) |
+        (@as(u64, astcBitReverseTable[byte(d, 32)]) << 24) |
+        (@as(u64, astcBitReverseTable[byte(d, 40)]) << 16) |
+        (@as(u64, astcBitReverseTable[byte(d, 48)]) << 8) |
+        @as(u64, astcBitReverseTable[byte(d, 56)]);
     return ret >> @intCast(64 -% bits);
 }
 

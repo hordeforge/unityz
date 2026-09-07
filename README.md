@@ -26,10 +26,15 @@ zig build
 ./zig-out/bin/unityz create spec.json --out new.unity3d
 ```
 
-Linux (x86_64) and macOS (aarch64) are built and tested in CI. The
-parsers make no host-endianness or word-size assumptions, so other
-targets `zig build -Dtarget=...` accepts should work but are not
-covered by CI. CI also blocks on formatting and shell lint:
+Linux (x86_64) and macOS (aarch64) are built and tested in CI. The Zig
+parsers make no host-endianness or word-size assumptions - every integer
+read and written names its byte order - so other **little-endian** targets
+`zig build -Dtarget=...` accepts should work, but are not covered by CI.
+Big-endian hosts are not supported: the vendored LZHAM decoder
+(`src/vendor/lzham`) hardcodes `LZHAM_LITTLE_ENDIAN_CPU` and unaligned
+integer loads for every non-MSVC target, so UnityFS block compression
+type 4 would decode wrong there. CI also blocks on formatting and shell
+lint:
 
 ```bash
 zig fmt --check build.zig build.zig.zon src
