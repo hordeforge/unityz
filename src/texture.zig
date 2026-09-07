@@ -466,8 +466,7 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
         }.convert),
         format.r16_signed => copyPixels(out, data, w, h, 2, struct {
             fn convert(pixel: []const u8, dst: []u8) void {
-                const v: i16 = @bitCast(std.mem.readInt(u16, pixel[0..2], .little));
-                const c: u8 = @intCast((@as(u32, @bitCast(@as(i32, v) + 32768))) >> 8);
+                const c: u8 = i16BiasedByte(pixel);
                 dst[0] = c;
                 dst[1] = c;
                 dst[2] = c;

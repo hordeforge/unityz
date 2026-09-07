@@ -147,16 +147,22 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Bank {
     // name table: num_samples u32 offsets into the table, then strings
     if (name_table_size != 0) {
         const table_start = headers_end;
-        if (table_start + name_table_size > data.len) return null;
+        const table_end = table_start + name_table_size;
+        if (table_end > data.len) return null;
         var name_pos = table_start;
         for (0..num_samples) |si| {
-            if (name_pos + 4 > table_start + name_table_size) break;
+            if (name_pos + 4 > table_end) break;
             const off = std.mem.readInt(u32, data[name_pos..][0..4], .little);
             name_pos += 4;
             const str_start = table_start + off;
-            if (str_start >= data.len) continue;
+            // A name lives inside the name table, so both the offset and the
+            // NUL scan are bounded by the table's own end. Bounding the scan
+            // by `data.len` instead lets an unterminated final string - or an
+            // offset past the table - run on into the sample data section and
+            // come back as a name made of raw audio bytes.
+            if (str_start >= table_end) continue;
             var end = str_start;
-            while (end < data.len and end < str_start + name_table_size and data[end] != 0) : (end += 1) {}
+            while (end < table_end and data[end] != 0) : (end += 1) {}
             samples[si].name = try allocator.dupe(u8, data[str_start..end]);
         }
     }

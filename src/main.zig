@@ -1472,6 +1472,20 @@ fn fsbSampleDecodes(audio: []const u8, bank: unityz.fsb5.Bank, sample: unityz.fs
     return false;
 }
 
+/// `audio_<path_id>[_<name>][_s<index>].<ext>` for one sample decoded out of
+/// an AudioClip's FSB5 bank. The clip name is dropped when it is empty
+/// (matching the bank file's own name, which would otherwise gain a trailing
+/// underscore), and the sample index only appears for multi-sample banks.
+/// The WAV and Ogg branches share it so their naming cannot drift apart.
+fn fsbSampleFileName(buf: []u8, path_id: i64, clip_name: []const u8, index: ?usize, ext: []const u8) ![]u8 {
+    if (index) |si| {
+        if (clip_name.len == 0) return std.fmt.bufPrint(buf, "audio_{d}_s{d}.{s}", .{ path_id, si, ext });
+        return std.fmt.bufPrint(buf, "audio_{d}_{s}_s{d}.{s}", .{ path_id, clip_name, si, ext });
+    }
+    if (clip_name.len == 0) return std.fmt.bufPrint(buf, "audio_{d}.{s}", .{ path_id, ext });
+    return std.fmt.bufPrint(buf, "audio_{d}_{s}.{s}", .{ path_id, clip_name, ext });
+}
+
 /// FSB5 bank metadata as a JSON document, or null when the data is not a
 /// well-formed FSB5 bank. With `validate_audio`, each sample is decoded or
 /// rebuilt in memory and the result is reported without writing files.
@@ -2196,10 +2210,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                                     continue;
                                 };
                                 var wav_name_buf: [160]u8 = undefined;
-                                const wav_name = if (bank.samples.len == 1)
-                                    try std.fmt.bufPrint(&wav_name_buf, "audio_{d}_{s}.wav", .{ o.path_id, base_name })
-                                else
-                                    try std.fmt.bufPrint(&wav_name_buf, "audio_{d}_{s}_s{d}.wav", .{ o.path_id, base_name, si });
+                                const wav_name = try fsbSampleFileName(&wav_name_buf, o.path_id, base_name, if (bank.samples.len == 1) null else si, "wav");
                                 try extractFile(subdir, sanitizeComponent(wav_name), wav);
                                 try stdout.print("extracted {s} ({d} samples, {s})\n", .{ wav_name, s.sample_count, unityz.audio.modeName(bank.mode) });
                                 extracted += 1;
@@ -2220,10 +2231,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                                     continue;
                                 };
                                 var ogg_name_buf: [160]u8 = undefined;
-                                const ogg_name = if (bank.samples.len == 1)
-                                    try std.fmt.bufPrint(&ogg_name_buf, "audio_{d}_{s}.ogg", .{ o.path_id, base_name })
-                                else
-                                    try std.fmt.bufPrint(&ogg_name_buf, "audio_{d}_{s}_s{d}.ogg", .{ o.path_id, base_name, si });
+                                const ogg_name = try fsbSampleFileName(&ogg_name_buf, o.path_id, base_name, if (bank.samples.len == 1) null else si, "ogg");
                                 try extractFile(subdir, sanitizeComponent(ogg_name), ogg);
                                 try stdout.print("extracted {s} ({d} samples, {s})\n", .{ ogg_name, s.sample_count, unityz.audio.modeName(bank.mode) });
                                 extracted += 1;
