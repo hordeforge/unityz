@@ -1,5 +1,6 @@
-//! LZ4 block decompressor, implemented from the public LZ4 block format
-//! specification.
+//! LZ4 block decompressor and compressor, implemented from the public LZ4
+//! block format specification. `decompress` reads Unity's bundle blocks;
+//! `compress` re-encodes them when a rebuilt bundle keeps its compression.
 //!
 //! Unity's LZ4-compressed bundle blocks are plain LZ4 blocks: a sequence of
 //! tokens, each carrying a literal run and an optional match referencing an
@@ -195,7 +196,8 @@ test "decompress errors" {
 /// window hashes into a table of the most recent position, and a candidate
 /// within the u16 offset range (<= 65535) is extended into a match of at
 /// least 4 bytes. Literal runs are always emitted, so the output is
-/// self-describing; worst case is `src.len + src.len/255 + 16` bytes.
+/// self-describing; the output buffer is bounded generously at
+/// `src.len + src.len/128 + 32` bytes.
 pub fn compress(allocator: std.mem.Allocator, src: []const u8) Error![]u8 {
     if (src.len == 0) return allocator.alloc(u8, 0);
     // A literal-only block costs two overhead bytes per 270 literals (one

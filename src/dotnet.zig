@@ -10,10 +10,13 @@
 //! Coverage is the minimal slice that answers "which scripts exist and what
 //! do they serialize": PE/CLI header walk, the `#~` metadata table stream,
 //! and the TypeDef / TypeRef / Field / AssemblyRef tables with field
-//! signature decoding. Everything else (methods, properties, custom
-//! attributes, generics instantiation) is skipped. Rows that do not resolve
-//! (missing heaps, out-of-range coded indices) are skipped defensively; a
-//! malformed assembly fails with a parse error, never a crash.
+//! signature decoding, plus the CustomAttribute table for the three marks
+//! that change what Unity serializes ([SerializeField], [NonSerialized],
+//! [Serializable]). Everything else (methods, properties, the remaining
+//! custom attributes, generics instantiation) is skipped. Rows that do not
+//! resolve (missing heaps, out-of-range coded indices) are skipped
+//! defensively; a malformed assembly fails with a parse error, never a
+//! crash.
 
 const std = @import("std");
 const streams = @import("streams.zig");

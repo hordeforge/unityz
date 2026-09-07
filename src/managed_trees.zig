@@ -4,8 +4,10 @@
 //! hand-made trees file.
 //!
 //! Field ordering follows Unity's serializer: base-class fields first, then
-//! the derived class, and only the fields Unity actually serializes
-//! (public instance fields for classes; all instance fields for structs).
+//! the derived class, and only the fields Unity actually serializes -
+//! instance fields that are public or carry [SerializeField], minus the
+//! [NonSerialized] ones, the same rule for classes and structs
+//! (`dotnet.collectFields`; the full rule set is in docs/features.md).
 //! Type resolution walks every parsed assembly: UnityEngine.Object-derived
 //! classes become PPtrs, enums become int, structs and [Serializable]
 //! classes become inline objects, and generics (List<T>, Dictionary<K,V>)

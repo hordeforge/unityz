@@ -555,9 +555,9 @@ fn compressionType(flags: u32) CompressionType {
 }
 
 /// Block-level compression: each block carries its own compression in the
-/// low 6 bits of its flags (0 none, 1 LZMA, 2 LZ4, 3 LZ4HC), independent
-/// of the header's compression (verified against UnityPy, which decodes
-/// every block with `flags & 0x3F`).
+/// low 6 bits of its flags (0 none, 1 LZMA, 2 LZ4, 3 LZ4HC, 4 LZHAM),
+/// independent of the header's compression (verified against UnityPy, which
+/// decodes every block with `flags & 0x3F`).
 pub fn blockCompressionType(block_flags: u16) CompressionType {
     return @enumFromInt(block_flags & 0x3F);
 }
