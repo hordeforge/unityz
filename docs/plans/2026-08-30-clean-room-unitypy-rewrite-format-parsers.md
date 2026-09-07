@@ -173,8 +173,10 @@ extraction beyond raw bytes.
    object graph inside each `TypelessData` payload is exposed as bytes);
    `extract` resolves a MonoBehaviour's `m_Script` PPtr to its MonoScript
    (namespace/class/assembly) and writes the raw serialized script
-   payload. The managed .NET object-graph format itself is not parsed
-   yet.
+   payload. The managed .NET object-graph format itself was still
+   unparsed at this step; a later pass decodes it through its type tree
+   into a `.json` sidecar next to the raw payload (see the ROADMAP-refresh
+   completion note and the Status header above).
 
 The UnityFS bundle parser was corrected to the real wire format
    (big-endian header/block info, 16-byte alignment for v7+, 16-byte data
