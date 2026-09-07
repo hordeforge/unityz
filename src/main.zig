@@ -6668,8 +6668,26 @@ test "diffRgbaPixels counts per-channel diffs and max deltas" {
     var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
     const a = [_]u8{ 10, 20, 30, 40, 255, 255, 255, 255 };
     const b = [_]u8{ 12, 20, 35, 44, 250, 245, 255, 255 };
-    _ = try diffRgbaPixels(.{ .path_id = 7, .class_id = 28, .hash = 0, .size = 0 }, &a, &b, 2, 1, &aw.writer);
+    const stat = try diffRgbaPixels(.{ .path_id = 7, .class_id = 28, .hash = 0, .size = 0 }, &a, &b, 2, 1, &aw.writer);
     try std.testing.expectEqualStrings("    (pixels: object 7 (Texture2D) 2x1, 2 pixels differ; max delta R5 G10 B5 A4)\n", aw.toArrayList().items);
+    // the returned stat is what `diff --json` reports, so it has to carry
+    // the same numbers as the text line above rather than only not error
+    try std.testing.expect(stat != null);
+    try std.testing.expectEqual(@as(i64, 7), stat.?.path_id);
+    try std.testing.expectEqual(@as(i32, 28), stat.?.class_id);
+    try std.testing.expectEqual(@as(u32, 2), stat.?.width);
+    try std.testing.expectEqual(@as(u32, 1), stat.?.height);
+    try std.testing.expectEqual(@as(usize, 2), stat.?.diff_pixels);
+    try std.testing.expectEqual([4]u32{ 5, 10, 5, 4 }, stat.?.max_delta);
+
+    // identical pixels still report a stat, with every count at zero
+    var same_buf: std.ArrayList(u8) = .empty;
+    var sw = std.Io.Writer.Allocating.fromArrayList(arena, &same_buf);
+    const same = try diffRgbaPixels(.{ .path_id = 7, .class_id = 28, .hash = 0, .size = 0 }, &a, &a, 2, 1, &sw.writer);
+    try std.testing.expect(same != null);
+    try std.testing.expectEqual(@as(usize, 0), same.?.diff_pixels);
+    try std.testing.expectEqual([4]u32{ 0, 0, 0, 0 }, same.?.max_delta);
+    try std.testing.expectEqualStrings("    (pixels: object 7 (Texture2D) 2x1, 0 pixels differ; max delta R0 G0 B0 A0)\n", sw.toArrayList().items);
 }
 
 /// RGBA8 pixels plus dimensions, from a decoded Texture2D or a rendered

@@ -631,6 +631,11 @@ test "type-tree parser survives mutated and truncated wire data" {
     var prng = std.Random.DefaultPrng.init(0x7ee);
     const rnd = prng.random();
     var buf: [512]u8 = undefined;
+    // A mutated tree is allowed to fail to parse, so the loop alone would
+    // stay green even if all 3000 inputs were rejected before the root
+    // check below ever ran. Count the survivors and assert on them.
+    var parsed: usize = 0;
+    var nodes_seen: usize = 0;
     var iter: usize = 0;
     while (iter < 3000) : (iter += 1) {
         const source: []const u8 = if (iter % 2 == 0) blob_fixture else legacy_fixture;
@@ -650,10 +655,20 @@ test "type-tree parser survives mutated and truncated wire data" {
         }
         var r = streams.Reader.init(buf[0..blen]);
         const tree = parse(a, &r, fver, false) catch continue;
+        parsed += 1;
         // a parsed tree must have at least one root and reachable children
         try std.testing.expect(tree.roots.len >= 1);
-        for (tree.roots) |*root| _ = root.children;
+        for (tree.roots) |*root| {
+            // every root must name a type and a field, so a tree built out
+            // of garbage strings is not silently accepted as "reachable"
+            try std.testing.expect(root.type_name.len > 0 or root.name.len > 0);
+            nodes_seen += 1 + root.children.len;
+        }
     }
+    // Both fixtures survive some mutations, so the per-root checks above
+    // are exercised rather than skipped over.
+    try std.testing.expect(parsed > 0);
+    try std.testing.expect(nodes_seen > 0);
 }
 
 // ---------------------------------------------------------------------------

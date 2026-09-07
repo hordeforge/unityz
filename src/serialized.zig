@@ -686,6 +686,11 @@ test "serialized parser survives mutated and truncated input" {
     var prng = std.Random.DefaultPrng.init(0x5e21);
     const rnd = prng.random();
     var buf: [4096]u8 = undefined;
+    // Every mutation may legitimately fail to parse, so the loop alone
+    // would pass even if the parser rejected all 3000 inputs outright.
+    // Count the survivors and assert the fixtures still get through.
+    var parsed: usize = 0;
+    var data_seen: usize = 0;
     var iter: usize = 0;
     while (iter < 3000) : (iter += 1) {
         const source: []const u8 = if (iter % 2 == 0) v22 else &v4;
@@ -698,16 +703,22 @@ test "serialized parser survives mutated and truncated input" {
         };
         @memcpy(buf[0..source.len], source);
         if (mode == 1) {
-            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len)));
+            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len - 1)));
             buf[m] ^= @intCast(rnd.int(u8) | 1);
         } else if (mode == 3 and blen > 0) {
             rnd.bytes(buf[0..blen]);
-        } else if (mode == 2 and source.len >= 12) {
-            // nudge a header length field (metadata/file size)
-            const m = rnd.intRangeAtMost(u32, 0, 11);
-            buf[m] ^= @intCast(rnd.int(u8) | 1);
+        } else if (mode == 2) {
+            // buf is `undefined`, so the extension has to be filled or the
+            // tail is leftover bytes from an earlier iteration
+            rnd.bytes(buf[source.len..blen]);
+            if (source.len >= 12) {
+                // nudge a header length field (metadata/file size)
+                const m = rnd.intRangeAtMost(u32, 0, 11);
+                buf[m] ^= @intCast(rnd.int(u8) | 1);
+            }
         }
         const sf = parse(a, buf[0..blen]) catch continue;
+        parsed += 1;
         // if it parsed, every object's data must be within the source
         for (sf.objects) |*o| {
             if (sf.objectData(o)) |d| {
@@ -717,7 +728,12 @@ test "serialized parser survives mutated and truncated input" {
                 const d_end = d_start + d.len;
                 const s_start = @intFromPtr(src.ptr);
                 if (d_start < s_start or d_end > s_start + src.len) return error.BadSlice;
+                data_seen += 1;
             }
         }
     }
+    // Both fixtures survive some mutations, and a surviving file hands out
+    // object data - otherwise the bounds check above never ran.
+    try std.testing.expect(parsed > 0);
+    try std.testing.expect(data_seen > 0);
 }

@@ -1423,6 +1423,10 @@ test "shader blob decoder survives mutated payloads" {
     var prng = std.Random.DefaultPrng.init(0x5af0);
     const rnd = prng.random();
     var buf: [4096]u8 = undefined;
+    // A decode error is a pass here, so the loop alone would stay green
+    // even if every one of the 2000 blobs were turned away. Count the
+    // blobs that verified and assert both forms still get through.
+    var verified: usize = 0;
     var iter: usize = 0;
     while (iter < 2000) : (iter += 1) {
         const source: []const u8 = if (iter % 2 == 0) plain else compressed;
@@ -1436,8 +1440,14 @@ test "shader blob decoder survives mutated payloads" {
         if (mode == 1 and source.len > 0) {
             const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len - 1)));
             buf[m] ^= @intCast(rnd.int(u8) | 1);
+        } else if (mode == 2) {
+            // buf is `undefined`, so the extension has to be filled or the
+            // tail is leftover bytes from an earlier iteration
+            rnd.bytes(buf[source.len..blen]);
         }
         const shader = buildShaderValue(buf[0..blen]);
         _ = verifyBlob(a, shader) catch continue;
+        verified += 1;
     }
+    try std.testing.expect(verified > 0);
 }

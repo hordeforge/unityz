@@ -4898,6 +4898,15 @@ test "texture decode survives mutated and random compressed streams" {
     };
     var seed: [65536]u8 = undefined;
     rnd.bytes(&seed);
+    // A hostile stream is allowed to error, so the loop alone would stay
+    // green even if every format rejected every input and the RGBA8 size
+    // check below never ran once. Count the decodes and assert on them.
+    // Per-format counts are deliberately not asserted: the crunched
+    // formats run their stream through the crunch decompressor, which
+    // rejects random bytes outright, so they legitimately never decode
+    // here. Their decode paths are covered by the dedicated crunched
+    // tests instead.
+    var decoded: usize = 0;
     var iter: usize = 0;
     while (iter < 4000) : (iter += 1) {
         const f = formats[rnd.intRangeAtMost(u8, 0, formats.len - 1)];
@@ -4912,5 +4921,8 @@ test "texture decode survives mutated and random compressed streams" {
         }
         const out = decode(a, f, w, h, buf[0..len]) catch continue;
         try std.testing.expectEqual(@as(usize, @intCast(w)) * h * 4, out.len);
+        decoded += 1;
     }
+    // Some stream did decode, so the RGBA8 size check above ran for real.
+    try std.testing.expect(decoded > 0);
 }

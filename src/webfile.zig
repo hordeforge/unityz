@@ -493,6 +493,12 @@ test "webfile parser survives mutated and truncated input" {
     var prng = std.Random.DefaultPrng.init(0xbeef01);
     const rnd = prng.random();
     var buf: [4096]u8 = undefined;
+    var checksum: u8 = 0;
+    // A rejected mutation is a pass here, so the loop alone would stay
+    // green even if the parser turned away all 2000 inputs. Count the
+    // survivors and assert both fixtures still get through.
+    var parsed: usize = 0;
+    var entry_bytes: usize = 0;
     var iter: usize = 0;
     while (iter < 2000) : (iter += 1) {
         const source = if (iter % 2 == 0) gz else plain;
@@ -504,13 +510,21 @@ test "webfile parser survives mutated and truncated input" {
         };
         @memcpy(buf[0..source.len], source);
         if (mode == 1) {
-            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len)));
+            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len - 1)));
             buf[m] ^= @intCast(rnd.int(u8) | 1);
         } else if (mode == 2 and blen > 0) {
             rnd.bytes(buf[0..blen]);
         }
         var wf = parse(a, buf[0..blen]) catch continue;
         defer wf.deinit(a);
-        for (wf.entries) |e| _ = e.data;
+        parsed += 1;
+        // if it parsed, every entry's bytes must be readable without faulting
+        for (wf.entries) |e| {
+            for (e.data) |c| checksum +%= c;
+            entry_bytes += e.data.len;
+        }
     }
+    std.mem.doNotOptimizeAway(checksum);
+    try std.testing.expect(parsed > 0);
+    try std.testing.expect(entry_bytes > 0);
 }

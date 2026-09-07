@@ -1356,6 +1356,12 @@ test "bundle parser survives mutated and truncated input" {
     var prng = std.Random.DefaultPrng.init(0xbb0b);
     const rnd = prng.random();
     var buf: [4096]u8 = undefined;
+    var checksum: u8 = 0;
+    // Every mutation is allowed to fail, so the loop on its own would pass
+    // even if the parser rejected all 3000 inputs at the signature check.
+    // Count what actually made it through and assert on that instead.
+    var parsed: usize = 0;
+    var node_bytes: usize = 0;
     var iter: usize = 0;
     while (iter < 3000) : (iter += 1) {
         const source = sources[iter % sources.len];
@@ -1367,16 +1373,33 @@ test "bundle parser survives mutated and truncated input" {
             else => rnd.intRangeAtMost(u32, 0, 256), // tiny random
         };
         @memcpy(buf[0..source.len], source);
-        if (mode == 0 or mode == 3) {
-            // zero random bytes for tiny/truncated inputs
-            if (blen > 0) rnd.bytes(buf[0..@min(blen, 64)]);
-        } else if (mode == 2) {
-            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len)));
-            buf[m] ^= @intCast(rnd.int(u8) | 1);
+        switch (mode) {
+            // Truncate only. Randomising the head as well would break the
+            // signature on nearly every iteration, so the short-read paths
+            // deeper in the parser would never be reached.
+            0 => {},
+            // The extension has to be filled: buf is `undefined`, and
+            // outside Debug the tail would be whatever the last iteration
+            // left there.
+            1 => rnd.bytes(buf[source.len..blen]),
+            2 => {
+                const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(source.len - 1)));
+                buf[m] ^= @intCast(rnd.int(u8) | 1);
+            },
+            else => if (blen > 0) rnd.bytes(buf[0..@min(blen, 64)]),
         }
         var b = parse(a, buf[0..blen]) catch continue;
         defer b.deinit(a);
+        parsed += 1;
         // if it parsed, the node data must be readable without faulting
-        for (b.nodes) |n| _ = n.data;
+        for (b.nodes) |n| {
+            for (n.data) |c| checksum +%= c;
+            node_bytes += n.data.len;
+        }
     }
+    std.mem.doNotOptimizeAway(checksum);
+    // Both fixtures survive some mutations, and a surviving bundle carries
+    // node data - otherwise the reads above walked nothing.
+    try std.testing.expect(parsed > 0);
+    try std.testing.expect(node_bytes > 0);
 }

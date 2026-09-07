@@ -264,6 +264,11 @@ test "fsb5 parser survives mutated and truncated banks" {
     var prng = std.Random.DefaultPrng.init(0xf5b5);
     const rnd = prng.random();
     var buf: [512]u8 = undefined;
+    // `parse` returning null for a rejected bank is a pass here, so the
+    // loop alone would stay green even if it rejected all 3000 inputs.
+    // Count the banks that came back and assert on that.
+    var parsed: usize = 0;
+    var named: usize = 0;
     var iter: usize = 0;
     while (iter < 3000) : (iter += 1) {
         const mode = rnd.int(u8) % 3;
@@ -281,8 +286,16 @@ test "fsb5 parser survives mutated and truncated banks" {
         }
         const bank = try parse(a, buf[0..blen]);
         if (bank) |bk| {
-            // a parsed bank's sample table must be reachable
-            for (bk.samples) |s| _ = s.name;
+            parsed += 1;
+            // a parsed bank's sample table must be reachable, and a sample
+            // either carries a name or an explicitly empty one
+            for (bk.samples) |s| {
+                if (s.name.len > 0) named += 1;
+            }
         }
     }
+    // The fixture survives some mutations and its named sample comes back,
+    // so the sample-table walk above is doing real work.
+    try std.testing.expect(parsed > 0);
+    try std.testing.expect(named > 0);
 }

@@ -767,22 +767,42 @@ test "decompressor survives mutated and truncated blocks" {
     const c = try compress(a, &payload);
     defer a.free(c);
     var block: [16384]u8 = undefined;
+    // A corrupt block is allowed to error, so the loop alone would stay
+    // green even if nothing ever decoded. Count the decodes, and keep an
+    // untouched-block mode so the exact-payload claim below stays live.
+    var decoded: usize = 0;
+    var exact: usize = 0;
     var iter: usize = 0;
     while (iter < 3000) : (iter += 1) {
-        const mode = rnd.int(u8) % 3;
+        const mode = rnd.int(u8) % 4;
         const blen = switch (mode) {
             0 => rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(@min(c.len, 8192)))), // truncate
             1 => @min(c.len + rnd.intRangeAtMost(u32, 1, 32), block.len), // extend
-            else => c.len, // mutate in place
+            else => c.len, // mutate in place, or feed the block untouched
         };
         @memcpy(block[0..c.len], c);
-        if (mode == 0) {
-            const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(blen)));
-            block[m] ^= @intCast(rnd.int(u8) | 1);
+        switch (mode) {
+            // flip a byte inside what actually gets fed to the decoder,
+            // for both the truncated and the full-length block
+            0, 2 => if (blen > 0) {
+                const m = rnd.intRangeAtMost(u32, 0, @as(u32, @intCast(blen - 1)));
+                block[m] ^= @intCast(rnd.int(u8) | 1);
+            },
+            // block is `undefined`, so the extension has to be filled
+            1 => rnd.bytes(block[c.len..blen]),
+            else => {},
         }
         const out = decompress(a, block[0..blen], payload.len) catch continue;
         defer a.free(out);
-        // if it decoded at all, it must be the exact payload
-        try std.testing.expectEqualSlices(u8, &payload, out);
+        decoded += 1;
+        // A mutated block carries no checksum, so it may well decode to
+        // payload.len bytes of something else; only the untouched block
+        // owes us the exact payload back.
+        if (mode == 3) {
+            try std.testing.expectEqualSlices(u8, &payload, out);
+            exact += 1;
+        }
     }
+    try std.testing.expect(decoded > 0);
+    try std.testing.expect(exact > 0);
 }

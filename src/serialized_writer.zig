@@ -767,6 +767,12 @@ test "rewrite survives mutated parsed files and hostile replacements" {
     var prng = std.Random.DefaultPrng.init(0x77e2);
     const rnd = prng.random();
     var buf: [4096]u8 = undefined;
+    // Both `parse` and `rewrite` are allowed to fail on a mutated input, so
+    // the loop alone would stay green even if nothing ever reached the
+    // rewrite path. Count what got through each stage and assert on that.
+    var parsed: usize = 0;
+    var rewritten: usize = 0;
+    var replaced: usize = 0;
     var iter: usize = 0;
     while (iter < 2000) : (iter += 1) {
         // (a) mutated parseable file, no replacements
@@ -784,15 +790,24 @@ test "rewrite survives mutated parsed files and hostile replacements" {
             rnd.bytes(buf[0..blen]);
         }
         const sf = serialized.parse(a, buf[0..blen]) catch continue;
+        parsed += 1;
         const out = rewrite(a, &sf, &.{}) catch continue;
-        // the output must be a well-formed buffer we can at least walk
-        if (out.len > 0) _ = serialized.parse(a, out) catch {};
+        rewritten += 1;
+        // a no-replacement rewrite of a parseable file must round-trip back
+        // through the parser, not merely "at least walk"
+        if (out.len > 0) _ = try serialized.parse(a, out);
         // (b) random replacement payload for object 100
         const repl_len: usize = @intCast(rnd.intRangeAtMost(u32, 0, 4096));
         rnd.bytes(buf[0..repl_len]);
         const out2 = rewrite(a, &sf, &.{.{ .path_id = 100, .data = buf[0..repl_len] }}) catch continue;
+        replaced += 1;
         if (out2.len > 0) _ = serialized.parse(a, out2) catch {};
     }
+    // The fixture reaches every stage: parse, plain rewrite, and rewrite
+    // with a hostile replacement payload.
+    try std.testing.expect(parsed > 0);
+    try std.testing.expect(rewritten > 0);
+    try std.testing.expect(replaced > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -973,8 +988,19 @@ test "create builds a parseable v22 file whose objects round-trip" {
     var r = streams.Reader.init(data);
     const back = try object_reader.readObject(a, &r, &sf.types[0].type_tree.roots[0]);
     try std.testing.expectEqualStrings("payload text", value.fieldOf(back, "m_Script").?.string);
-    // and the rewrite path accepts the created file (one more consumer)
-    _ = try rewrite(a, &sf, &.{});
+    // and the rewrite path accepts the created file (one more consumer):
+    // the bytes it hands back must parse, keep both objects, and still
+    // decode the text asset - not merely fail to error
+    const again = try rewrite(a, &sf, &.{});
+    const sf2 = try serialized.parse(a, again);
+    try std.testing.expectEqual(@as(u32, 22), sf2.version);
+    try std.testing.expectEqual(sf.objects.len, sf2.objects.len);
+    try std.testing.expectEqual(@as(i64, 7), sf2.objects[1].path_id);
+    try std.testing.expectEqual(@as(u64, 0), sf2.objects[1].byte_start % 8);
+    const data2 = sf2.objectData(&sf2.objects[1]).?;
+    var r2 = streams.Reader.init(data2);
+    const back2 = try object_reader.readObject(a, &r2, &sf2.types[0].type_tree.roots[0]);
+    try std.testing.expectEqualStrings("payload text", value.fieldOf(back2, "m_Script").?.string);
 }
 
 test "create rejects malformed specs" {
