@@ -10,8 +10,9 @@
 //!   (standalone), used by Unity 2.x–4.x era.
 //! - **ArchiveFile** — magic `UnityArchive\0`, rare.
 //! - **SerializedFile** — `.assets`/`.resources`/`level*`/...
-//!   no magic; the file starts with a u32 metadata size followed by the
-//!   format version. Detection is a bounded heuristic, not a signature.
+//!   no magic; the file opens with a big-endian u32 metadata size, u32
+//!   file size and u32 format version. Detection is a bounded heuristic
+//!   on those three, not a signature.
 //!
 //! Bundles contain serialized files; serialized files contain objects.
 //! `sniff` only says which frame we are in — parsing is the job of the
@@ -135,9 +136,8 @@ pub fn sniff(data: []const u8) SniffResult {
     return .{ .container = .unknown };
 }
 
-/// Returns true when `data` is a serialized file with a version-newer
-/// header that requires a type tree (version >= 13, per the format docs;
-/// older files have no type tree).
+/// Returns true when a serialized file of format `version` embeds type
+/// trees (version >= 13, per the format docs; older files have none).
 pub fn serializedHasTypeTree(version: u32) bool {
     return version >= 13;
 }

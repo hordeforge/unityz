@@ -562,7 +562,7 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
     return out;
 }
 
-/// Copies `stride`-byte pixels through a converter.
+/// One float pixel component to 8-bit, clamped to the [0,1] range.
 fn floatToByte(f: f32) u8 {
     // Written as `!(f > 0)` so a NaN pixel - float-format textures really do
     // carry them - takes the 0 branch instead of reaching @intFromFloat,

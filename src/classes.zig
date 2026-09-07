@@ -2140,7 +2140,8 @@ pub const Mesh = struct {
 
     /// Byte offset of channel `index` at `vertex` within `vertex_data`,
     /// honoring the implicit per-stream layout. Null when the channel is
-    /// absent, uses a non-float/unsupported format, or the layout is bad.
+    /// absent, its `VertexChannelFormat` is one `formatSize` does not
+    /// know, or the layout is bad.
     pub fn channelByteOffset(self: *const Mesh, index: usize, vertex: usize) ?usize {
         const c = self.channel(index) orelse return null;
         _ = formatSize(c.format) orelse return null;

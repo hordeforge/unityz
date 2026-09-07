@@ -48,8 +48,9 @@ pub const EntryReplacement = struct {
     data: []const u8,
 };
 
-/// Rebuilds a WebFile with the given entries replaced (uncompressed).
-/// The caller owns the returned bytes.
+/// Rebuilds a WebFile with the given entries replaced, keeping the
+/// source's framing: a gzip-wrapped source is re-wrapped in gzip, a plain
+/// one stays plain. The caller owns the returned bytes.
 pub fn rebuild(allocator: std.mem.Allocator, wf: *const WebFile, replacements: []const EntryReplacement) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);

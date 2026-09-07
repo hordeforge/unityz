@@ -19,6 +19,12 @@
 //! Records require a value for every *named* child. Unnamed children
 //! cannot be reconstructed from a value tree and are rejected; callers
 //! editing real files will not hit them in practice.
+//!
+//! Managed-reference registries (`ReferencedObject`,
+//! `ManagedReferencesRegistry`) are the one place the mirror breaks: the
+//! reader decodes them, but their payload is a managed object graph it
+//! hands back as opaque bytes, so there is no field layout to write from
+//! and such a node fails with `error.UnsupportedManagedReference`.
 
 const std = @import("std");
 const streams = @import("streams.zig");

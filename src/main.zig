@@ -8051,8 +8051,8 @@ fn statsSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, class_filte
 }
 
 /// Edits one object inside a WebFile: finds the serialized entry that
-/// contains the path id, edits it, and rebuilds the webfile with a
-/// stored-deflate (uncompressed) payload.
+/// contains the path id, edits it, and rebuilds the webfile. A
+/// gzip-wrapped source is re-wrapped in gzip; a plain one stays plain.
 fn cmdEditWebFile(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs: []const []const u8, verify: bool, bytes: []const u8, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
@@ -8085,7 +8085,8 @@ fn cmdEditWebFile(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs:
 
 /// Edits one object inside a bundle: finds the serialized node that
 /// contains the path id, edits it, and rebuilds the bundle with the node
-/// replaced (uncompressed blocks).
+/// replaced. `bundle.rebuild` keeps the source's compression, so a
+/// compressed bundle comes back LZ4-compressed rather than stored.
 fn cmdEditBundle(path: []const u8, out_path: ?[]const u8, sel: Selector, pairs: []const []const u8, verify: bool, bytes: []const u8, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
