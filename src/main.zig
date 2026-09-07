@@ -4524,11 +4524,12 @@ fn shaderJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
 /// `info <path> [--dump]` — sniff the container and print a summary;
 /// `--dump` additionally prints every object of a serialized file as JSON.
 fn cmdInfo(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
+    _ = path;
     const sniff = unityz.container.sniff(bytes);
     switch (sniff.container) {
-        .webfile => return printWebFile(path, bytes, dump, objects, json, stdout),
-        .bundle => return printBundle(path, bytes, dump, objects, json, stdout),
-        .serialized => return printSerialized(path, bytes, dump, objects, json, stdout),
+        .webfile => return printWebFile(bytes, dump, objects, json, stdout),
+        .bundle => return printBundle(bytes, dump, objects, json, stdout),
+        .serialized => return printSerialized(bytes, dump, objects, json, stdout),
         .archive => return error.UnsupportedArchive,
         .unknown => return error.UnknownFormat,
     }
@@ -4585,8 +4586,7 @@ fn writeContainerEntryJson(arena: std.mem.Allocator, path: []const u8, bytes: []
     try stdout.writeByte('}');
 }
 
-fn printWebFile(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
-    _ = path;
+fn printWebFile(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -4693,8 +4693,7 @@ fn emitShadersJson(arena: std.mem.Allocator, nodes: anytype, stdout: *Io.Writer)
     try stdout.print("]", .{});
 }
 
-fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
-    _ = path;
+fn printBundle(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -4735,8 +4734,7 @@ fn printBundle(path: []const u8, bytes: []const u8, dump: bool, objects: bool, j
     if (dump) try dumpContainerEntries(arena, b.nodes, "node", true, stdout);
 }
 
-fn printSerialized(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
-    _ = path;
+fn printSerialized(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

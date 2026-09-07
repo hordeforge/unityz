@@ -2185,6 +2185,13 @@ pub const Mesh = struct {
     }
 };
 
+/// Appends `v` as a little-endian `T` to a fixture buffer, via the caller's
+/// scratch bytes.
+fn putInt(list: *std.ArrayList(u8), b: []u8, comptime T: type, v: T) !void {
+    std.mem.writeInt(T, b[0..@sizeOf(T)], v, .little);
+    try list.appendSlice(std.testing.allocator, b[0..@sizeOf(T)]);
+}
+
 test "monoscript full name trims the trailing nul" {
     const ms = MonoScript{
         .namespace = "MyGame\x00",
@@ -2522,12 +2529,6 @@ test "font fromRaw parses the serialized 5.5+ layout" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     var tmp: [8]u8 = undefined;
-    const putInt = struct {
-        fn put(list: *std.ArrayList(u8), b: []u8, comptime T: type, v: T) !void {
-            std.mem.writeInt(T, b[0..@sizeOf(T)], v, .little);
-            try list.appendSlice(std.testing.allocator, b[0..@sizeOf(T)]);
-        }
-    }.put;
     // m_Name: "TestFont" (8 chars; 4 + 8 = 12 is already 4-aligned)
     try putInt(&buf, &tmp, i32, 8);
     try buf.appendSlice(std.testing.allocator, "TestFont");
@@ -2594,12 +2595,6 @@ test "font fromRaw: 5.x fonts end before m_ShouldRoundAdvanceValue" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     var tmp: [8]u8 = undefined;
-    const putInt = struct {
-        fn put(list: *std.ArrayList(u8), b: []u8, comptime T: type, v: T) !void {
-            std.mem.writeInt(T, b[0..@sizeOf(T)], v, .little);
-            try list.appendSlice(std.testing.allocator, b[0..@sizeOf(T)]);
-        }
-    }.put;
     // Same body as the modern-layout test, minus the trailing
     // m_ShouldRoundAdvanceValue byte.
     try putInt(&buf, &tmp, i32, 8);
@@ -2728,12 +2723,6 @@ test "computeShader fromRaw parses the serialized 2017+ layout" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     var tmp: [8]u8 = undefined;
-    const putInt = struct {
-        fn put(list: *std.ArrayList(u8), b: []u8, comptime T: type, v: T) !void {
-            std.mem.writeInt(T, b[0..@sizeOf(T)], v, .little);
-            try list.appendSlice(std.testing.allocator, b[0..@sizeOf(T)]);
-        }
-    }.put;
     try putInt(&buf, &tmp, i32, 6); // m_Name "TestCS" (4 + 6 = 10, pad 2)
     try buf.appendSlice(std.testing.allocator, "TestCS");
     try buf.appendSlice(std.testing.allocator, &.{ 0, 0 });

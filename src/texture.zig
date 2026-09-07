@@ -3977,48 +3977,12 @@ fn decodeEtc2Rgba1Block(out: []u8, w: usize, h: usize, bx: usize, by: usize, bit
     const db: i32 = @as(i32, (d[2] << 3) & 0x18) - @as(i32, (d[2] << 3) & 0x20);
 
     if (r + dr < 0 or r + dr > 255) {
-        // T mode
-        const c1 = [3]u8{
-            (d[0] << 3 & 0xc0) | (d[0] << 4 & 0x30) | (d[0] >> 1 & 0xc) | (d[0] & 3),
-            (d[1] & 0xf0) | d[1] >> 4,
-            (d[1] & 0x0f) | d[1] << 4,
-        };
-        const c2 = [3]u8{
-            (d[2] & 0xf0) | d[2] >> 4,
-            (d[2] & 0x0f) | d[2] << 4,
-            (d[3] & 0xf0) | d[3] >> 4,
-        };
-        const dist: usize = (d[3] >> 1 & 6) | (d[3] & 1);
-        const dd: i32 = etcDistanceTable[dist];
-        const paints = [4][3]u8{
-            c1,
-            .{ clampByte(@as(i32, c2[0]) + dd), clampByte(@as(i32, c2[1]) + dd), clampByte(@as(i32, c2[2]) + dd) },
-            c2,
-            .{ clampByte(@as(i32, c2[0]) - dd), clampByte(@as(i32, c2[1]) - dd), clampByte(@as(i32, c2[2]) - dd) },
-        };
+        const paints = etcTPaints(d);
         paintFourA1(out, w, h, bx, by, bits, &paints, obaq);
         return;
     }
     if (g + dg < 0 or g + dg > 255) {
-        // H mode
-        const c1r = (d[0] << 1 & 0xf0) | (d[0] >> 3 & 0xf);
-        var c1g = (d[0] << 5 & 0xe0) | (d[1] & 0x10);
-        c1g |= c1g >> 4;
-        var c1b = (d[1] & 8) | (d[1] << 1 & 6) | d[2] >> 7;
-        c1b |= c1b << 4;
-        const c2r = (d[2] << 1 & 0xf0) | (d[2] >> 3 & 0xf);
-        var c2g = (d[2] << 5 & 0xe0) | (d[3] >> 3 & 0x10);
-        c2g |= c2g >> 4;
-        const c2b = (d[3] << 1 & 0xf0) | (d[3] >> 3 & 0xf);
-        var di: u8 = (d[3] & 4) | (d[3] << 1 & 2);
-        if (c1r > c2r or (c1r == c2r and (c1g > c2g or (c1g == c2g and c1b >= c2b)))) di += 1;
-        const dd: i32 = etcDistanceTable[di];
-        const paints = [4][3]u8{
-            .{ clampByte(@as(i32, c1r) + dd), clampByte(@as(i32, c1g) + dd), clampByte(@as(i32, c1b) + dd) },
-            .{ clampByte(@as(i32, c1r) - dd), clampByte(@as(i32, c1g) - dd), clampByte(@as(i32, c1b) - dd) },
-            .{ clampByte(@as(i32, c2r) + dd), clampByte(@as(i32, c2g) + dd), clampByte(@as(i32, c2b) + dd) },
-            .{ clampByte(@as(i32, c2r) - dd), clampByte(@as(i32, c2g) - dd), clampByte(@as(i32, c2b) - dd) },
-        };
+        const paints = etcHPaints(d);
         paintFourA1(out, w, h, bx, by, bits, &paints, obaq);
         return;
     }
@@ -4094,11 +4058,13 @@ fn decodeEtcBlock(out: []u8, w: usize, h: usize, bx: usize, by: usize, bits: u64
     if (kind == .etc2) {
         // ETC2 mode selection: the first sum outside [0,31] picks the mode
         if (r + dr < 0 or r + dr > 255) {
-            decodeEtcT(out, w, h, bx, by, bits, d);
+            const paints = etcTPaints(d);
+            paintFour(out, w, h, bx, by, bits, &paints);
             return;
         }
         if (g + dg < 0 or g + dg > 255) {
-            decodeEtcH(out, w, h, bx, by, bits, d);
+            const paints = etcHPaints(d);
+            paintFour(out, w, h, bx, by, bits, &paints);
             return;
         }
         if (b + db < 0 or b + db > 255) {
@@ -4293,11 +4259,11 @@ fn etcModifier(table: u3, idx: u2) i32 {
     };
 }
 
-/// ETC2 T-mode: one base color plus a second base color offset by a
-/// luminance distance. Base colors are 4-bit per channel, stored
-/// non-sequentially; the distance index uses the low two table bits and
-/// the flip-bit position.
-fn decodeEtcT(out: []u8, w: usize, h: usize, bx: usize, by: usize, bits: u64, d: [8]u8) void {
+/// The four paint colors of an ETC2 T-mode block: one base color plus a
+/// second base color offset by a luminance distance. Base colors are 4-bit
+/// per channel, stored non-sequentially; the distance index uses the low two
+/// table bits and the flip-bit position.
+fn etcTPaints(d: [8]u8) [4][3]u8 {
     const c1 = [3]u8{
         (d[0] << 3 & 0xc0) | (d[0] << 4 & 0x30) | (d[0] >> 1 & 0xc) | (d[0] & 3),
         (d[1] & 0xf0) | d[1] >> 4,
@@ -4310,18 +4276,18 @@ fn decodeEtcT(out: []u8, w: usize, h: usize, bx: usize, by: usize, bits: u64, d:
     };
     const dist: usize = (d[3] >> 1 & 6) | (d[3] & 1);
     const dd: i32 = etcDistanceTable[dist];
-    const paints = [4][3]u8{
+    return .{
         c1,
         .{ clampByte(@as(i32, c2[0]) + dd), clampByte(@as(i32, c2[1]) + dd), clampByte(@as(i32, c2[2]) + dd) },
         c2,
         .{ clampByte(@as(i32, c2[0]) - dd), clampByte(@as(i32, c2[1]) - dd), clampByte(@as(i32, c2[2]) - dd) },
     };
-    paintFour(out, w, h, bx, by, bits, &paints);
 }
 
-/// ETC2 H-mode: two base colors with 4-bit channels in a scattered
-/// layout; the distance index is (da, db) plus a comparison bit.
-fn decodeEtcH(out: []u8, w: usize, h: usize, bx: usize, by: usize, bits: u64, d: [8]u8) void {
+/// The four paint colors of an ETC2 H-mode block: two base colors with 4-bit
+/// channels in a scattered layout; the distance index is (da, db) plus a
+/// comparison bit.
+fn etcHPaints(d: [8]u8) [4][3]u8 {
     const c1r = (d[0] << 1 & 0xf0) | (d[0] >> 3 & 0xf);
     var c1g = (d[0] << 5 & 0xe0) | (d[1] & 0x10);
     c1g |= c1g >> 4;
@@ -4336,13 +4302,12 @@ fn decodeEtcH(out: []u8, w: usize, h: usize, bx: usize, by: usize, bits: u64, d:
     // (compared as (R<<16)|(G<<8)|B, i.e. lexicographic R,G,B)
     if (c1r > c2r or (c1r == c2r and (c1g > c2g or (c1g == c2g and c1b >= c2b)))) di += 1;
     const dd: i32 = etcDistanceTable[di];
-    const paints = [4][3]u8{
+    return .{
         .{ clampByte(@as(i32, c1r) + dd), clampByte(@as(i32, c1g) + dd), clampByte(@as(i32, c1b) + dd) },
         .{ clampByte(@as(i32, c1r) - dd), clampByte(@as(i32, c1g) - dd), clampByte(@as(i32, c1b) - dd) },
         .{ clampByte(@as(i32, c2r) + dd), clampByte(@as(i32, c2g) + dd), clampByte(@as(i32, c2b) + dd) },
         .{ clampByte(@as(i32, c2r) - dd), clampByte(@as(i32, c2g) - dd), clampByte(@as(i32, c2b) - dd) },
     };
-    paintFour(out, w, h, bx, by, bits, &paints);
 }
 
 fn paintFour(out: []u8, w: usize, h: usize, bx: usize, by: usize, bits: u64, paints: *const [4][3]u8) void {

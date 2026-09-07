@@ -323,9 +323,9 @@ fn tableRowSize(t: u32, counts: [64]u32, heaps: *const Heaps) u32 {
     const type_or_method_def = maxCount(counts, &.{ 0x02, tables.methoddef });
     const method_def_or_ref = maxCount(counts, &.{ tables.methoddef, tables.memberref });
     const resolution_scope = maxCount(counts, &.{ 0x00, 0x1a, 0x23, 0x01 });
-    const member_ref_parent = maxCount(counts, &.{ 0x02, 0x01, 0x1a, tables.methoddef, 0x1b });
+    const member_ref_parent = maxCount(counts, &member_ref_parent_tag_tables);
     const has_constant = maxCount(counts, &.{ 0x04, 0x08, 0x17 });
-    const has_custom_attr = maxCount(counts, &.{ 0x06, 0x04, 0x01, 0x02, 0x08, 0x09, 0x0a, 0x00, 0x0e, 0x17, 0x14, 0x11, 0x1a, 0x1b, 0x20, 0x23, 0x26, 0x27, 0x28, 0x2a, 0x2c, 0x2b });
+    const has_custom_attr = maxCount(counts, &has_custom_attr_tag_tables);
     const has_field_marshal = maxCount(counts, &.{ 0x04, 0x08 });
     const has_decl_security = maxCount(counts, &.{ 0x02, tables.methoddef, 0x20 });
     const has_semantics = maxCount(counts, &.{ 0x14, 0x17 });
@@ -467,7 +467,7 @@ fn resolveTypeName(arena: std.mem.Allocator, coded: u32, td: *const TableData, h
         1 => { // TypeRef
             if (row == 0 or row > td.row_counts[tables.typeref]) return arena.dupe(u8, "?TypeRef");
             var r = rowReader(td, tables.typeref, row);
-            try r.skip(codedSize(resolutionScopeMaxFromHeaps(heaps), 2));
+            try r.skip(codedSize(resolutionScopeMax(td.row_counts), 2));
             const name = try readString(&r, heaps);
             const ns = try readString(&r, heaps);
             return if (ns.len != 0) std.fmt.allocPrint(arena, "{s}.{s}", .{ ns, name }) else arena.dupe(u8, name);
@@ -485,10 +485,6 @@ fn typeSpecBlob(td: *const TableData, heaps: *const Heaps, row: u32) Error![]con
     // TypeSpec row: one blob index (sized like a blob heap index).
     var r = rowReader(td, tables.typespec, row);
     return readBlob(&r, heaps);
-}
-
-fn resolutionScopeMaxFromHeaps(heaps: *const Heaps) u32 {
-    return @max(@max(heaps.table_counts[0x00], heaps.table_counts[0x1a]), @max(heaps.table_counts[tables.assemblyref], heaps.table_counts[tables.typeref]));
 }
 
 /// Reads one type from a signature cursor and names it. Handles primitives,
@@ -770,7 +766,7 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
         var ci: u32 = 0;
         while (ci < table_data.row_counts[tables.customattr]) : (ci += 1) {
             var cr = rowReader(&table_data, tables.customattr, ci + 1);
-            const parent = try readCoded(&cr, 5, &hasCustomAttrTagTables(), &heaps);
+            const parent = try readCoded(&cr, 5, &has_custom_attr_tag_tables, &heaps);
             const tag = parent & 0x1f;
             const trow = parent >> 5;
             if (tag == 1) { // Field parent
@@ -804,14 +800,10 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
 
 /// The tables tagged by the HasCustomAttribute coded index (5 bits), for
 /// sizing. The 22-entry list follows ECMA-335 II.24.2.6.
-fn hasCustomAttrTagTables() [22]u32 {
-    return .{ 0x06, 0x04, 0x01, 0x02, 0x08, 0x09, 0x0a, 0x00, 0x0e, 0x17, 0x14, 0x11, 0x1a, 0x1b, 0x20, 0x23, 0x26, 0x27, 0x28, 0x2a, 0x2c, 0x2b };
-}
+const has_custom_attr_tag_tables = [_]u32{ 0x06, 0x04, 0x01, 0x02, 0x08, 0x09, 0x0a, 0x00, 0x0e, 0x17, 0x14, 0x11, 0x1a, 0x1b, 0x20, 0x23, 0x26, 0x27, 0x28, 0x2a, 0x2c, 0x2b };
 
 /// The tables tagged by the MemberRefParent coded index (3 bits).
-fn memberRefParentTagTables() [5]u32 {
-    return .{ tables.typedef, tables.typeref, 0x1a, tables.methoddef, tables.typespec };
-}
+const member_ref_parent_tag_tables = [_]u32{ tables.typedef, tables.typeref, 0x1a, tables.methoddef, tables.typespec };
 
 /// Resolves a CustomAttributeType coded value to the attribute class's full
 /// name: MethodDef (the .ctor lives in this assembly) or MemberRef (the
@@ -846,7 +838,7 @@ fn resolveAttributeName(
         3 => { // MemberRef: its Class names the attribute type
             if (row == 0 or row > td.row_counts[tables.memberref]) return null;
             var mr = rowReader(td, tables.memberref, row);
-            const cls = try readCoded(&mr, 3, &memberRefParentTagTables(), heaps);
+            const cls = try readCoded(&mr, 3, &member_ref_parent_tag_tables, heaps);
             const ct = cls & 0x7;
             const crow = cls >> 3;
             if (ct == 0) { // TypeDef
