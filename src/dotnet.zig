@@ -941,6 +941,74 @@ test "elementTypeName maps the CLR primitives" {
     try std.testing.expectEqualStrings("", elementTypeName(element.class));
 }
 
+test "rvaToOffset rejects sections whose arithmetic leaves the file" {
+    // Section virtual addresses, raw sizes and raw offsets are all
+    // unvalidated u32s out of the PE section table, and the result is used
+    // to slice the assembly bytes.
+    const file_len: usize = 0x1000;
+    const ok = [_]Section{.{ .virtual_address = 0x2000, .raw_offset = 0x200, .raw_size = 0x400 }};
+    try std.testing.expectEqual(@as(?usize, 0x200), rvaToOffset(0x2000, &ok, file_len));
+    try std.testing.expectEqual(@as(?usize, 0x2ff), rvaToOffset(0x20ff, &ok, file_len));
+    // rva at the section's virtual end is outside it, so no section covers
+    // it: the range is [virtual_address, virtual_address + raw_size).
+    try std.testing.expectEqual(@as(?usize, null), rvaToOffset(0x2400, &ok, file_len));
+    try std.testing.expectEqual(@as(?usize, null), rvaToOffset(0x1fff, &ok, file_len));
+
+    // A section whose virtual_address + raw_size overflows u32 must be
+    // skipped rather than wrapping into a range that swallows every rva.
+    const wrap_end = [_]Section{
+        .{ .virtual_address = 0xffff_f000, .raw_offset = 0, .raw_size = 0xffff_ffff },
+        .{ .virtual_address = 0x2000, .raw_offset = 0x200, .raw_size = 0x400 },
+    };
+    try std.testing.expectEqual(@as(?usize, null), rvaToOffset(0x10, &wrap_end, file_len));
+    // ...and skipping it must not skip the section that really does cover
+    // the rva, which is what `continue` (not `return null`) is there for.
+    try std.testing.expectEqual(@as(?usize, 0x200), rvaToOffset(0x2000, &wrap_end, file_len));
+
+    // raw_offset + (rva - virtual_address) overflowing u32.
+    const wrap_off = [_]Section{.{ .virtual_address = 0, .raw_offset = 0xffff_ffff, .raw_size = 0x100 }};
+    try std.testing.expectEqual(@as(?usize, null), rvaToOffset(0x10, &wrap_off, file_len));
+
+    // In-range arithmetic that lands past the end of the file: raw_offset
+    // is not bounded by the PE header, so the caller would slice past it.
+    const past_eof = [_]Section{.{ .virtual_address = 0x2000, .raw_offset = 0xfff, .raw_size = 0x400 }};
+    try std.testing.expectEqual(@as(?usize, 0xfff), rvaToOffset(0x2000, &past_eof, file_len));
+    try std.testing.expectEqual(@as(?usize, file_len), rvaToOffset(0x2001, &past_eof, file_len));
+    try std.testing.expectEqual(@as(?usize, null), rvaToOffset(0x2002, &past_eof, file_len));
+}
+
+test "rowReader clamps rows the #~ stream is too short to hold" {
+    // row_sizes/offsets come from the `#~` header while `bytes` is however
+    // much of the stream is actually present, so a declared-but-absent row
+    // must yield a reader that fails on its first read, never an invalid
+    // slice.
+    // Each byte equals its own index, so a reader's first byte names the
+    // offset it was positioned at.
+    const stream = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var td = TableData{ .bytes = &stream };
+    td.offsets[tables.typedef] = 4;
+    td.row_sizes[tables.typedef] = 4;
+    td.row_counts[tables.typedef] = 2;
+
+    // rows are 1-based: row 1 starts at the table offset.
+    var r1 = rowReader(&td, tables.typedef, 1);
+    try std.testing.expectEqual(@as(u8, 4), try r1.readByte());
+    var r2 = rowReader(&td, tables.typedef, 2);
+    try std.testing.expectEqual(@as(u8, 8), try r2.readByte());
+    // a whole row and no more, so a row's reads cannot bleed into the next
+    try std.testing.expectError(error.OutOfBounds, r2.skip(5));
+
+    // Row 3 begins exactly at the end: an empty reader, not a wild slice.
+    var r3 = rowReader(&td, tables.typedef, 3);
+    try std.testing.expectError(error.OutOfBounds, r3.readByte());
+    // A row far past the end clamps instead of computing an out-of-range
+    // start, and row 0 saturates to row 1 rather than underflowing.
+    var r_far = rowReader(&td, tables.typedef, 0xffff_ffff);
+    try std.testing.expectError(error.OutOfBounds, r_far.readByte());
+    var r_zero = rowReader(&td, tables.typedef, 0);
+    try std.testing.expectEqual(@as(u8, 4), try r_zero.readByte());
+}
+
 test "parseTableStream sizes rows and offsets" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

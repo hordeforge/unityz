@@ -2209,6 +2209,38 @@ test "monoscript full name trims the trailing nul" {
     try std.testing.expectEqualStrings("", ms3.fullName());
 }
 
+test "TextAsset reads m_Script whether the reader typed it string or bytes" {
+    // Unity declares `m_Script` as `string`, so object_reader hands back a
+    // `.string`; only a TypelessData/byte-array layout arrives as `.bytes`.
+    // Both shapes have to reach `script`, or `extract` writes a 0-byte file
+    // for every real TextAsset.
+    const as_string = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "notes" } },
+        .{ .name = "m_Script", .value = .{ .string = "hello\nworld" } },
+    } };
+    const ta = TextAsset.fromValue(as_string);
+    try std.testing.expectEqualStrings("notes", ta.name);
+    try std.testing.expectEqualStrings("hello\nworld", ta.script);
+
+    const as_bytes = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "blob" } },
+        .{ .name = "m_Script", .value = .{ .bytes = "\x00\x01\xff" } },
+    } };
+    const tb = TextAsset.fromValue(as_bytes);
+    try std.testing.expectEqualStrings("blob", tb.name);
+    try std.testing.expectEqualSlices(u8, "\x00\x01\xff", tb.script);
+
+    // A field of some other type, or none at all, yields an empty script
+    // rather than a wrong-typed slice.
+    const wrong_type = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Script", .value = .{ .int = 7 } },
+    } };
+    try std.testing.expectEqualStrings("", TextAsset.fromValue(wrong_type).script);
+    const absent = value.Value{ .obj = &[_]value.Field{} };
+    try std.testing.expectEqualStrings("", TextAsset.fromValue(absent).script);
+    try std.testing.expectEqualStrings("", TextAsset.fromValue(absent).name);
+}
+
 test "typed views extract fields from a generic value" {
     var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer view_arena.deinit();

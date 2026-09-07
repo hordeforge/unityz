@@ -441,6 +441,60 @@ test "block flags parse a synthetic setup header" {
     try std.testing.expectEqual(@as(u32, 0), f.blockSize(&p2));
 }
 
+test "rebuildOgg rejects a wrapping data offset and skips unknown setups" {
+    const a = std.testing.allocator;
+    // `data_start` and `data_offset` are both file-supplied u32s, so their
+    // sum has to be taken in usize: as a u32 add, 0xfffffff0 + 32 wraps
+    // back to 16 and the bounds check below it would pass, slicing the
+    // packet stream out of the middle of the bank.
+    const raw = [_]u8{0} ** 64;
+    const known = fsb5.Sample{
+        .data_offset = 0xffff_fff0,
+        .sample_count = 4,
+        .channels = 1,
+        .frequency = 8000,
+        .vorbis_crc = headers.crcs[0],
+    };
+    try std.testing.expectError(error.Corrupt, rebuildOgg(a, &raw, 32, known));
+    // The transition: `start == raw.len` is the inclusive boundary and must
+    // not be rejected, so the error above is the bound firing and not the
+    // catalogued setup header failing to parse.
+    const at_end = try rebuildOgg(a, &raw, 0, .{
+        .data_offset = raw.len,
+        .sample_count = 4,
+        .channels = 1,
+        .frequency = 8000,
+        .vorbis_crc = headers.crcs[0],
+    });
+    try std.testing.expect(at_end != null);
+    a.free(at_end.?);
+    // One byte past it is not.
+    try std.testing.expectError(error.Corrupt, rebuildOgg(a, &raw, 0, .{
+        .data_offset = raw.len + 1,
+        .sample_count = 4,
+        .channels = 1,
+        .frequency = 8000,
+        .vorbis_crc = headers.crcs[0],
+    }));
+
+    // A bank whose setup header is not catalogued is not an error: the
+    // caller falls back to another extraction path, so it must see null.
+    try std.testing.expectEqual(@as(?[]u8, null), try rebuildOgg(a, &raw, 0, .{
+        .data_offset = 0,
+        .sample_count = 4,
+        .channels = 1,
+        .frequency = 8000,
+        .vorbis_crc = 0,
+    }));
+    // Likewise a non-Vorbis sample, which carries no VORBISDATA crc.
+    try std.testing.expectEqual(@as(?[]u8, null), try rebuildOgg(a, &raw, 0, .{
+        .data_offset = 0,
+        .sample_count = 4,
+        .channels = 1,
+        .frequency = 8000,
+    }));
+}
+
 test "ogg stream page framing" {
     const a = std.testing.allocator;
     var s = OggStream.init(a, 7);

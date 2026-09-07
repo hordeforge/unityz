@@ -382,4 +382,51 @@ test "jsonParse rejects malformed input" {
     try std.testing.expectError(error.BadObject, jsonParse(a, "{1:2}"));
     try std.testing.expectError(error.UnterminatedArray, jsonParse(a, "[1"));
     try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\ud800\""));
+    // lone low surrogate, and a high surrogate whose partner is not one
+    try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\udc00\""));
+    try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\ud800\\u0041\""));
+    // a truncated \uXXXX escape must not read past the end of the text
+    try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\u12\""));
+    try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\uzzzz\""));
+    try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\q\""));
+}
+
+test "jsonParse decodes surrogate pairs and bounds nesting depth" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // A patch file is untrusted text, so the pair has to decode rather than
+    // land in the tree as two escapes: U+1F600 as the pair d83d/de00.
+    const pair = try jsonParse(a, "\"a\\ud83d\\ude00b\"");
+    try std.testing.expectEqualStrings("a\u{1f600}b", pair.string);
+    // A BMP escape decodes to its UTF-8 bytes, not to the literal escape.
+    const bmp = try jsonParse(a, "\"\\u00e9\\u0000\"");
+    try std.testing.expectEqualSlices(u8, "\xc3\xa9\x00", bmp.string);
+
+    // `jsonParseValue` recurses once per `[`/`{`, so the depth bound is what
+    // keeps a hostile patch from overflowing the stack instead of reporting
+    // a bad patch. Well inside the bound still parses.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    const ok_depth = max_json_depth / 2;
+    try buf.appendNTimes(a, '[', ok_depth);
+    try buf.appendNTimes(a, ']', ok_depth);
+    var deep = try jsonParse(a, buf.items);
+    var levels: u32 = 1;
+    while (deep.array.len == 1) : (levels += 1) deep = deep.array[0];
+    try std.testing.expectEqual(ok_depth, levels);
+
+    // Past it, the parser reports TooDeep rather than recursing.
+    buf.clearRetainingCapacity();
+    const bad_depth = max_json_depth + 2;
+    try buf.appendNTimes(a, '[', bad_depth);
+    try buf.appendNTimes(a, ']', bad_depth);
+    try std.testing.expectError(error.TooDeep, jsonParse(a, buf.items));
+    // Objects recurse through the same counter.
+    buf.clearRetainingCapacity();
+    for (0..bad_depth) |_| try buf.appendSlice(a, "{\"a\":");
+    try buf.appendSlice(a, "1");
+    try buf.appendNTimes(a, '}', bad_depth);
+    try std.testing.expectError(error.TooDeep, jsonParse(a, buf.items));
 }

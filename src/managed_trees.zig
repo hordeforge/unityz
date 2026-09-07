@@ -667,6 +667,49 @@ pub fn writeJsonString(w: anytype, s: []const u8) !void {
 // Tests
 // ---------------------------------------------------------------------------
 
+test "nodesToJson emits parseable JSON and escapes hostile names" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const nodes = [_]typetree.Node{
+        .{ .level = 0, .type_name = "MonoBehaviour", .name = "Base", .meta_flags = 32768 },
+        .{ .level = 1, .type_name = "int", .name = "m_Count", .byte_size = 4, .index = 1, .type_flags = 0, .version = 1, .meta_flags = 0x4101 },
+    };
+    const json = try nodesToJson(a, &nodes);
+    try std.testing.expectEqualStrings(
+        "[{\"m_Type\":\"MonoBehaviour\",\"m_Name\":\"Base\",\"m_Level\":0,\"m_MetaFlag\":32768," ++
+            "\"m_ByteSize\":0,\"m_Version\":0,\"m_TypeFlags\":0,\"m_Index\":0}," ++
+            "{\"m_Type\":\"int\",\"m_Name\":\"m_Count\",\"m_Level\":1,\"m_MetaFlag\":16641," ++
+            "\"m_ByteSize\":4,\"m_Version\":1,\"m_TypeFlags\":0,\"m_Index\":1}]",
+        json,
+    );
+
+    // Type and field names come out of an assembly's #Strings heap, so a
+    // quote, a backslash or a C0 control in one must not break the JSON the
+    // `--trees` reader has to parse back. Round-tripping through the
+    // library's own parser is the contract, not just the byte shape.
+    const hostile = [_]typetree.Node{
+        .{ .level = 0, .type_name = "My\"Class\\", .name = "a\tb\nc\x01", .meta_flags = 1 },
+    };
+    const hostile_json = try nodesToJson(a, &hostile);
+    try std.testing.expectEqualStrings(
+        "[{\"m_Type\":\"My\\\"Class\\\\\",\"m_Name\":\"a\\tb\\nc\\u0001\",\"m_Level\":0," ++
+            "\"m_MetaFlag\":1,\"m_ByteSize\":0,\"m_Version\":0,\"m_TypeFlags\":0,\"m_Index\":0}]",
+        hostile_json,
+    );
+    const parsed = try value.jsonParse(a, hostile_json);
+    try std.testing.expectEqual(@as(usize, 1), parsed.array.len);
+    const fields = parsed.array[0].obj;
+    try std.testing.expectEqualStrings("My\"Class\\", value.fieldOf(parsed.array[0], "m_Type").?.string);
+    try std.testing.expectEqualStrings("a\tb\nc\x01", value.fieldOf(parsed.array[0], "m_Name").?.string);
+    // Every node carries the full eight-key shape the reader expects.
+    try std.testing.expectEqual(@as(usize, 8), fields.len);
+
+    // An empty node list is the empty array, not the empty string.
+    try std.testing.expectEqualStrings("[]", try nodesToJson(a, &.{}));
+}
+
 test "markSmallRunAlignment: bools and nested bytes get cells, top-level bytes pack" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

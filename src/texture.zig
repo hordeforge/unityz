@@ -3517,6 +3517,18 @@ test "unsupported format and bad size" {
     try std.testing.expectError(error.UnsupportedFormat, decode(a, 0, 4, 4, "abcdefgh"));
     try std.testing.expectError(error.BadSize, decode(a, format.rgba32, 2, 2, "short"));
     try std.testing.expectError(error.BadSize, decode(a, format.bc7, 4, 4, "short"));
+
+    // Dimensions come from the file, and `expectedSize` is reached directly
+    // (main.zig's mip-0 sizing) as well as through `decode`. Both guards it
+    // applies must report "unusable" rather than wrap: the pixel count
+    // itself overflowing the multiply, and a pixel count that fits but
+    // whose widest 16-byte stride does not.
+    try std.testing.expectEqual(@as(?usize, null), expectedSize(format.rgba_float, 0x8000_0000, 0x8000_0000));
+    try std.testing.expectEqual(@as(?usize, null), expectedSize(format.rgba32, 0xffff_ffff, 0xffff_ffff));
+    try std.testing.expectError(error.BadSize, decode(a, format.rgba_float, 0x8000_0000, 0x8000_0000, "abcdefgh"));
+    try std.testing.expectError(error.BadSize, decode(a, format.rgba32, 0xffff_ffff, 0xffff_ffff, "abcdefgh"));
+    // Just under the stride bound the size is still computed, not rejected.
+    try std.testing.expectEqual(@as(?usize, 4096 * 4096 * 16), expectedSize(format.rgba_float, 4096, 4096));
 }
 
 const A1Vector = struct {
