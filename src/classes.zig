@@ -1007,6 +1007,11 @@ fn readPPtr(r: *streams.Reader) !value.PPtr {
 fn readStringArray(allocator: std.mem.Allocator, r: *streams.Reader) ![]const []const u8 {
     const count = try r.readInt(i32);
     if (count <= 0) return &.{};
+    // The count is file-supplied and every entry costs at least its 4-byte
+    // length prefix, so a count past the remaining bytes is corrupt: reject
+    // it before it sizes an allocation (a 10-byte blob claiming 2 billion
+    // strings would otherwise ask for tens of gigabytes).
+    if (@as(usize, @intCast(count)) > r.remaining()) return error.Malformed;
     const out = try allocator.alloc([]const u8, @intCast(count));
     errdefer allocator.free(out);
     for (out) |*s| {
@@ -1019,6 +1024,10 @@ fn readStringArray(allocator: std.mem.Allocator, r: *streams.Reader) ![]const []
 fn readPPtrArray(allocator: std.mem.Allocator, r: *streams.Reader) ![]const value.PPtr {
     const count = try r.readInt(i32);
     if (count <= 0) return &.{};
+    // Same bound as `readStringArray`: each PPtr occupies 12 wire bytes, so
+    // a count past what is left cannot be honoured and must not size an
+    // allocation.
+    if (@as(usize, @intCast(count)) > r.remaining()) return error.Malformed;
     const out = try allocator.alloc(value.PPtr, @intCast(count));
     errdefer allocator.free(out);
     for (out) |*p| {
@@ -1692,7 +1701,10 @@ pub fn readSpriteTriangles(arena: std.mem.Allocator, rd: value.Value) ?[]const u
         if (f == .array and f.array.len > 0) {
             const n = f.array.len;
             const tris = arena.alloc(u32, n) catch return null;
-            for (f.array, 0..) |x, i| tris[i] = @intCast(x.asInt() orelse @as(i64, 0));
+            // Index values are file-supplied: a negative or oversized one
+            // must narrow to 0 (a degenerate triangle the renderers skip)
+            // instead of making the cast illegal behaviour.
+            for (f.array, 0..) |x, i| tris[i] = narrow(u32, x.asInt() orelse @as(i64, 0));
             return tris;
         }
     }
@@ -2112,11 +2124,16 @@ pub const Mesh = struct {
             for (self.channelSlice()) |c| {
                 if (c.dimension == 0 or c.stream != s) continue;
                 const fs = formatSize(c.format) orelse return null;
-                max_end = @max(max_end, @as(usize, c.offset) + @as(usize, c.dimension) * fs);
+                max_end = @max(max_end, @as(usize, c.offset) +| fs *| @as(usize, c.dimension));
             }
-            const stream_stride = (max_end + 3) / 4 * 4;
+            const stream_stride = (max_end +| 3) / 4 * 4;
             out[s] = .{ .offset = offset, .stride = stream_stride };
-            offset = (offset + vcount * stream_stride + 15) / 16 * 16;
+            // vertex_count, offset and dimension are raw u32s from the
+            // file, and their product overflows usize long before it is
+            // a plausible layout; saturate as `stride` does so a bogus
+            // mesh yields an unreachable offset the callers' bounds check
+            // rejects, instead of trapping on the multiply.
+            offset = (offset +| vcount *| stream_stride +| 15) / 16 * 16;
         }
         return max_stream + 1;
     }
@@ -2131,7 +2148,7 @@ pub const Mesh = struct {
         const nstreams = self.streamLayout(&layout) orelse return null;
         if (@as(usize, c.stream) >= nstreams) return null;
         const st = layout[c.stream];
-        return st.offset + @as(usize, c.offset) + vertex * st.stride;
+        return st.offset +| @as(usize, c.offset) +| vertex *| st.stride;
     }
 
     /// Size in bytes of one component for a `VertexChannelFormat` value.

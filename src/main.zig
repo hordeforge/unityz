@@ -3214,23 +3214,35 @@ fn decodeSpriteTextureUncached(
 /// rules as a Mesh object.
 const ChannelMesh = struct { positions: []const [3]f32, uvs: []const [2]f32 };
 
+/// Narrows an untrusted type-tree integer to `T`, yielding 0 for a missing
+/// field and for one that does not fit. Field values come from the file, so
+/// a negative or oversized integer has to degrade rather than make
+/// `@intCast` illegal behaviour (`classes.narrow` does the same inside the
+/// class decoders).
+fn narrowField(comptime T: type, v: ?i64) T {
+    return std.math.cast(T, v orelse 0) orelse 0;
+}
+
 fn readChannelMesh(
     arena: std.mem.Allocator,
     vd: unityz.value.Value,
     sf: *const unityz.serialized.SerializedFile,
 ) ?ChannelMesh {
     var m = unityz.classes.Mesh{};
-    m.vertex_count = @intCast(unityz.classes.intField(vd, "m_VertexCount") orelse 0);
+    // The counts and channel descriptors come straight off the wire, so a
+    // negative or oversized value must degrade to 0 the way a missing
+    // field does; a bare @intCast on one is illegal behaviour.
+    m.vertex_count = narrowField(u32, unityz.classes.intField(vd, "m_VertexCount"));
     m.vertex_data = unityz.classes.bytesField(vd, "m_DataSize") orelse "";
     if (unityz.classes.fieldOf(vd, "m_Channels")) |chans| {
         if (chans == .array) {
             const n = @min(chans.array.len, m.channels.len);
             for (chans.array[0..n], 0..) |c, i| {
                 m.channels[i] = .{
-                    .stream = @intCast(unityz.classes.intField(c, "stream") orelse 0),
-                    .offset = @intCast(unityz.classes.intField(c, "offset") orelse 0),
-                    .format = @intCast(unityz.classes.intField(c, "format") orelse 0),
-                    .dimension = @intCast(unityz.classes.intField(c, "dimension") orelse 0),
+                    .stream = narrowField(u32, unityz.classes.intField(c, "stream")),
+                    .offset = narrowField(u32, unityz.classes.intField(c, "offset")),
+                    .format = narrowField(i32, unityz.classes.intField(c, "format")),
+                    .dimension = narrowField(u32, unityz.classes.intField(c, "dimension")),
                 };
             }
             m.channel_count = n;
@@ -3415,7 +3427,7 @@ fn meshF32(
     const c = mesh.channel(channel_index) orelse return null;
     if (c.format != 0 or comp >= c.dimension) return null;
     const off = mesh.channelByteOffset(channel_index, vertex) orelse return null;
-    if (off + (comp + 1) * 4 > mesh.vertex_data.len) return null;
+    if (off +| (comp + 1) * 4 > mesh.vertex_data.len) return null;
     return readF32(mesh.vertex_data, off + comp * 4, endian);
 }
 
@@ -3433,7 +3445,7 @@ fn meshU32(
     if (comp >= c.dimension) return null;
     const fs = unityz.classes.Mesh.formatSize(c.format) orelse return null;
     const off = mesh.channelByteOffset(channel_index, vertex) orelse return null;
-    if (off + (comp + 1) * fs > mesh.vertex_data.len) return null;
+    if (off +| (comp + 1) * fs > mesh.vertex_data.len) return null;
     const b = mesh.vertex_data[off + comp * fs ..];
     return switch (c.format) {
         6, 8, 10 => switch (fs) {
@@ -5464,7 +5476,10 @@ fn asPPtr(v: unityz.value.Value) ?unityz.value.PPtr {
             var seen = false;
             for (fields) |f| {
                 if (std.mem.eql(u8, f.name, "m_FileID")) {
-                    file = @intCast(f.value.asInt() orelse 0);
+                    // A type tree may declare m_FileID wider than i32; a
+                    // value that does not fit is not a usable file index,
+                    // so it degrades to 0 rather than trapping the cast.
+                    file = narrowField(i32, f.value.asInt());
                     seen = true;
                 } else if (std.mem.eql(u8, f.name, "m_PathID")) {
                     path = f.value.asInt() orelse 0;
