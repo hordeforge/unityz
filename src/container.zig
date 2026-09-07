@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const streams = @import("streams.zig");
+const serialized = @import("serialized.zig");
 
 pub const ContainerType = enum {
     /// Modern or legacy asset bundle (`UnityFS`/`UnityWeb`/`UnityRaw`).
@@ -100,9 +101,11 @@ pub fn sniff(data: []const u8) SniffResult {
         const file_size = std.mem.readInt(u32, data[4..8], .big);
         const version = std.mem.readInt(u32, data[8..12], .big);
 
-        // All supported serialized versions, including 4: the parser reads
-        // 2-22, and version 4 uses the same 16-byte legacy header as 2/3.
-        if (version >= 2 and version <= 22) {
+        // All supported serialized versions, including 4: version 4 uses
+        // the same 16-byte legacy header as 2/3. The accepted range is the
+        // parser's own, so the sniffer can never report a version `parse`
+        // would reject.
+        if (serialized.supportedVersion(version)) {
             var meta_size = meta0;
             const header_size: usize = if (version <= 8)
                 16
@@ -137,6 +140,37 @@ pub fn sniff(data: []const u8) SniffResult {
 /// older files have no type tree).
 pub fn serializedHasTypeTree(version: u32) bool {
     return version >= 13;
+}
+
+/// File extensions of Unity asset files this project intends to support.
+/// Note that some serialized files (e.g. `globalgamemanagers`, `level0`)
+/// carry no extension at all; extension-based detection is a first
+/// heuristic, not the whole story — `sniff` is the authority.
+pub const asset_extensions = [_][]const u8{
+    ".assets",
+    ".bundle",
+    ".unity3d",
+    ".resources",
+    ".resource",
+    ".resS",
+};
+
+/// Returns true when `name` ends in a known Unity asset extension.
+pub fn isAssetFileName(name: []const u8) bool {
+    for (asset_extensions) |ext| {
+        if (std.mem.endsWith(u8, name, ext)) return true;
+    }
+    return false;
+}
+
+test "isAssetFileName recognizes known extensions" {
+    try std.testing.expect(isAssetFileName("sharedassets0.assets"));
+    try std.testing.expect(isAssetFileName("level0.unity3d"));
+    try std.testing.expect(isAssetFileName("textures.resS"));
+    try std.testing.expect(isAssetFileName("sharedassets0.resource"));
+    try std.testing.expect(!isAssetFileName("level0.txt"));
+    try std.testing.expect(!isAssetFileName("sharedassets0.assets.bak"));
+    try std.testing.expect(!isAssetFileName(""));
 }
 
 test "sniff webfile magic" {
