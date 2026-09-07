@@ -6224,43 +6224,127 @@ fn audioPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
     try stdout.print("    (audio: {d} clips compared, {d} differ)\n", .{ compared, differ });
 }
 
+/// A bundle node or webfile entry, reduced to what the per-object `diff`
+/// lookups below need.
+const ContainerEntry = struct { path: []const u8, data: []const u8 };
+
+/// Memoizes the container parse of a file the per-object `diff` lookups
+/// read from. `diff` resolves one object at a time, and every lookup used
+/// to re-parse the whole file: for a bundle that decompresses every block
+/// again and leaves another full copy in the arena, so a run touching K
+/// objects paid K decompressions and K archive copies per side. Two slots
+/// cover the two sides of a comparison. The key is the arena plus the
+/// exact byte slice, so a different file - or the same bytes under a
+/// different arena - never reuses an entry whose memory is gone.
+const ContainerCacheSlot = struct {
+    allocator: ?std.mem.Allocator = null,
+    ptr: [*]const u8 = undefined,
+    len: usize = 0,
+    entries: []const ContainerEntry = &.{},
+};
+var container_cache = [_]ContainerCacheSlot{.{}} ** 2;
+var container_cache_next: usize = 0;
+
+/// The container's entries, parsing at most once per (arena, file).
+/// Empty for anything that is not a bundle or a webfile.
+fn containerEntries(arena: std.mem.Allocator, bytes: []const u8) ![]const ContainerEntry {
+    if (bytes.len == 0) return &.{};
+    for (&container_cache) |*slot| {
+        const a = slot.allocator orelse continue;
+        if (a.ptr != arena.ptr or a.vtable != arena.vtable) continue;
+        if (slot.ptr == bytes.ptr and slot.len == bytes.len) return slot.entries;
+    }
+    var list: std.ArrayList(ContainerEntry) = .empty;
+    switch (unityz.container.sniff(bytes).container) {
+        .bundle => {
+            const b = try unityz.bundle.parse(arena, bytes);
+            try list.ensureTotalCapacityPrecise(arena, b.nodes.len);
+            for (b.nodes) |n| list.appendAssumeCapacity(.{ .path = n.path, .data = n.data });
+        },
+        .webfile => {
+            const wf = try unityz.webfile.parse(arena, bytes);
+            try list.ensureTotalCapacityPrecise(arena, wf.entries.len);
+            for (wf.entries) |e| list.appendAssumeCapacity(.{ .path = e.path, .data = e.data });
+        },
+        else => return &.{},
+    }
+    container_cache[container_cache_next] = .{
+        .allocator = arena,
+        .ptr = bytes.ptr,
+        .len = bytes.len,
+        .entries = list.items,
+    };
+    container_cache_next = (container_cache_next + 1) % container_cache.len;
+    return list.items;
+}
+
+/// The non-serialized entries of a container: the `.resS` / `.resource`
+/// sidecar payloads a streamed object resolves against.
+fn containerSidecars(arena: std.mem.Allocator, entries: []const ContainerEntry) ![]const Sidecar {
+    var sidecars: std.ArrayList(Sidecar) = .empty;
+    for (entries) |n| {
+        if (unityz.container.sniff(n.data).container != .serialized) {
+            try sidecars.append(arena, .{ .path = n.path, .data = n.data });
+        }
+    }
+    return sidecars.items;
+}
+
+/// Memoizes the serialized-file parse behind the per-object `diff`
+/// lookups, for the same reason `containerEntries` memoizes the container:
+/// `serialized.parse` walks and copies every type tree in the file, and
+/// running it once per object made a K-object comparison cost K parses and
+/// K arena copies per side. Four slots cover both sides of a comparison
+/// plus the node a bundle's objects resolve through.
+const SerializedCacheSlot = struct {
+    allocator: ?std.mem.Allocator = null,
+    ptr: [*]const u8 = undefined,
+    len: usize = 0,
+    file: *const unityz.serialized.SerializedFile = undefined,
+};
+var serialized_cache = [_]SerializedCacheSlot{.{}} ** 4;
+var serialized_cache_next: usize = 0;
+
+/// The parsed serialized file, parsing at most once per (arena, bytes).
+fn serializedCached(arena: std.mem.Allocator, bytes: []const u8) !*const unityz.serialized.SerializedFile {
+    if (bytes.len != 0) {
+        for (&serialized_cache) |*slot| {
+            const a = slot.allocator orelse continue;
+            if (a.ptr != arena.ptr or a.vtable != arena.vtable) continue;
+            if (slot.ptr == bytes.ptr and slot.len == bytes.len) return slot.file;
+        }
+    }
+    const sf = try arena.create(unityz.serialized.SerializedFile);
+    sf.* = try unityz.serialized.parse(arena, bytes);
+    if (bytes.len != 0) {
+        serialized_cache[serialized_cache_next] = .{
+            .allocator = arena,
+            .ptr = bytes.ptr,
+            .len = bytes.len,
+            .file = sf,
+        };
+        serialized_cache_next = (serialized_cache_next + 1) % serialized_cache.len;
+    }
+    return sf;
+}
+
 /// Resolves an AudioClip object's stream data from a file (container-aware,
 /// resolving `.resource` sidecar nodes inside the same container), or null
 /// when absent or unresolvable.
 fn findObjectStream(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?[]const u8 {
     var out: ?[]const u8 = null;
     switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = try unityz.bundle.parse(arena, bytes);
-            var sidecars: std.ArrayList(Sidecar) = .empty;
-            for (b.nodes) |n| {
-                if (unityz.container.sniff(n.data).container != .serialized) {
-                    try sidecars.append(arena, .{ .path = n.path, .data = n.data });
-                }
-            }
-            for (b.nodes) |n| {
+        .bundle, .webfile => {
+            const entries = try containerEntries(arena, bytes);
+            // collect sidecars first: the serialized node usually precedes
+            // its .resource node in the container
+            const sidecars = try containerSidecars(arena, entries);
+            for (entries) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 if (fa.node) |sn| {
                     if (!std.mem.eql(u8, n.path, sn)) continue;
                 }
-                out = try findAudioStreamInSerialized(arena, n.data, fa.path_id, sidecars.items);
-                if (out != null) return out;
-            }
-        },
-        .webfile => {
-            const wf = try unityz.webfile.parse(arena, bytes);
-            var sidecars: std.ArrayList(Sidecar) = .empty;
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) {
-                    try sidecars.append(arena, .{ .path = e.path, .data = e.data });
-                }
-            }
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                if (fa.node) |sn| {
-                    if (!std.mem.eql(u8, e.path, sn)) continue;
-                }
-                out = try findAudioStreamInSerialized(arena, e.data, fa.path_id, sidecars.items);
+                out = try findAudioStreamInSerialized(arena, n.data, fa.path_id, sidecars);
                 if (out != null) return out;
             }
         },
@@ -6274,7 +6358,7 @@ fn findObjectStream(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?[]con
 }
 
 fn findAudioStreamInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar) !?[]const u8 {
-    const sf = unityz.serialized.parse(arena, bytes) catch return null;
+    const sf = serializedCached(arena, bytes) catch return null;
     const o = for (sf.objects) |*oo| {
         if (oo.class_id == 83 and oo.path_id == path_id) break oo;
     } else return null;
@@ -6449,25 +6533,13 @@ fn truncateLeaf(s: []const u8) []const u8 {
 fn findObjectValue(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, own_basename: []const u8, injected: ?*const InjectedTrees) !?unityz.value.Value {
     var out: ?unityz.value.Value = null;
     switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = try unityz.bundle.parse(arena, bytes);
-            for (b.nodes) |n| {
+        .bundle, .webfile => {
+            for (try containerEntries(arena, bytes)) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 if (fa.node) |sn| {
                     if (!std.mem.eql(u8, n.path, sn)) continue;
                 }
                 out = try findObjectValueInSerialized(arena, n.data, fa.path_id, basename(n.path), injected);
-                if (out != null) return out;
-            }
-        },
-        .webfile => {
-            const wf = try unityz.webfile.parse(arena, bytes);
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                if (fa.node) |sn| {
-                    if (!std.mem.eql(u8, e.path, sn)) continue;
-                }
-                out = try findObjectValueInSerialized(arena, e.data, fa.path_id, basename(e.path), injected);
                 if (out != null) return out;
             }
         },
@@ -6481,7 +6553,7 @@ fn findObjectValue(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, own_base
 }
 
 fn findObjectValueInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, own_basename: []const u8, injected: ?*const InjectedTrees) !?unityz.value.Value {
-    const sf = unityz.serialized.parse(arena, bytes) catch return null;
+    const sf = serializedCached(arena, bytes) catch return null;
     const o = for (sf.objects) |*oo| {
         if (oo.path_id == path_id) break oo;
     } else return null;
@@ -6492,7 +6564,7 @@ fn findObjectValueInSerialized(arena: std.mem.Allocator, bytes: []const u8, path
     // Mono builds strip the trees; `--trees` supplies them, as in `show`.
     if (tree.roots.len == 0) {
         const inj = injected orelse return null;
-        tree = injectedTreeFor(arena, inj, &sf, own_basename, o.class_id, data) orelse return null;
+        tree = injectedTreeFor(arena, inj, sf, own_basename, o.class_id, data) orelse return null;
     }
     var r = unityz.streams.Reader.init(data);
     r.endian = sf.endian;
@@ -6613,39 +6685,17 @@ const RgbaKind = enum { texture, sprite };
 fn findObjectRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, kind: RgbaKind, cache: *SpriteCache) !?Rgba {
     var out: ?Rgba = null;
     switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = try unityz.bundle.parse(arena, bytes);
+        .bundle, .webfile => {
+            const entries = try containerEntries(arena, bytes);
             // collect sidecars first: the serialized node usually precedes
             // its .resS node in the container
-            var sidecars: std.ArrayList(Sidecar) = .empty;
-            for (b.nodes) |n| {
-                if (unityz.container.sniff(n.data).container != .serialized) {
-                    try sidecars.append(arena, .{ .path = n.path, .data = n.data });
-                }
-            }
-            for (b.nodes) |n| {
+            const sidecars = try containerSidecars(arena, entries);
+            for (entries) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 if (fa.node) |sn| {
                     if (!std.mem.eql(u8, n.path, sn)) continue;
                 }
-                out = try findObjectRgbaInSerialized(arena, n.data, fa.path_id, sidecars.items, kind, cache);
-                if (out != null) return out;
-            }
-        },
-        .webfile => {
-            const wf = try unityz.webfile.parse(arena, bytes);
-            var sidecars: std.ArrayList(Sidecar) = .empty;
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) {
-                    try sidecars.append(arena, .{ .path = e.path, .data = e.data });
-                }
-            }
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                if (fa.node) |sn| {
-                    if (!std.mem.eql(u8, e.path, sn)) continue;
-                }
-                out = try findObjectRgbaInSerialized(arena, e.data, fa.path_id, sidecars.items, kind, cache);
+                out = try findObjectRgbaInSerialized(arena, n.data, fa.path_id, sidecars, kind, cache);
                 if (out != null) return out;
             }
         },
@@ -6659,7 +6709,7 @@ fn findObjectRgba(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, kind: Rgb
 }
 
 fn findObjectRgbaInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar, kind: RgbaKind, cache: *SpriteCache) !?Rgba {
-    const sf = unityz.serialized.parse(arena, bytes) catch return null;
+    const sf = serializedCached(arena, bytes) catch return null;
     const want: i32 = switch (kind) {
         .texture => 28,
         .sprite => 213,
@@ -6679,13 +6729,13 @@ fn findObjectRgbaInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_
         .texture => {
             const t = unityz.classes.Texture2D.fromValue(v);
             if (t.width == 0 or t.height == 0) return null;
-            const pixels = texturePixels(&sf, sidecars, t);
+            const pixels = texturePixels(sf, sidecars, t);
             if (pixels.len == 0) return null;
             const rgba = unityz.texture.decode(arena, t.format, t.width, t.height, pixels) catch return null;
             return .{ .data = rgba, .w = t.width, .h = t.height };
         },
         .sprite => {
-            const rr = renderSprite(arena, &sf, sidecars, cache, v, path_id, "", null) orelse return null;
+            const rr = renderSprite(arena, sf, sidecars, cache, v, path_id, "", null) orelse return null;
             return .{ .data = rr.data, .w = rr.w, .h = rr.h };
         },
     }
@@ -9772,6 +9822,17 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
     var nodes: std.ArrayList(TEntry) = .empty;
     var gos: std.ArrayList(GoInfo) = .empty;
     var bones: std.ArrayList(i64) = .empty;
+    // Class id by path id, so resolving a GameObject's components is a
+    // lookup rather than a scan of every object in the file. The scan it
+    // replaces ran once per component of every GameObject, which is
+    // quadratic in the object count on a real scene.
+    var class_by_path: std.AutoHashMapUnmanaged(i64, i32) = .empty;
+    try class_by_path.ensureTotalCapacity(arena, @intCast(sf.objects.len));
+    for (sf.objects) |*o| {
+        // First entry wins, matching the first-match semantics of the scan.
+        const gop = class_by_path.getOrPutAssumeCapacity(o.path_id);
+        if (!gop.found_existing) gop.value_ptr.* = o.class_id;
+    }
     for (sf.objects) |*o| {
         const data = sf.objectData(o) orelse continue;
         const ti = o.type_index orelse continue;
@@ -9817,11 +9878,8 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
                             const wrapped = unityz.classes.fieldOf(c, "component") orelse continue;
                             const cid = pptrPathId(wrapped) orelse continue;
                             // the component object's class, by path id
-                            for (sf.objects) |*other| {
-                                if (other.path_id == cid) {
-                                    try gi.components.append(arena, other.class_id);
-                                    break;
-                                }
+                            if (class_by_path.get(cid)) |class_id| {
+                                try gi.components.append(arena, class_id);
                             }
                         }
                     }
@@ -9843,13 +9901,13 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
 
     var roots_printed: usize = 0;
     var skipped_children: usize = 0;
+    const index = try HierarchyIndex.build(arena, nodes.items, gos.items);
     for (nodes.items) |*e| {
-        if (e.node.father == 0 and hierarchyNodeReadable(nodes.items, gos.items, e.path_id)) {
+        if (e.node.father == 0 and index.readable(e.path_id)) {
             if (json and roots_printed != 0) try stdout.writeByte(',');
             roots_printed += 1;
             try printHierarchyNode(
-                nodes.items,
-                gos.items,
+                &index,
                 bones.items,
                 e.path_id,
                 0,
@@ -9866,24 +9924,47 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
     }
 }
 
-fn findNode(nodes: []const TEntry, path_id: i64) ?*const TNode {
-    for (nodes) |*e| {
-        if (e.path_id == path_id) return &e.node;
-    }
-    return null;
-}
+/// The collected transforms and GameObjects, indexed by path id. The walk
+/// resolves a transform and its GameObject once per visited node and once
+/// more per child readability check; the linear scans this replaces made
+/// that quadratic in the object count of the file.
+const HierarchyIndex = struct {
+    nodes: []const TEntry,
+    gos: []const GoInfo,
+    node_by_id: std.AutoHashMapUnmanaged(i64, u32) = .empty,
+    go_by_id: std.AutoHashMapUnmanaged(i64, u32) = .empty,
 
-fn findGo(gos: []const GoInfo, path_id: i64) ?*const GoInfo {
-    for (gos) |*g| {
-        if (g.path_id == path_id) return g;
+    fn build(arena: std.mem.Allocator, nodes: []const TEntry, gos: []const GoInfo) !HierarchyIndex {
+        var self: HierarchyIndex = .{ .nodes = nodes, .gos = gos };
+        try self.node_by_id.ensureTotalCapacity(arena, @intCast(nodes.len));
+        // First entry wins, matching the first-match semantics of the scans.
+        for (nodes, 0..) |*e, i| {
+            const gop = self.node_by_id.getOrPutAssumeCapacity(e.path_id);
+            if (!gop.found_existing) gop.value_ptr.* = @intCast(i);
+        }
+        try self.go_by_id.ensureTotalCapacity(arena, @intCast(gos.len));
+        for (gos, 0..) |*g, i| {
+            const gop = self.go_by_id.getOrPutAssumeCapacity(g.path_id);
+            if (!gop.found_existing) gop.value_ptr.* = @intCast(i);
+        }
+        return self;
     }
-    return null;
-}
 
-fn hierarchyNodeReadable(nodes: []const TEntry, gos: []const GoInfo, path_id: i64) bool {
-    const node = findNode(nodes, path_id) orelse return false;
-    return findGo(gos, node.go) != null;
-}
+    fn findNode(self: *const HierarchyIndex, path_id: i64) ?*const TNode {
+        const i = self.node_by_id.get(path_id) orelse return null;
+        return &self.nodes[i].node;
+    }
+
+    fn findGo(self: *const HierarchyIndex, path_id: i64) ?*const GoInfo {
+        const i = self.go_by_id.get(path_id) orelse return null;
+        return &self.gos[i];
+    }
+
+    fn readable(self: *const HierarchyIndex, path_id: i64) bool {
+        const node = self.findNode(path_id) orelse return false;
+        return self.findGo(node.go) != null;
+    }
+};
 
 /// Traversal depth limit for `printHierarchyNode`. Children lists are
 /// file-supplied and may be cyclic or nest beyond any scene graph, so the
@@ -9892,8 +9973,7 @@ fn hierarchyNodeReadable(nodes: []const TEntry, gos: []const GoInfo, path_id: i6
 const max_hierarchy_depth: usize = 512;
 
 fn printHierarchyNode(
-    nodes: []const TEntry,
-    gos: []const GoInfo,
+    index: *const HierarchyIndex,
     bones: []const i64,
     path_id: i64,
     depth: usize,
@@ -9903,8 +9983,8 @@ fn printHierarchyNode(
 ) !void {
     if (depth > max_hierarchy_depth) return error.TooDeep;
     const skipped_before = skipped_children.*;
-    const tn = findNode(nodes, path_id) orelse return;
-    const go = findGo(gos, tn.go);
+    const tn = index.findNode(path_id) orelse return;
+    const go = index.findGo(tn.go);
     const bone = std.mem.indexOfScalar(i64, bones, path_id) != null;
     if (json) {
         try stdout.writeAll("{\"name\":");
@@ -9920,13 +10000,13 @@ fn printHierarchyNode(
         try stdout.writeAll(",\"children\":[");
         var printed: usize = 0;
         for (tn.children.items) |c| {
-            if (!hierarchyNodeReadable(nodes, gos, c)) {
+            if (!index.readable(c)) {
                 skipped_children.* += 1;
                 continue;
             }
             if (printed != 0) try stdout.writeByte(',');
             printed += 1;
-            try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, skipped_children, stdout);
+            try printHierarchyNode(index, bones, c, depth + 1, json, skipped_children, stdout);
         }
         try stdout.print("],\"skipped_children\":{d}}}", .{skipped_children.* - skipped_before});
         return;
@@ -9946,11 +10026,11 @@ fn printHierarchyNode(
     }
     try stdout.print("  pos({d}, {d}, {d})\n", .{ tn.pos[0], tn.pos[1], tn.pos[2] });
     for (tn.children.items) |c| {
-        if (!hierarchyNodeReadable(nodes, gos, c)) {
+        if (!index.readable(c)) {
             skipped_children.* += 1;
             continue;
         }
-        try printHierarchyNode(nodes, gos, bones, c, depth + 1, json, skipped_children, stdout);
+        try printHierarchyNode(index, bones, c, depth + 1, json, skipped_children, stdout);
     }
 }
 
@@ -9966,7 +10046,8 @@ test "hierarchy JSON counts an unreadable child without leaving a dangling comma
     var writer = std.Io.Writer.Allocating.fromArrayList(arena, &output);
     var skipped: usize = 0;
 
-    try printHierarchyNode(&nodes, &gos, &.{}, 10, 0, true, &skipped, &writer.writer);
+    const index = try HierarchyIndex.build(arena, &nodes, &gos);
+    try printHierarchyNode(&index, &.{}, 10, 0, true, &skipped, &writer.writer);
     try writer.writer.flush();
     const rendered = writer.toArrayList();
 
@@ -9997,7 +10078,8 @@ test "hierarchy JSON reports subtree skips on the affected branch" {
     var writer = std.Io.Writer.Allocating.fromArrayList(arena, &output);
     var skipped: usize = 0;
 
-    try printHierarchyNode(&nodes, &gos, &.{}, 10, 0, true, &skipped, &writer.writer);
+    const index = try HierarchyIndex.build(arena, &nodes, &gos);
+    try printHierarchyNode(&index, &.{}, 10, 0, true, &skipped, &writer.writer);
     try writer.writer.flush();
     const rendered = writer.toArrayList();
 
