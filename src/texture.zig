@@ -3201,10 +3201,11 @@ test "astc void-extent and error blocks" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 255, 255 }, out2[0..4]);
 }
 
+// The raw-format tests below feed synthesized pixels; the expected output
+// is computed independently (clamp+truncate for float/half, high byte for
+// 16-bit, bias for signed).
 test "raw format rgba half" {
     const a = std.testing.allocator;
-    // synthesized pixels; expected computed independently (clamp+truncate
-    // for float/half, high byte for 16-bit, bias for signed)
     const data = [_]u8{
         0x38, 0x3c, 0xb8, 0x3a, 0xd4, 0xb4, 0x97, 0x32, 0x60, 0x3c, 0x20, 0xb6, 0x15, 0x3c, 0xe7, 0x3c,
         0x56, 0x38, 0x7b, 0x35, 0x70, 0xab, 0xa9, 0xb3, 0xea, 0x37, 0x0a, 0x33, 0x8e, 0x3b, 0x4c, 0x36,
@@ -3224,8 +3225,6 @@ test "raw format rgba half" {
 
 test "raw format rgb9e5" {
     const a = std.testing.allocator;
-    // synthesized pixels; expected computed independently (clamp+truncate
-    // for float/half, high byte for 16-bit, bias for signed)
     const data = [_]u8{
         0x65, 0x26, 0xa7, 0xdd, 0xca, 0xba, 0x08, 0x1e, 0xe2, 0x26, 0x15, 0xd2, 0x70, 0xc5, 0x69, 0xff,
         0x6c, 0x80, 0x59, 0xd3, 0x98, 0x49, 0xcf, 0xf4, 0x39, 0xd4, 0x19, 0xb7, 0xb2, 0x7c, 0xd6, 0x12,
@@ -3242,8 +3241,6 @@ test "raw format rgb9e5" {
 
 test "raw format rgba64" {
     const a = std.testing.allocator;
-    // synthesized pixels; expected computed independently (clamp+truncate
-    // for float/half, high byte for 16-bit, bias for signed)
     const data = [_]u8{
         0xa2, 0xdb, 0xc2, 0x32, 0x87, 0xc9, 0xb8, 0xb4, 0x04, 0x1e, 0x64, 0x65, 0xbb, 0x2e, 0x2e, 0xc1,
         0xae, 0xd7, 0x1f, 0x71, 0xa0, 0x49, 0xbb, 0x42, 0xa3, 0xfe, 0x50, 0xb8, 0x63, 0x71, 0x21, 0xed,
@@ -3263,8 +3260,6 @@ test "raw format rgba64" {
 
 test "raw format r16 signed" {
     const a = std.testing.allocator;
-    // synthesized pixels; expected computed independently (clamp+truncate
-    // for float/half, high byte for 16-bit, bias for signed)
     const data = [_]u8{
         0xa2, 0x5b, 0x04, 0x9e, 0xae, 0x57, 0xa3, 0x7e, 0x9d, 0x57, 0x5a, 0x77, 0x78, 0x31, 0x7f, 0x90,
         0xe4, 0x63, 0x42, 0xdc, 0x74, 0xfe, 0xdd, 0x3b,
@@ -3280,8 +3275,6 @@ test "raw format r16 signed" {
 
 test "raw format argb float" {
     const a = std.testing.allocator;
-    // synthesized pixels; expected computed independently (clamp+truncate
-    // for float/half, high byte for 16-bit, bias for signed)
     const data = [_]u8{
         0xd8, 0x00, 0x87, 0x3f, 0x60, 0xf3, 0x56, 0x3f, 0x26, 0x7b, 0x9a, 0xbe, 0x34, 0xe2, 0x52, 0x3e,
         0x51, 0xf1, 0x8b, 0x3f, 0x7c, 0xf7, 0xc3, 0xbe, 0x13, 0x9f, 0x82, 0x3f, 0x27, 0xda, 0x9c, 0x3f,
@@ -3309,32 +3302,13 @@ test "pvrtc single block (4bpp and 2bpp)" {
     const a = std.testing.allocator;
     // hand-crafted: black endpoint A, white endpoint B, all weights 8
     // (modulation all ones), so every texel decodes to endpoint B.
-    const blk4 = [_]u8{
-        0xff,
-        0xff,
-        0xff,
-        0xff,
-        0x00,
-        0x00,
-        0xff,
-        0xff,
-    };
-    const out4 = try decode(a, format.pvrtc_rgb4, 4, 4, &blk4);
+    const blk = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff };
+    const out4 = try decode(a, format.pvrtc_rgb4, 4, 4, &blk);
     defer a.free(out4);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 255, 255, 255 }, out4[0..4]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 255, 255, 255 }, out4[15 * 4 ..][0..4]);
 
-    const blk2 = [_]u8{
-        0xff,
-        0xff,
-        0xff,
-        0xff,
-        0x00,
-        0x00,
-        0xff,
-        0xff,
-    };
-    const out2 = try decode(a, format.pvrtc_rgb2, 8, 4, &blk2);
+    const out2 = try decode(a, format.pvrtc_rgb2, 8, 4, &blk);
     defer a.free(out2);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 255, 255, 255 }, out2[0..4]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 255, 255, 255 }, out2[31 * 4 ..][0..4]);
@@ -3347,22 +3321,7 @@ test "dxt5 three-color mode (c0 <= c1)" {
     // Regression for the palette bug: decodeDxt5 previously used the
     // 4-color palette unconditionally.
     const blk = [_]u8{
-        0x39,
-        0x0c,
-        0x8c,
-        0x7d,
-        0x72,
-        0x47,
-        0x34,
-        0x2c,
-        0xd8,
-        0x10,
-        0x0f,
-        0x2f,
-        0x6f,
-        0x77,
-        0x0d,
-        0x65,
+        0x39, 0x0c, 0x8c, 0x7d, 0x72, 0x47, 0x34, 0x2c, 0xd8, 0x10, 0x0f, 0x2f, 0x6f, 0x77, 0x0d, 0x65,
     };
     const out = try decode(a, format.dxt5, 4, 4, &blk);
     defer a.free(out);
@@ -3383,163 +3342,29 @@ test "atc and eac single block" {
     // ATC block 0 of texture2ddecoder's ATC_RGB4 sample; expected is its
     // own decode (BGRA in memory, converted to RGBA here).
     const atc_blk = [_]u8{
-        0x00,
-        0x00,
-        0x9f,
-        0xa7,
-        0xff,
-        0xff,
-        0xff,
-        0xff,
+        0x00, 0x00, 0x9f, 0xa7, 0xff, 0xff, 0xff, 0xff,
     };
     const atc_out = try decode(a, format.atc_rgb4, 4, 4, &atc_blk);
     defer a.free(atc_out);
     try std.testing.expectEqualSlices(u8, &[_]u8{
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
-        0xa5,
-        0xf3,
-        0xff,
-        0xff,
+        0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff,
+        0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff,
+        0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff,
+        0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff, 0xa5, 0xf3, 0xff, 0xff,
     }, atc_out);
 
     // EAC_R block from the random cross-validation set, expected matches
     // texture2ddecoder's decode_eacr.
     const eac_blk = [_]u8{
-        0x82,
-        0xb7,
-        0x0e,
-        0xee,
-        0x7f,
-        0x1a,
-        0x50,
-        0x39,
+        0x82, 0xb7, 0x0e, 0xee, 0x7f, 0x1a, 0x50, 0x39,
     };
     const eac_out = try decode(a, format.eac_r, 4, 4, &eac_blk);
     defer a.free(eac_out);
     try std.testing.expectEqualSlices(u8, &[_]u8{
-        0x61,
-        0x00,
-        0x00,
-        0xff,
-        0xf0,
-        0x00,
-        0x00,
-        0xff,
-        0x61,
-        0x00,
-        0x00,
-        0xff,
-        0x61,
-        0x00,
-        0x00,
-        0xff,
-        0x09,
-        0x00,
-        0x00,
-        0xff,
-        0x4b,
-        0x00,
-        0x00,
-        0xff,
-        0xcf,
-        0x00,
-        0x00,
-        0xff,
-        0x61,
-        0x00,
-        0x00,
-        0xff,
-        0xae,
-        0x00,
-        0x00,
-        0xff,
-        0xf0,
-        0x00,
-        0x00,
-        0xff,
-        0x98,
-        0x00,
-        0x00,
-        0xff,
-        0xf0,
-        0x00,
-        0x00,
-        0xff,
-        0xcf,
-        0x00,
-        0x00,
-        0xff,
-        0xf0,
-        0x00,
-        0x00,
-        0xff,
-        0xae,
-        0x00,
-        0x00,
-        0xff,
-        0x4b,
-        0x00,
-        0x00,
-        0xff,
+        0x61, 0x00, 0x00, 0xff, 0xf0, 0x00, 0x00, 0xff, 0x61, 0x00, 0x00, 0xff, 0x61, 0x00, 0x00, 0xff,
+        0x09, 0x00, 0x00, 0xff, 0x4b, 0x00, 0x00, 0xff, 0xcf, 0x00, 0x00, 0xff, 0x61, 0x00, 0x00, 0xff,
+        0xae, 0x00, 0x00, 0xff, 0xf0, 0x00, 0x00, 0xff, 0x98, 0x00, 0x00, 0xff, 0xf0, 0x00, 0x00, 0xff,
+        0xcf, 0x00, 0x00, 0xff, 0xf0, 0x00, 0x00, 0xff, 0xae, 0x00, 0x00, 0xff, 0x4b, 0x00, 0x00, 0xff,
     }, eac_out);
 }
 
@@ -4676,18 +4501,18 @@ test "etc2 H-mode" {
     // base1 = (13,1,8), base2 = (4,12,13), da=1, db=0, cmp=1 (base1 > base2)
     // -> distance index 5, d = 32. All indices 0 -> paint color 0 = base1 + d.
     var bb = [_]u1{0} ** 64;
-    putBits(&bb, 62, 59, 13, 4);
-    putBits(&bb, 58, 56, 0, 3);
-    putBits(&bb, 55, 53, 0b111, 3); // free bits -> G+dG out of range
+    putBits(&bb, 62, 13, 4);
+    putBits(&bb, 58, 0, 3);
+    putBits(&bb, 55, 0b111, 3); // free bits -> G+dG out of range
     bb[52] = 1; // G0
     bb[51] = 1; // B3
-    putBits(&bb, 50, 49, 0, 2);
+    putBits(&bb, 50, 0, 2);
     bb[48] = 1; // B1 (B2..0 = bits 49,48,47 in the reference layout)
     bb[47] = 0; // B0
-    putBits(&bb, 46, 43, 4, 4); // R2
-    putBits(&bb, 42, 40, 0b110, 3); // G2 3..1
+    putBits(&bb, 46, 4, 4); // R2
+    putBits(&bb, 42, 0b110, 3); // G2 3..1
     bb[39] = 0; // G2 0
-    putBits(&bb, 38, 35, 13, 4); // B2
+    putBits(&bb, 38, 13, 4); // B2
     bb[34] = 1; // da
     bb[33] = 1; // D bit
     bb[32] = 0; // db
@@ -4706,25 +4531,25 @@ test "etc2 planar mode" {
     // (40,112,45) in the reference bit layout; expected texels below are
     // cross-checked against UnityPy's decoder.
     var bb = [_]u1{0} ** 64;
-    putBits(&bb, 62, 57, 12, 6);
+    putBits(&bb, 62, 12, 6);
     bb[56] = 1;
-    putBits(&bb, 54, 49, 0, 6);
+    putBits(&bb, 54, 0, 6);
     bb[48] = 1;
-    putBits(&bb, 44, 43, 0b11, 2);
-    putBits(&bb, 41, 40, 0b11, 2);
+    putBits(&bb, 44, 0b11, 2);
+    putBits(&bb, 41, 0b11, 2);
     bb[39] = 0;
     bb[47] = 1; // free bits -> B+dB out of range (planar trigger)
     bb[46] = 1;
     bb[45] = 1;
     bb[42] = 0;
-    putBits(&bb, 39, 35, 25, 5); // Rh5..1 = 50 >> 1
+    putBits(&bb, 39, 25, 5); // Rh5..1 = 50 >> 1
     bb[34] = 1; // D bit
     bb[32] = 0; // Rh0
-    putBits(&bb, 31, 26, 5, 6);
-    putBits(&bb, 24, 19, 37, 6);
-    putBits(&bb, 19, 14, 40, 6);
-    putBits(&bb, 13, 8, 112, 6);
-    putBits(&bb, 5, 0, 45, 6);
+    putBits(&bb, 31, 5, 6);
+    putBits(&bb, 24, 37, 6);
+    putBits(&bb, 19, 40, 6);
+    putBits(&bb, 13, 112, 6);
+    putBits(&bb, 5, 45, 6);
     var hi: u64 = 0;
     var lo: u64 = 0;
     for (0..32) |i| hi = (hi << 1) | bb[63 - i];
@@ -4797,9 +4622,8 @@ test "bc5 two channel block" {
     }
 }
 
-/// Sets `n` bits of a bit array, MSB first, ending at `lo`.
-fn putBits(bb: *[64]u1, hi: usize, lo: usize, val: u8, n: usize) void {
-    _ = lo;
+/// Sets the `n` bits of a bit array ending at `hi`, MSB first.
+fn putBits(bb: *[64]u1, hi: usize, val: u8, n: usize) void {
     for (0..n) |i| {
         bb[hi - i] = @intCast((val >> @intCast(n - 1 - i)) & 1);
     }

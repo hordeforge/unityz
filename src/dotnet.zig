@@ -572,7 +572,7 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
     try r.skip(4); // machine + num sections
     try r.skip(4); // timestamp
     try r.skip(8); // symbol table
-    const opt_size = try r.readInt(u16);
+    _ = try r.readInt(u16); // optional header size
     try r.skip(2); // characteristics
     try r.seek(e_lfanew + 24); // optional header start
     const magic = try r.readInt(u16);
@@ -582,7 +582,6 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
         e_lfanew + 24 + 112
     else
         return error.NotPe;
-    _ = opt_size;
     try r.seek(dd_offset + 14 * 8);
     const cli_rva = try r.readInt(u32);
     try r.skip(4); // cli size

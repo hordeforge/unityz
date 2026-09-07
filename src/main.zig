@@ -6172,10 +6172,10 @@ fn pixelPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
         for (b_list.items) |fb| {
             if (fb.path_id != fa.path_id or !sameNode(fb.node, fa.node)) continue;
             switch (fa.class_id) {
-                28 => if (try diffTexturePixels(arena, a_bytes, b_bytes, fa, &cache_a, &cache_b, stdout)) |st| {
+                28 => if (try diffObjectPixels(arena, a_bytes, b_bytes, fa, .texture, &cache_a, &cache_b, stdout)) |st| {
                     if (st.diff_pixels != 0) try stats.append(arena, st);
                 },
-                213 => if (try diffSpritePixels(arena, a_bytes, b_bytes, fa, &cache_a, &cache_b, stdout)) |st| {
+                213 => if (try diffObjectPixels(arena, a_bytes, b_bytes, fa, .sprite, &cache_a, &cache_b, stdout)) |st| {
                     if (st.diff_pixels != 0) try stats.append(arena, st);
                 },
                 else => {},
@@ -6586,40 +6586,28 @@ fn findObjectValueInSerialized(arena: std.mem.Allocator, bytes: []const u8, path
     return unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch null;
 }
 
-/// `diff --pixels`: decodes a Texture2D object in both files and reports
-/// pixel-level differences (per-channel differing-byte counts and the
-/// maximum per-channel delta). Node-aware: `fa.node` selects the container
-/// entry. Pixels may be embedded in the object, streamed inside the same
-/// serialized file, or streamed from a sibling `.resS` / `.resource`
-/// sidecar node inside the same container, all resolved here.
-fn diffTexturePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, cache_a: *SpriteCache, cache_b: *SpriteCache, stdout: *Io.Writer) !?PixelStat {
-    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .texture, cache_a);
-    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .texture, cache_b);
-    if (rgba_a == null or rgba_b == null) {
-        try stdout.print("    (pixels: object {d} texture could not be decoded in one or both files)\n", .{fa.path_id});
-        return null;
-    }
-    const a = rgba_a.?;
-    const b = rgba_b.?;
-    if (a.w != b.w or a.h != b.h) {
-        try stdout.print("    (pixels: object {d} size differs {d}x{d} vs {d}x{d})\n", .{ fa.path_id, a.w, a.h, b.w, b.h });
-        return null;
-    }
-    return diffRgbaPixels(fa, a.data, b.data, a.w, a.h, stdout);
-}
-
-/// `diff --pixels` for a Sprite: renders both sprites (crop rect, packed
-/// rotation, alpha-texture merge, tight/polygon mesh) and compares the
-/// RGBA. Object bytes are unchanged when only the streamed atlas pixels
-/// change, so this is the only diff signal that sees those edits.
-fn diffSpritePixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, cache_a: *SpriteCache, cache_b: *SpriteCache, stdout: *Io.Writer) !?PixelStat {
+/// `diff --pixels`: decodes a Texture2D or renders a Sprite in both files
+/// and reports pixel-level differences (per-channel differing-byte counts
+/// and the maximum per-channel delta). Node-aware: `fa.node` selects the
+/// container entry. Texture pixels may be embedded in the object, streamed
+/// inside the same serialized file, or streamed from a sibling `.resS` /
+/// `.resource` sidecar node inside the same container, all resolved here.
+/// Sprite rendering covers the crop rect, packed rotation, alpha-texture
+/// merge and tight/polygon mesh; object bytes are unchanged when only the
+/// streamed atlas pixels change, so this is the only diff signal that sees
+/// those edits.
+fn diffObjectPixels(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, kind: RgbaKind, cache_a: *SpriteCache, cache_b: *SpriteCache, stdout: *Io.Writer) !?PixelStat {
     // each file gets its own cache: the atlas memoization is per serialized
     // file, so sharing one cache across both files made file B's sprites
     // resolve through file A's atlas data and rendered them identically
-    const rgba_a = try findObjectRgba(arena, a_bytes, fa, .sprite, cache_a);
-    const rgba_b = try findObjectRgba(arena, b_bytes, fa, .sprite, cache_b);
+    const rgba_a = try findObjectRgba(arena, a_bytes, fa, kind, cache_a);
+    const rgba_b = try findObjectRgba(arena, b_bytes, fa, kind, cache_b);
     if (rgba_a == null or rgba_b == null) {
-        try stdout.print("    (pixels: object {d} sprite could not be rendered in one or both files)\n", .{fa.path_id});
+        const why = switch (kind) {
+            .texture => "texture could not be decoded",
+            .sprite => "sprite could not be rendered",
+        };
+        try stdout.print("    (pixels: object {d} {s} in one or both files)\n", .{ fa.path_id, why });
         return null;
     }
     const a = rgba_a.?;
