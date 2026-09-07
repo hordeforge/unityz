@@ -1,3 +1,4 @@
 .zig-cache/
 zig-out/
 /.local/
+.ruff_cache/

@@ -45,11 +45,13 @@ needs:
   `LZHAM_LITTLE_ENDIAN_CPU` and unaligned integer loads for every
   non-MSVC target, so type 4 blocks would decode wrong there.
 
-CI also blocks on formatting and shell lint:
+CI also blocks on formatting, shell lint, and Python lint for the
+generator scripts:
 
 ```bash
 zig fmt --check build.zig build.zig.zon src
 shellcheck scripts/*.sh
+pipx run ruff==0.16.1 check scripts
 ```
 
 ## What you can do

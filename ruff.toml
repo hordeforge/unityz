@@ -1,0 +1,72 @@
+# Static analysis for the generator scripts in scripts/. They build data that
+# ships inside the binary (src/builtin_trees/*.bin) and the --trees files
+# `extract`, `verify` and `show` decode typeless assets with, so a defect here
+# is a defect in released output. CI runs `ruff check` and blocks on it, next
+# to `zig fmt --check` and `shellcheck`.
+#
+# The annotations are evaluated at runtime (`str | None`, `dict[str, list[dict]]`,
+# no `from __future__ import annotations`), so 3.10 is the real floor.
+target-version = "py310"
+
+[lint]
+# Every rule group the tree already passes, on rather than off: the default set
+# is pyflakes plus a slice of pycodestyle, which leaves bugbear, the
+# performance and modernization groups, and the suppression-hygiene checks
+# unenforced. Deliberate omissions are listed under `ignore` and below.
+select = [
+    "A",    # a builtin shadowed by a local name
+    "ARG",  # unused function arguments
+    "B",    # bugbear: mutable defaults, loop-variable capture, silent bugs
+    "BLE",  # blind `except Exception`
+    "C4",   # comprehension rewrites
+    "C90",  # mccabe complexity
+    "DTZ",  # naive datetimes
+    "E",    # pycodestyle errors
+    "ERA",  # commented-out code
+    "EXE",  # shebang and executable bit disagreeing
+    "F",    # pyflakes: undefined names, unused imports, shadowed bindings
+    "FA",   # annotations needing `from __future__ import annotations`
+    "FBT",  # boolean positional arguments
+    "FLY",  # static `str.join` that should be an f-string
+    "FURB", # refurb modernizations
+    "G",    # logging call format
+    "I",    # import sorting
+    "ICN",  # import naming conventions
+    "INP",  # implicit namespace packages
+    "ISC",  # implicit string concatenation (a missing comma in a list)
+    "LOG",  # logging misuse
+    "N",    # pep8 naming
+    "PERF", # performance anti-patterns
+    "PGH",  # blanket `# noqa` / `# type: ignore` with no rule scope
+    "PIE",  # misc lints
+    "Q",    # quote style
+    "RET",  # return-path simplifications
+    "RSE",  # `raise X()` vs `raise X`
+    "RUF",  # ruff's own rules
+    "SLF",  # private member access across objects
+    "T10",  # a leftover `breakpoint()` or `pdb` import
+    "TC",   # imports only needed for typing
+    "TID",  # banned and relative imports
+    "UP",   # pyupgrade
+    "W",    # pycodestyle warnings
+    "YTT",  # `sys.version` misuse
+]
+
+# E501 (line length) is off, and this is the one gap left open on purpose.
+# Ten lines exceed the ecosystem's 88: two are the copy-pasteable AssetRipper
+# TypeTreeDumps curl commands in the module docstrings and one is the dump's
+# node regex, none of which should be wrapped, but the rest is ordinary code
+# that a cap would legitimately catch. Turning E501 on therefore means
+# reformatting those lines first, which is a change to the scripts and not to
+# this file. No cap is imposed here in the meantime.
+ignore = ["E501"]
+
+# Not selected, and not oversights:
+#   T20  - these are CLI scripts; `print` is their output channel, not debris.
+#   D    - the modules carry docstrings; per-function ones are not required.
+#   S    - bandit's assert check fires on an invariant assert, and nothing here
+#          takes untrusted input from a network or a shell.
+# The remaining groups (SIM, PTH, TRY, PL, COM, EM) have live findings in the
+# tree today. They are not enabled here because enabling a rule the tree fails
+# would make this file advisory instead of blocking; fix the findings, then add
+# the group.

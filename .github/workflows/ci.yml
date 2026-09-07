@@ -12,8 +12,9 @@ permissions:
   contents: read
 
 jobs:
-  # Static analysis, blocking and separate from the build matrix: formatting
-  # and shell lint are platform-independent, so one Linux runner covers them.
+  # Static analysis, blocking and separate from the build matrix: formatting,
+  # shell lint and Python lint are platform-independent, so one Linux runner
+  # covers them.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -25,6 +26,12 @@ jobs:
         run: zig fmt --check build.zig build.zig.zon src
       - name: Lint shell scripts
         run: shellcheck scripts/*.sh
+      # The generator scripts build data that ships inside the binary, so they
+      # are linted like the Zig and the shell is. The version is pinned so a
+      # new ruff release adding rules cannot turn a green tree red on an
+      # unrelated PR, and so a local run matches what CI enforces.
+      - name: Lint Python scripts
+        run: pipx run ruff==0.16.1 check scripts
 
   build-test:
     # The library and CLI are developed on macOS and released as a Zig
