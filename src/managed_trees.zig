@@ -174,14 +174,7 @@ fn isObjectDerived(td: dotnet.TypeDef, type_defs: []const dotnet.TypeDef, index:
 /// `type_defs` may merge several assemblies, so lookups must not scan the
 /// whole list per type (tens of thousands of definitions times a linear
 /// search per chain step is quadratic and exhausts memory).
-fn indexTypeDefs(arena: std.mem.Allocator, type_defs: []const dotnet.TypeDef) !std.StringHashMapUnmanaged(u32) {
-    var m: std.StringHashMapUnmanaged(u32) = .empty;
-    for (type_defs, 0..) |td, i| {
-        const nm = td.fullName(arena);
-        if (!m.contains(nm)) try m.put(arena, nm, @intCast(i));
-    }
-    return m;
-}
+const indexTypeDefs = dotnet.indexTypeDefs;
 
 pub fn buildTypeMap(arena: std.mem.Allocator, assemblies: []const dotnet.Assembly) !TypeMap {
     var map: TypeMap = .empty;
@@ -204,6 +197,10 @@ pub fn buildTypeMap(arena: std.mem.Allocator, assemblies: []const dotnet.Assembl
     }
     var index = try indexTypeDefs(arena, all_defs);
     for (assemblies) |assembly| {
+        // One index per assembly, not per definition: field collection
+        // resolves the same-assembly base chain, and rebuilding the index
+        // for every definition would put the quadratic scan right back.
+        var local = try indexTypeDefs(arena, assembly.type_defs);
         for (assembly.type_defs, 0..) |td, tdi| {
             const name = td.fullName(arena);
             if (map.contains(name)) continue;
@@ -211,7 +208,7 @@ pub fn buildTypeMap(arena: std.mem.Allocator, assemblies: []const dotnet.Assembl
             if (isEnum(td)) {
                 info.is_enum = true;
             } else {
-                info.fields = try dotnet.collectFields(arena, td, assembly.type_defs, assembly.field_serialized, assembly.field_nonserialized);
+                info.fields = try dotnet.collectFieldsIndexed(arena, td, assembly.type_defs, &local, assembly.field_serialized, assembly.field_nonserialized);
                 info.is_object_derived = isObjectDerived(td, all_defs, &index);
                 info.is_struct = (td.flags & 0x100) != 0; // ValueType
                 info.is_delegate = isDelegate(td, all_defs, &index);

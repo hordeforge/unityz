@@ -1158,6 +1158,20 @@ fn cumulativeSpanBefore(target: u32, counts: [64]u32, heaps: *const Heaps) u32 {
     return off;
 }
 
+/// Indexes type definitions by full name, keeping the first definition per
+/// name so lookups match what a forward scan of `type_defs` would find.
+/// Resolving a base chain by scanning the list per step is quadratic in the
+/// definition count, and every step allocates a full name, so the arena
+/// grows quadratically as well.
+pub fn indexTypeDefs(arena: std.mem.Allocator, type_defs: []const TypeDef) !std.StringHashMapUnmanaged(u32) {
+    var m: std.StringHashMapUnmanaged(u32) = .empty;
+    for (type_defs, 0..) |td, i| {
+        const nm = td.fullName(arena);
+        if (!m.contains(nm)) try m.put(arena, nm, @intCast(i));
+    }
+    return m;
+}
+
 /// The serialized-visible fields of a class, base classes first: Unity
 /// serializes base fields before derived ones, and only instance fields
 /// that are public (unless [NonSerialized]) or carry [SerializeField],
@@ -1166,6 +1180,21 @@ fn cumulativeSpanBefore(target: u32, counts: [64]u32, heaps: *const Heaps) u32 {
 /// field flag the C# compiler emits for it — both stop Unity writing the
 /// field, so both exclude it here.
 pub fn collectFields(arena: std.mem.Allocator, td: TypeDef, type_defs: []const TypeDef, serialized_rows: []const bool, nonserialized_rows: []const bool) ![]const Field {
+    var index = try indexTypeDefs(arena, type_defs);
+    return collectFieldsIndexed(arena, td, type_defs, &index, serialized_rows, nonserialized_rows);
+}
+
+/// Same as `collectFields`, but reuses a name index built once by the
+/// caller. Callers walking every definition in an assembly must use this
+/// one: building the index per definition is as quadratic as scanning.
+pub fn collectFieldsIndexed(
+    arena: std.mem.Allocator,
+    td: TypeDef,
+    type_defs: []const TypeDef,
+    index: *const std.StringHashMapUnmanaged(u32),
+    serialized_rows: []const bool,
+    nonserialized_rows: []const bool,
+) ![]const Field {
     // walk the same-assembly base chain into a stack
     var chain: [64]TypeDef = undefined;
     var n: usize = 0;
@@ -1175,15 +1204,8 @@ pub fn collectFields(arena: std.mem.Allocator, td: TypeDef, type_defs: []const T
         chain[n] = c;
         n += 1;
         const base = c.base_name orelse break;
-        var found: ?TypeDef = null;
-        for (type_defs) |d| {
-            if (std.mem.eql(u8, d.fullName(arena), base)) {
-                found = d;
-                break;
-            }
-        }
-        if (found == null) break;
-        current = found;
+        const idx = index.get(base) orelse break;
+        current = type_defs[idx];
     }
     var out: std.ArrayList(Field) = .empty;
     var i: usize = n;

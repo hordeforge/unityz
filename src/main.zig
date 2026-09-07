@@ -3422,19 +3422,46 @@ fn readF32(data: []const u8, pos: usize, endian: std.builtin.Endian) f32 {
     return @bitCast(bits);
 }
 
+/// A mesh plus its vertex-stream layout, derived once.
+/// `Mesh.channelByteOffset` re-derives the whole layout on every call, so
+/// reading channels per vertex component makes layout derivation, not the
+/// reads, the cost of a mesh export. `nstreams == 0` marks an unusable
+/// layout and yields a null offset for every channel, exactly as the
+/// per-call form did.
+const MeshView = struct {
+    mesh: *const unityz.classes.Mesh,
+    layout: [4]unityz.classes.Mesh.StreamLayout = undefined,
+    nstreams: usize = 0,
+
+    fn init(mesh: *const unityz.classes.Mesh) MeshView {
+        var self: MeshView = .{ .mesh = mesh };
+        self.nstreams = mesh.streamLayout(&self.layout) orelse 0;
+        return self;
+    }
+
+    fn channelByteOffset(self: *const MeshView, index: usize, vertex: usize) ?usize {
+        const c = self.mesh.channel(index) orelse return null;
+        _ = unityz.classes.Mesh.formatSize(c.format) orelse return null;
+        if (@as(usize, c.stream) >= self.nstreams) return null;
+        const st = self.layout[c.stream];
+        return st.offset +| @as(usize, c.offset) +| vertex *| st.stride;
+    }
+};
+
 /// Reads component `comp` of vertex channel `channel_index` for `vertex` as a
 /// float32, honoring the mesh's per-stream layout. Null when the channel is
 /// absent, non-float32, or the read would run past the vertex buffer.
 fn meshF32(
-    mesh: *const unityz.classes.Mesh,
+    view: *const MeshView,
     channel_index: usize,
     vertex: usize,
     comp: usize,
     endian: std.builtin.Endian,
 ) ?f32 {
+    const mesh = view.mesh;
     const c = mesh.channel(channel_index) orelse return null;
     if (c.format != 0 or comp >= c.dimension) return null;
-    const off = mesh.channelByteOffset(channel_index, vertex) orelse return null;
+    const off = view.channelByteOffset(channel_index, vertex) orelse return null;
     if (off +| (comp + 1) * 4 > mesh.vertex_data.len) return null;
     return readF32(mesh.vertex_data, off + comp * 4, endian);
 }
@@ -3443,16 +3470,17 @@ fn meshF32(
 /// blend-index channel (Unity stores bone indices as UInt8/UInt16/UInt32).
 /// Null when the channel is float or the byte range is out of bounds.
 fn meshU32(
-    mesh: *const unityz.classes.Mesh,
+    view: *const MeshView,
     channel_index: usize,
     vertex: usize,
     comp: usize,
     endian: std.builtin.Endian,
 ) ?u32 {
+    const mesh = view.mesh;
     const c = mesh.channel(channel_index) orelse return null;
     if (comp >= c.dimension) return null;
     const fs = unityz.classes.Mesh.formatSize(c.format) orelse return null;
-    const off = mesh.channelByteOffset(channel_index, vertex) orelse return null;
+    const off = view.channelByteOffset(channel_index, vertex) orelse return null;
     if (off +| (comp + 1) * fs > mesh.vertex_data.len) return null;
     const b = mesh.vertex_data[off + comp * fs ..];
     return switch (c.format) {
@@ -3623,6 +3651,7 @@ fn writeMeshObj(
     const vch = mesh.channel(0) orelse return &.{};
     if (vch.format != 0 or vch.dimension < 3) return &.{};
     const vcount: usize = mesh.vertex_count;
+    const mv: MeshView = .init(mesh);
     // Bounds are checked per read in meshF32; the index buffer is bounded below.
     const idx_bytes: usize = if (mesh.index_format == 1) 4 else 2;
     if (mesh.index_format != 0 and mesh.index_format != 1) return &.{};
@@ -3646,9 +3675,9 @@ fn writeMeshObj(
     const name = std.mem.trimEnd(u8, mesh.name, "\x00");
     try w.print("g {s}\n", .{name});
     for (0..vcount) |i| {
-        const x = meshF32(mesh, 0, i, 0, sf.endian) orelse return &.{};
-        const y = meshF32(mesh, 0, i, 1, sf.endian) orelse return &.{};
-        const z = meshF32(mesh, 0, i, 2, sf.endian) orelse return &.{};
+        const x = meshF32(&mv, 0, i, 0, sf.endian) orelse return &.{};
+        const y = meshF32(&mv, 0, i, 1, sf.endian) orelse return &.{};
+        const z = meshF32(&mv, 0, i, 2, sf.endian) orelse return &.{};
         // Unity is left-handed; OBJ convention is right-handed, so mirror X
         // (UnityPy's exporter does the same, negating vertices and normals).
         try w.print("v ", .{});
@@ -3660,25 +3689,25 @@ fn writeMeshObj(
         try w.print("\n", .{});
     }
     if (uv) |t| {
-        if (t.format == 0 and t.dimension >= 2 and meshF32(mesh, uv_index, 0, 0, sf.endian) != null) {
+        if (t.format == 0 and t.dimension >= 2 and meshF32(&mv, uv_index, 0, 0, sf.endian) != null) {
             for (0..vcount) |i| {
                 try w.print("vt ", .{});
-                try writeObjFloat(&w, @as(f64, meshF32(mesh, uv_index, i, 0, sf.endian) orelse 0));
+                try writeObjFloat(&w, @as(f64, meshF32(&mv, uv_index, i, 0, sf.endian) orelse 0));
                 try w.print(" ", .{});
-                try writeObjFloat(&w, @as(f64, meshF32(mesh, uv_index, i, 1, sf.endian) orelse 0));
+                try writeObjFloat(&w, @as(f64, meshF32(&mv, uv_index, i, 1, sf.endian) orelse 0));
                 try w.print("\n", .{});
             }
         }
     }
     if (nrm) |n| {
-        if (n.format == 0 and n.dimension >= 3 and meshF32(mesh, 1, 0, 0, sf.endian) != null) {
+        if (n.format == 0 and n.dimension >= 3 and meshF32(&mv, 1, 0, 0, sf.endian) != null) {
             for (0..vcount) |i| {
                 try w.print("vn ", .{});
-                try writeObjFloat(&w, -@as(f64, meshF32(mesh, 1, i, 0, sf.endian) orelse 0));
+                try writeObjFloat(&w, -@as(f64, meshF32(&mv, 1, i, 0, sf.endian) orelse 0));
                 try w.print(" ", .{});
-                try writeObjFloat(&w, @as(f64, meshF32(mesh, 1, i, 1, sf.endian) orelse 0));
+                try writeObjFloat(&w, @as(f64, meshF32(&mv, 1, i, 1, sf.endian) orelse 0));
                 try w.print(" ", .{});
-                try writeObjFloat(&w, @as(f64, meshF32(mesh, 1, i, 2, sf.endian) orelse 0));
+                try writeObjFloat(&w, @as(f64, meshF32(&mv, 1, i, 2, sf.endian) orelse 0));
                 try w.print("\n", .{});
             }
         }
@@ -3770,6 +3799,7 @@ fn writeMeshGlb(
     // leaves the position loop below with nothing to run and the accessor
     // min/max at their +/-inf seeds - printed straight into the JSON.
     if (vcount == 0) return &.{};
+    const mv: MeshView = .init(mesh);
     if (mesh.index_format != 0 and mesh.index_format != 1) return &.{};
     const idx_bytes: usize = if (mesh.index_format == 1) 4 else 2;
     if (mesh.index_buffer.len < idx_bytes * 3) return &.{};
@@ -3823,7 +3853,7 @@ fn writeMeshGlb(
                 const ji = if (legacy_skin.len != 0)
                     legacySkinJoint(legacy_skin[vi], k)
                 else
-                    meshU32(mesh, 13, vi, k, sf.endian);
+                    meshU32(&mv, 13, vi, k, sf.endian);
                 const jj = ji orelse {
                     has_skin = false;
                     break :outer;
@@ -3860,9 +3890,9 @@ fn writeMeshGlb(
     var pos_min = [3]f32{ std.math.inf(f32), std.math.inf(f32), std.math.inf(f32) };
     var pos_max = [3]f32{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
     for (0..vcount) |i| {
-        const x = meshF32(mesh, 0, i, 0, sf.endian) orelse return &.{};
-        const y = meshF32(mesh, 0, i, 1, sf.endian) orelse return &.{};
-        const z = meshF32(mesh, 0, i, 2, sf.endian) orelse return &.{};
+        const x = meshF32(&mv, 0, i, 0, sf.endian) orelse return &.{};
+        const y = meshF32(&mv, 0, i, 1, sf.endian) orelse return &.{};
+        const z = meshF32(&mv, 0, i, 2, sf.endian) orelse return &.{};
         // Vertex data is raw file bytes, so a component can be Inf or NaN.
         // Both reach the POSITION accessor's min/max, which is printed into
         // the glTF JSON - and JSON spells neither, so the whole GLB would
@@ -3885,17 +3915,17 @@ fn writeMeshGlb(
     const nrm_off: u32 = @intCast(bin.getWritten().len);
     if (has_n) {
         for (0..vcount) |i| {
-            try bin.writeFloat(f32, -@as(f32, meshF32(mesh, 1, i, 0, sf.endian) orelse 0));
-            try bin.writeFloat(f32, @as(f32, meshF32(mesh, 1, i, 1, sf.endian) orelse 0));
-            try bin.writeFloat(f32, @as(f32, meshF32(mesh, 1, i, 2, sf.endian) orelse 0));
+            try bin.writeFloat(f32, -@as(f32, meshF32(&mv, 1, i, 0, sf.endian) orelse 0));
+            try bin.writeFloat(f32, @as(f32, meshF32(&mv, 1, i, 1, sf.endian) orelse 0));
+            try bin.writeFloat(f32, @as(f32, meshF32(&mv, 1, i, 2, sf.endian) orelse 0));
         }
     }
     const uv_off: u32 = @intCast(bin.getWritten().len);
     if (has_t) {
         for (0..vcount) |i| {
-            try bin.writeFloat(f32, @as(f32, meshF32(mesh, uv_index, i, 0, sf.endian) orelse 0));
+            try bin.writeFloat(f32, @as(f32, meshF32(&mv, uv_index, i, 0, sf.endian) orelse 0));
             // glTF UV origin is top-left; Unity is bottom-left, so flip V
-            try bin.writeFloat(f32, 1.0 - @as(f32, meshF32(mesh, uv_index, i, 1, sf.endian) orelse 0));
+            try bin.writeFloat(f32, 1.0 - @as(f32, meshF32(&mv, uv_index, i, 1, sf.endian) orelse 0));
         }
     }
     const idx_off: u32 = @intCast(bin.getWritten().len);
@@ -3970,7 +4000,7 @@ fn writeMeshGlb(
                 const w = if (legacy_skin.len != 0)
                     legacySkinWeight(legacy_skin[vi], k) orelse 0
                 else
-                    meshF32(mesh, 12, vi, k, sf.endian) orelse 0;
+                    meshF32(&mv, 12, vi, k, sf.endian) orelse 0;
                 try bin.writeFloat(f32, w);
             }
         }
@@ -3982,7 +4012,7 @@ fn writeMeshGlb(
                 const j = if (legacy_skin.len != 0)
                     legacySkinJoint(legacy_skin[vi], k) orelse 0
                 else
-                    meshU32(mesh, 13, vi, k, sf.endian) orelse 0;
+                    meshU32(&mv, 13, vi, k, sf.endian) orelse 0;
                 try bin.writeInt(u16, @intCast(j));
             }
         }
@@ -4961,7 +4991,21 @@ fn objectName(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedF
     const data = sf.objectData(o) orelse return "";
     var r = unityz.streams.Reader.init(data);
     r.endian = sf.endian;
-    const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return "";
+    // A record's fields are read in tree order from byte 0, so when m_Name
+    // is the first one - which is where Unity puts it - reading that node
+    // alone yields the same string the full decode would. The whole-object
+    // decode is what the object table used to pay per object, and it lands
+    // in an arena the listing never resets: naming the objects of a large
+    // container cost gigabytes and a full decode each, for one leaf.
+    const root = &tree.roots[0];
+    if (root.children.len != 0) {
+        const first = &root.children[0];
+        if (std.mem.eql(u8, first.name, "m_Name") and std.mem.eql(u8, first.type_name, "string")) {
+            const nv = unityz.object_reader.readObject(arena, &r, first) catch return "";
+            return if (nv == .string) nv.string else "";
+        }
+    }
+    const v = unityz.object_reader.readObject(arena, &r, root) catch return "";
     return unityz.classes.stringField(v, "m_Name") orelse "";
 }
 
@@ -6265,19 +6309,18 @@ fn pixelPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
     try collectFingerprints(arena, b_bytes, class_filter, null, &b_list);
     var cache_a: SpriteCache = .{};
     var cache_b: SpriteCache = .{};
+    var b_by_key = try indexFingerprints(b_list.items);
+    defer b_by_key.deinit(std.heap.page_allocator);
     for (a_list.items) |fa| {
-        for (b_list.items) |fb| {
-            if (fb.path_id != fa.path_id or !sameNode(fb.node, fa.node)) continue;
-            switch (fa.class_id) {
-                28 => if (try diffObjectPixels(arena, a_bytes, b_bytes, fa, .texture, &cache_a, &cache_b, stdout)) |st| {
-                    if (st.diff_pixels != 0) try stats.append(arena, st);
-                },
-                213 => if (try diffObjectPixels(arena, a_bytes, b_bytes, fa, .sprite, &cache_a, &cache_b, stdout)) |st| {
-                    if (st.diff_pixels != 0) try stats.append(arena, st);
-                },
-                else => {},
-            }
-            break;
+        if (!b_by_key.contains(.{ .path_id = fa.path_id, .node = fa.node })) continue;
+        switch (fa.class_id) {
+            28 => if (try diffObjectPixels(arena, a_bytes, b_bytes, fa, .texture, &cache_a, &cache_b, stdout)) |st| {
+                if (st.diff_pixels != 0) try stats.append(arena, st);
+            },
+            213 => if (try diffObjectPixels(arena, a_bytes, b_bytes, fa, .sprite, &cache_a, &cache_b, stdout)) |st| {
+                if (st.diff_pixels != 0) try stats.append(arena, st);
+            },
+            else => {},
         }
     }
 }
@@ -6294,33 +6337,32 @@ fn audioPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
     try collectFingerprints(arena, b_bytes, class_filter, null, &b_list);
     var compared: usize = 0;
     var differ: usize = 0;
+    var b_by_key = try indexFingerprints(b_list.items);
+    defer b_by_key.deinit(std.heap.page_allocator);
     for (a_list.items) |fa| {
         if (fa.class_id != 83) continue;
-        for (b_list.items) |fb| {
-            if (fb.path_id != fa.path_id or !sameNode(fb.node, fa.node)) continue;
-            compared += 1;
-            const sa = try findObjectStream(arena, a_bytes, fa);
-            const sb = try findObjectStream(arena, b_bytes, fa);
-            if (sa == null or sb == null) {
-                try stdout.print("    (audio: object {d} (AudioClip) could not be resolved in one or both files)\n", .{fa.path_id});
-                differ += 1;
-            } else if (sa.?.len != sb.?.len) {
-                try stdout.print("    (audio: object {d} (AudioClip) size differs {d} vs {d})\n", .{ fa.path_id, sa.?.len, sb.?.len });
-                try stats.append(arena, .{ .path_id = fa.path_id, .size_a = sa.?.len, .size_b = sb.?.len });
-                differ += 1;
-            } else if (!std.mem.eql(u8, sa.?, sb.?)) {
-                var first: usize = sa.?.len;
-                for (sa.?, 0..) |c, i| {
-                    if (c != sb.?[i]) {
-                        first = i;
-                        break;
-                    }
+        if (!b_by_key.contains(.{ .path_id = fa.path_id, .node = fa.node })) continue;
+        compared += 1;
+        const sa = try findObjectStream(arena, a_bytes, fa);
+        const sb = try findObjectStream(arena, b_bytes, fa);
+        if (sa == null or sb == null) {
+            try stdout.print("    (audio: object {d} (AudioClip) could not be resolved in one or both files)\n", .{fa.path_id});
+            differ += 1;
+        } else if (sa.?.len != sb.?.len) {
+            try stdout.print("    (audio: object {d} (AudioClip) size differs {d} vs {d})\n", .{ fa.path_id, sa.?.len, sb.?.len });
+            try stats.append(arena, .{ .path_id = fa.path_id, .size_a = sa.?.len, .size_b = sb.?.len });
+            differ += 1;
+        } else if (!std.mem.eql(u8, sa.?, sb.?)) {
+            var first: usize = sa.?.len;
+            for (sa.?, 0..) |c, i| {
+                if (c != sb.?[i]) {
+                    first = i;
+                    break;
                 }
-                try stdout.print("    (audio: object {d} (AudioClip) {d} bytes, first difference at offset {d})\n", .{ fa.path_id, sa.?.len, first });
-                try stats.append(arena, .{ .path_id = fa.path_id, .size_a = sa.?.len, .size_b = sb.?.len, .first_diff = first });
-                differ += 1;
             }
-            break;
+            try stdout.print("    (audio: object {d} (AudioClip) {d} bytes, first difference at offset {d})\n", .{ fa.path_id, sa.?.len, first });
+            try stats.append(arena, .{ .path_id = fa.path_id, .size_a = sa.?.len, .size_b = sb.?.len, .first_diff = first });
+            differ += 1;
         }
     }
     try stdout.print("    (audio: {d} clips compared, {d} differ)\n", .{ compared, differ });
@@ -6501,12 +6543,8 @@ fn fieldsPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8
     var b_list: std.ArrayList(Fp) = .empty;
     try collectFingerprints(arena, a_bytes, class_filter, null, &a_list);
     try collectFingerprints(arena, b_bytes, class_filter, null, &b_list);
-    var b_by_key: FpMap = .empty;
+    var b_by_key = try indexFingerprints(b_list.items);
     defer b_by_key.deinit(std.heap.page_allocator);
-    for (b_list.items) |fb| {
-        const gop = try b_by_key.getOrPut(std.heap.page_allocator, .{ .path_id = fb.path_id, .node = fb.node });
-        if (!gop.found_existing) gop.value_ptr.* = fb;
-    }
     for (a_list.items) |fa| {
         const fb = b_by_key.get(.{ .path_id = fa.path_id, .node = fa.node }) orelse continue;
         if (fb.hash == fa.hash and fb.size == fa.size) continue;
@@ -6944,19 +6982,11 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     // Index both sides by (path_id, node). The nested scans this replaces
     // were quadratic in the object count, which bites on bundles holding
     // thousands of objects.
-    var b_by_key: FpMap = .empty;
-    defer b_by_key.deinit(std.heap.page_allocator);
-    var a_keys: FpMap = .empty;
-    defer a_keys.deinit(std.heap.page_allocator);
     // First entry wins, matching the first-match semantics of the scans.
-    for (b_list.items) |fb| {
-        const gop = try b_by_key.getOrPut(std.heap.page_allocator, .{ .path_id = fb.path_id, .node = fb.node });
-        if (!gop.found_existing) gop.value_ptr.* = fb;
-    }
-    for (a_list.items) |fa| {
-        const gop = try a_keys.getOrPut(std.heap.page_allocator, .{ .path_id = fa.path_id, .node = fa.node });
-        if (!gop.found_existing) gop.value_ptr.* = fa;
-    }
+    var b_by_key = try indexFingerprints(b_list.items);
+    defer b_by_key.deinit(std.heap.page_allocator);
+    var a_keys = try indexFingerprints(a_list.items);
+    defer a_keys.deinit(std.heap.page_allocator);
 
     for (a_list.items) |fa| {
         var matched = false;
@@ -7161,6 +7191,18 @@ const FpKeyContext = struct {
 
 const FpMap = std.HashMapUnmanaged(FpKey, Fp, FpKeyContext, std.hash_map.default_max_load_percentage);
 
+/// Indexes one side's fingerprints by identity, keeping the first entry per
+/// key. Matching the two sides by scanning the other list per object is
+/// quadratic in the object count, which a full container reaches easily.
+fn indexFingerprints(items: []const Fp) !FpMap {
+    var m: FpMap = .empty;
+    for (items) |f| {
+        const gop = try m.getOrPut(std.heap.page_allocator, .{ .path_id = f.path_id, .node = f.node });
+        if (!gop.found_existing) gop.value_ptr.* = f;
+    }
+    return m;
+}
+
 /// Two objects match only when they come from the same container node
 /// (both unqualified, or the same node path).
 fn sameNode(a: ?[]const u8, b: ?[]const u8) bool {
@@ -7192,22 +7234,18 @@ fn writeObjList(stdout: *Io.Writer, items: []const Fp) !void {
 /// path ids in different nodes are not conflated.
 fn collectFingerprints(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, node: ?[]const u8, out: *std.ArrayList(Fp)) !void {
     switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = try unityz.bundle.parse(arena, bytes);
-            for (b.nodes) |n| {
-                if (unityz.container.sniff(n.data).container != .serialized) continue;
-                try collectFingerprints(arena, n.data, class_filter, n.path, out);
-            }
-        },
-        .webfile => {
-            const wf = try unityz.webfile.parse(arena, bytes);
-            for (wf.entries) |e| {
+        // Through the memoized parses: one `diff` run collects
+        // fingerprints, then raw nodes, then (with --pixels/--audio) the
+        // fingerprints again, and each fresh `bundle.parse` decompresses
+        // every block and leaves another full copy in the arena.
+        .bundle, .webfile => {
+            for (try containerEntries(arena, bytes)) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
                 try collectFingerprints(arena, e.data, class_filter, e.path, out);
             }
         },
         .serialized => {
-            const sf = try unityz.serialized.parse(arena, bytes);
+            const sf = try serializedCached(arena, bytes);
             for (sf.objects) |*o| {
                 if (class_filter) |cf| {
                     if (o.class_id != cf) continue;
@@ -7231,36 +7269,16 @@ fn collectFingerprints(arena: std.mem.Allocator, bytes: []const u8, class_filter
 /// fingerprint. `diff` uses these so a raw-node edit (the node-path patch
 /// form) is reported instead of silently passing as "unchanged".
 fn collectRawNodes(arena: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(Fp)) !void {
-    switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = try unityz.bundle.parse(arena, bytes);
-            for (b.nodes) |n| {
-                if (unityz.container.sniff(n.data).container == .serialized) continue;
-                try out.append(arena, .{
-                    .path_id = 0,
-                    .class_id = -1,
-                    .hash = std.hash.Wyhash.hash(0, n.data),
-                    .size = @intCast(n.data.len),
-                    .node = n.path,
-                    .name = n.path,
-                });
-            }
-        },
-        .webfile => {
-            const wf = try unityz.webfile.parse(arena, bytes);
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container == .serialized) continue;
-                try out.append(arena, .{
-                    .path_id = 0,
-                    .class_id = -1,
-                    .hash = std.hash.Wyhash.hash(0, e.data),
-                    .size = @intCast(e.data.len),
-                    .node = e.path,
-                    .name = e.path,
-                });
-            }
-        },
-        else => {},
+    for (try containerEntries(arena, bytes)) |e| {
+        if (unityz.container.sniff(e.data).container == .serialized) continue;
+        try out.append(arena, .{
+            .path_id = 0,
+            .class_id = -1,
+            .hash = std.hash.Wyhash.hash(0, e.data),
+            .size = @intCast(e.data.len),
+            .node = e.path,
+            .name = e.path,
+        });
     }
 }
 
