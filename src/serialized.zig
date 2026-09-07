@@ -236,8 +236,13 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!Serial
     const object_table_offset = mr.position();
     const object_count = try readCount(&mr);
     const objects = try allocator.alloc(ObjectInfo, object_count);
+    // Formats below 16 resolve every object's type by class ID; index the
+    // type table once rather than scanning it per object.
+    var legacy_types: LegacyTypeIndex = .empty;
+    defer legacy_types.deinit(allocator);
+    if (version < 16) legacy_types = try buildLegacyTypeIndex(allocator, types);
     for (objects) |*o| {
-        o.* = try readObjectInfo(&mr, version, uses_big_ids, data_offset, file_size, types);
+        o.* = try readObjectInfo(&mr, version, uses_big_ids, data_offset, file_size, types, &legacy_types);
     }
     const after_objects_offset = mr.position();
 
@@ -373,6 +378,7 @@ fn readObjectInfo(
     data_offset: u64,
     file_size: u64,
     types: []SerializedType,
+    legacy_types: *const LegacyTypeIndex,
 ) ParseError!ObjectInfo {
     const path_id: i64 = switch (version) {
         2...6 => try r.readInt(i32),
@@ -399,7 +405,7 @@ fn readObjectInfo(
         const type_id = try r.readInt(i32);
         const class_bits = try r.readInt(u16);
         class_id = class_bits; // zero-extended, as stored
-        type_index = try resolveLegacyTypeIndex(types, type_id);
+        type_index = try resolveLegacyTypeIndex(legacy_types, type_id);
     } else if (version == 16) {
         const raw = try r.readInt(i32);
         // The script identity (i16) and stripped flag (u8) that follow are
@@ -456,19 +462,43 @@ fn readObjectInfo(
     };
 }
 
+/// Legacy class-ID index over the SerializedType table: the first
+/// matching entry plus how many entries share that class ID, so an
+/// ambiguous lookup is still reportable without rescanning.
+const LegacyTypeSlot = struct { index: u32, count: u32 };
+const LegacyTypeIndex = std.AutoHashMapUnmanaged(i32, LegacyTypeSlot);
+
+/// Builds the class-ID index once per file. Both tables are bounded by
+/// the metadata size, so scanning them per object is quadratic in the
+/// file's own declared counts - a crafted file can pair ~1M types with
+/// ~100k objects inside a 64 MB metadata block and spend 10^11 iterations
+/// in `parse`. One pass here makes the per-object lookup constant-time.
+///
+/// Duplicate class IDs stay *lazily* rejected, as the linear scan did: a
+/// type table with two entries for one class ID is only an error when an
+/// object actually references it.
+fn buildLegacyTypeIndex(allocator: std.mem.Allocator, types: []SerializedType) error{OutOfMemory}!LegacyTypeIndex {
+    var map: LegacyTypeIndex = .empty;
+    errdefer map.deinit(allocator);
+    try map.ensureTotalCapacity(allocator, @intCast(types.len));
+    for (types, 0..) |*t, i| {
+        const gop = map.getOrPutAssumeCapacity(t.class_id);
+        if (gop.found_existing) {
+            gop.value_ptr.count += 1;
+        } else {
+            gop.value_ptr.* = .{ .index = @intCast(i), .count = 1 };
+        }
+    }
+    return map;
+}
+
 /// Legacy object table: the raw type ID references the SerializedType
 /// table by class ID. Returns the unique matching index, or null when no
 /// type matches; ambiguous matches are an error.
-fn resolveLegacyTypeIndex(types: []SerializedType, type_id: i32) ParseError!?u32 {
-    var match: ?usize = null;
-    for (types, 0..) |*t, i| {
-        if (t.class_id == type_id) {
-            if (match != null) return error.Corrupt;
-            match = i;
-        }
-    }
-    const idx = match orelse return null;
-    return @intCast(idx);
+fn resolveLegacyTypeIndex(index: *const LegacyTypeIndex, type_id: i32) ParseError!?u32 {
+    const slot = index.get(type_id) orelse return null;
+    if (slot.count != 1) return error.Corrupt;
+    return slot.index;
 }
 
 fn readFileIdentifier(r: *streams.Reader, version: u32) ParseError!FileIdentifier {
