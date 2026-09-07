@@ -5180,7 +5180,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                 try recordFailure(&report, arena, null, -1, "UnityArchive files are not supported yet", .{});
                 try emitVerifyReport(json, &report, stdout);
             } else {
-                try stdout.print("{s}: UnityArchive files are not supported yet\n", .{path});
+                failure("{s}: UnityArchive files are not supported yet\n", .{path});
             }
             verify_failed_flag = true;
             return;
@@ -5190,7 +5190,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
                 try recordFailure(&report, arena, null, -1, "not a recognized Unity asset file", .{});
                 try emitVerifyReport(json, &report, stdout);
             } else {
-                try stdout.print("{s}: not a recognized Unity asset file\n", .{path});
+                failure("{s}: not a recognized Unity asset file\n", .{path});
             }
             verify_failed_flag = true;
             return;
