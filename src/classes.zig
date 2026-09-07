@@ -526,7 +526,11 @@ pub const TextAsset = struct {
     pub fn fromValue(v: value.Value) TextAsset {
         return .{
             .name = stringField(v, "m_Name") orelse "",
-            .script = bytesField(v, "m_Script") orelse &.{},
+            // Unity types `m_Script` as `string`, which the reader decodes to
+            // `.string`; only a `TypelessData`/byte-array layout arrives as
+            // `.bytes`. Reading just one of the two left `script` empty for
+            // every real TextAsset, so `extract` wrote a 0-byte file.
+            .script = bytesField(v, "m_Script") orelse stringField(v, "m_Script") orelse &.{},
         };
     }
 };

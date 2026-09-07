@@ -178,7 +178,7 @@ fn failure(comptime fmt: []const u8, args: anytype) void {
 
 fn diagnostic(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
-    var w: Io.File.Writer = .init(.stderr(), io_global.io, &buf);
+    var w: Io.File.Writer = .initStreaming(.stderr(), io_global.io, &buf);
     w.interface.print(fmt, args) catch {};
     w.interface.flush() catch {};
 }
@@ -190,12 +190,18 @@ pub fn main(init: std.process.Init) !void {
     // The args slice includes argv[0]; drop it.
     const args = (try init.minimal.args.toSlice(arena))[1..];
 
+    // Streaming, not positional: stdio is inherited, so its offset belongs to
+    // whoever redirected it. A positional writer starts at pos 0 and pwrites
+    // there, which silently clobbers the front of the target under `>>` (and
+    // makes two commands sharing one redirect overwrite each other) — it only
+    // looks right on a pipe or tty, where the positional path falls back to
+    // streaming on Unseekable.
     var out_buffer: [1024]u8 = undefined;
-    var out_writer: Io.File.Writer = .init(.stdout(), io, &out_buffer);
+    var out_writer: Io.File.Writer = .initStreaming(.stdout(), io, &out_buffer);
     const stdout = &out_writer.interface;
 
     var err_buffer: [1024]u8 = undefined;
-    var err_writer: Io.File.Writer = .init(.stderr(), io, &err_buffer);
+    var err_writer: Io.File.Writer = .initStreaming(.stderr(), io, &err_buffer);
     const stderr = &err_writer.interface;
 
     if (args.len == 0) {
@@ -863,12 +869,18 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
         std.heap.page_allocator.free(extract_outdir.?);
         extract_outdir = base_outdir;
     };
+    // `--summary` is a dry run, so it must not touch the filesystem: every
+    // write below is behind `!summary_mode`, and `extract_outdir` is read
+    // only by `writeFileToCwd`, so creating the directory here would be the
+    // one side effect a report-only pass leaves behind.
     if (extract_outdir) |d| {
-        const io = io_global.io;
-        ensureDirPath(io, d) catch |err| {
-            failure("unityz: {s}: {s}\n", .{ d, @errorName(err) });
-            return;
-        };
+        if (!summary_mode) {
+            const io = io_global.io;
+            ensureDirPath(io, d) catch |err| {
+                failure("unityz: {s}: {s}\n", .{ d, @errorName(err) });
+                return;
+            };
+        }
     }
     switch (sniff.container) {
         .webfile => {
@@ -5899,7 +5911,7 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
                     var err_buf: [1024]u8 = undefined;
                     var err_writer: Io.File.Writer = undefined;
                     if (json) {
-                        err_writer = .init(.stderr(), io, &err_buf);
+                        err_writer = .initStreaming(.stderr(), io, &err_buf);
                         diag_out = &err_writer.interface;
                     }
                     var pixel_stats: std.ArrayList(PixelStat) = .empty;
@@ -6962,7 +6974,7 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var err_buf: [1024]u8 = undefined;
     var err_writer: Io.File.Writer = undefined;
     if (json) {
-        err_writer = .init(.stderr(), io_global.io, &err_buf);
+        err_writer = .initStreaming(.stderr(), io_global.io, &err_buf);
         diag_out = &err_writer.interface;
     }
     if (pixels) try pixelPass(arena, bytes, other_bytes, class_filter, diag_out, &pixel_stats);
