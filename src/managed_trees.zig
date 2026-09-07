@@ -71,13 +71,7 @@ fn monoScriptTree(arena: std.mem.Allocator) !typetree.TypeTree {
 }
 
 fn fieldStr(v: value.Value, name: []const u8) []const u8 {
-    if (v != .obj) return "";
-    for (v.obj) |f| {
-        if (std.mem.eql(u8, f.name, name)) {
-            if (f.value == .string) return f.value.string;
-        }
-    }
-    return "";
+    return value.stringField(v, name) orelse "";
 }
 
 /// Decodes every MonoScript (class 115) object of a serialized file.
@@ -309,7 +303,10 @@ fn appendFieldNodes(
     // not serialize them
 }
 
-const align_flag: i32 = 0x4000;
+/// The type-tree meta flag meaning "align to 4 bytes after this node".
+/// Owned by `object_reader`, which reads and writes it; aliased here so the
+/// two cannot drift.
+const align_flag = object_reader.align_flag;
 
 /// Errors the recursive tree builder can produce.
 const BuildError = error{ OutOfMemory, NoSpaceLeft };

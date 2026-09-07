@@ -400,10 +400,13 @@ pub fn fieldOf(v: value.Value, name: []const u8) ?value.Value {
     return value.fieldOf(v, name);
 }
 
-pub fn intField(v: value.Value, name: []const u8) ?i64 {
-    const f = fieldOf(v, name) orelse return null;
-    return f.asInt();
-}
+/// The generic variant accessors are owned by `value`; re-exported here so
+/// callers of the typed views keep reaching for one name per field kind.
+pub const intField = value.intField;
+pub const boolField = value.boolField;
+pub const stringField = value.stringField;
+pub const floatField = value.floatField;
+pub const bytesField = value.bytesField;
 
 /// Narrows an untrusted type-tree integer to `T`, yielding 0 when it does
 /// not fit. Field values come from the file, so a negative or oversized
@@ -411,34 +414,6 @@ pub fn intField(v: value.Value, name: []const u8) ?i64 {
 /// rather than make `@intCast` illegal behaviour.
 fn narrow(comptime T: type, v: i64) T {
     return std.math.cast(T, v) orelse 0;
-}
-
-pub fn boolField(v: value.Value, name: []const u8) ?bool {
-    return switch (fieldOf(v, name) orelse return null) {
-        .bool => |b| b,
-        else => null,
-    };
-}
-
-pub fn stringField(v: value.Value, name: []const u8) ?[]const u8 {
-    return switch (fieldOf(v, name) orelse return null) {
-        .string => |s| s,
-        else => null,
-    };
-}
-
-pub fn floatField(v: value.Value, name: []const u8) ?f64 {
-    return switch (fieldOf(v, name) orelse return null) {
-        .float => |f| f,
-        else => null,
-    };
-}
-
-pub fn bytesField(v: value.Value, name: []const u8) ?[]const u8 {
-    return switch (fieldOf(v, name) orelse return null) {
-        .bytes => |b| b,
-        else => null,
-    };
 }
 
 pub fn pptrField(v: value.Value, name: []const u8) ?value.PPtr {

@@ -86,13 +86,13 @@ fn writeNode(
         const b = try asBytes(w.allocator, v);
         try w.writeInt(i32, @intCast(b.len));
         try w.writeBytes(b);
-        if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
+        if (!suppress_align and object_reader.nodeAligned(node)) try padAlign(w, original);
         return;
     }
     if (object_reader.primitiveKind(type_name)) |prim| {
         if (node.children.len != 0) return error.TypeMismatch;
         try writePrimitive(w, prim, v, original);
-        if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
+        if (!suppress_align and object_reader.nodeAligned(node)) try padAlign(w, original);
         return;
     }
     if (std.mem.eql(u8, type_name, "pair")) {
@@ -104,7 +104,7 @@ fn writeNode(
         if (items.len != 2) return error.TypeMismatch;
         try writeNode(w, &node.children[0], items[0], false, original);
         try writeNode(w, &node.children[1], items[1], false, original);
-        if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
+        if (!suppress_align and object_reader.nodeAligned(node)) try padAlign(w, original);
         return;
     }
     if (object_reader.isPPtrType(type_name)) {
@@ -130,7 +130,7 @@ fn writeNode(
                 const child_value = findField(fields, child.name) orelse return error.MissingField;
                 try writeNode(w, child, child_value, false, original);
             }
-            if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
+            if (!suppress_align and object_reader.nodeAligned(node)) try padAlign(w, original);
             return;
         }
         // Opaque fixed-size leaf: raw bytes.
@@ -138,7 +138,7 @@ fn writeNode(
         const b = try asBytes(w.allocator, v);
         if (b.len != @as(usize, @intCast(node.byte_size))) return error.TypeMismatch;
         try w.writeBytes(b);
-        if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
+        if (!suppress_align and object_reader.nodeAligned(node)) try padAlign(w, original);
         return;
     };
 
@@ -165,7 +165,7 @@ fn writeNode(
         };
         try w.writeInt(i32, @intCast(b.len));
         try w.writeBytes(b);
-        const aligns = nodeAligned(node) or nodeAligned(array_node) or nodeAligned(element_node);
+        const aligns = object_reader.nodeAligned(node) or object_reader.nodeAligned(array_node) or object_reader.nodeAligned(element_node);
         if (!suppress_align and aligns) try padAlign(w, original);
         return;
     }
@@ -180,13 +180,13 @@ fn writeNode(
             try writePrimitive(w, element_prim.?, item, original);
         }
     } else {
-        const suppress_element = nodeAligned(element_node);
+        const suppress_element = object_reader.nodeAligned(element_node);
         for (items) |item| {
             try writeNode(w, element_node, item, suppress_element, original);
         }
     }
 
-    const aligns = nodeAligned(node) or nodeAligned(array_node) or nodeAligned(element_node);
+    const aligns = object_reader.nodeAligned(node) or object_reader.nodeAligned(array_node) or object_reader.nodeAligned(element_node);
     if (!suppress_align and aligns) try padAlign(w, original);
 }
 
@@ -211,10 +211,6 @@ fn findField(fields: []const value.Field, name: []const u8) ?value.Value {
         if (std.mem.eql(u8, f.name, name)) return f.value;
     }
     return null;
-}
-
-fn nodeAligned(node: *const typetree.Node) bool {
-    return (node.meta_flags & object_reader.align_flag) != 0;
 }
 
 fn writePrimitive(w: *streams.Writer, prim: object_reader.Primitive, v: value.Value, original: ?[]const u8) Error!void {
@@ -319,7 +315,7 @@ fn writePPtr(w: *streams.Writer, node: *const typetree.Node, v: value.Value, sup
         }
     }
     if (!file_written or !path_written) return error.Corrupt;
-    if (!suppress_align and nodeAligned(node)) try padAlign(w, original);
+    if (!suppress_align and object_reader.nodeAligned(node)) try padAlign(w, original);
 }
 
 /// Aligns the writer to 4 bytes. When `original` is present, the padding

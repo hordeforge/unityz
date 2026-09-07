@@ -80,6 +80,43 @@ pub fn fieldOf(v: Value, name: []const u8) ?Value {
     };
 }
 
+/// Typed accessors for a named field of a `.obj` value. Each yields null
+/// when the field is missing or holds a different variant, so a caller can
+/// fall back without walking the tree itself. They live here, next to
+/// `Value`, rather than in one of the parsers, so every module that reads a
+/// value tree shares one implementation.
+pub fn intField(v: Value, name: []const u8) ?i64 {
+    return (fieldOf(v, name) orelse return null).asInt();
+}
+
+pub fn boolField(v: Value, name: []const u8) ?bool {
+    return switch (fieldOf(v, name) orelse return null) {
+        .bool => |b| b,
+        else => null,
+    };
+}
+
+pub fn stringField(v: Value, name: []const u8) ?[]const u8 {
+    return switch (fieldOf(v, name) orelse return null) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+pub fn floatField(v: Value, name: []const u8) ?f64 {
+    return switch (fieldOf(v, name) orelse return null) {
+        .float => |f| f,
+        else => null,
+    };
+}
+
+pub fn bytesField(v: Value, name: []const u8) ?[]const u8 {
+    return switch (fieldOf(v, name) orelse return null) {
+        .bytes => |b| b,
+        else => null,
+    };
+}
+
 /// Writes `v` as compact JSON to `writer` (any type with writeByte /
 /// writeAll / print). Bytes are rendered as base64; PPtrs as small objects.
 pub fn jsonWrite(v: Value, writer: anytype) !void {

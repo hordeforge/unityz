@@ -294,10 +294,6 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 // Value-tree access
 // ---------------------------------------------------------------------------
 
-fn intField(v: value.Value, name: []const u8) ?i64 {
-    return (value.fieldOf(v, name) orelse return null).asInt();
-}
-
 fn asArray(v: value.Value) ?[]const value.Value {
     return switch (v) {
         .array => |a| a,
@@ -1215,10 +1211,10 @@ fn collectCodeParams(arena: std.mem.Allocator, pf: value.Value, codes: *std.Arra
                     const subs = asArray(group) orelse continue;
                     const parr = if (gi < pgroups.len) (asArray(pgroups[gi]) orelse &.{}) else &.{};
                     for (subs, 0..) |sub_obj, k| {
-                        const gpu = intField(sub_obj, "m_GpuProgramType") orelse continue;
+                        const gpu = value.intField(sub_obj, "m_GpuProgramType") orelse continue;
                         const gpu_u: u32 = @intCast(gpu);
                         if (!isD3d11Type(gpu_u)) continue;
-                        if (intField(sub_obj, "m_BlobIndex")) |bi| {
+                        if (value.intField(sub_obj, "m_BlobIndex")) |bi| {
                             try codes.append(arena, @intCast(bi));
                             try code_types.append(arena, gpu_u);
                         }
@@ -1308,7 +1304,7 @@ pub fn decodeParamRecord(arena: std.mem.Allocator, data: []const u8, rec: Record
 pub fn decodeShader(arena: std.mem.Allocator, v: value.Value) !?ShaderBlob {
     const blob = (try openD3d11Blob(arena, v)) orelse return null;
     const pf = value.fieldOf(v, "m_ParsedForm") orelse return null;
-    const name = streams.trimNul(stringField(pf, "m_Name") orelse "");
+    const name = streams.trimNul(value.stringField(pf, "m_Name") orelse "");
 
     var codes: std.ArrayList(u32) = .empty;
     defer codes.deinit(arena);
@@ -1369,13 +1365,6 @@ pub fn decodeShader(arena: std.mem.Allocator, v: value.Value) !?ShaderBlob {
         .records = try arena.dupe(DecodedRecord, records[0..count]),
         .code_indices = try arena.dupe(u32, codes.items),
         .param_indices = try arena.dupe(u32, params.items),
-    };
-}
-
-fn stringField(v: value.Value, name: []const u8) ?[]const u8 {
-    return switch (value.fieldOf(v, name) orelse return null) {
-        .string => |s| s,
-        else => null,
     };
 }
 

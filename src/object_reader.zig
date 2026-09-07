@@ -83,7 +83,10 @@ pub fn isPathIdName(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name, "pathID") or std.ascii.eqlIgnoreCase(name, "m_PathID");
 }
 
-fn nodeAligned(node: *const typetree.Node) bool {
+/// True when `node` carries the "align to 4 bytes afterwards" meta flag.
+/// The reader owns this predicate; the writer shares it so the two stay in
+/// step on what a padded node is.
+pub fn nodeAligned(node: *const typetree.Node) bool {
     return (node.meta_flags & align_flag) != 0;
 }
 
