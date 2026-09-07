@@ -32,7 +32,7 @@ targets `zig build -Dtarget=...` accepts should work but are not
 covered by CI. CI also blocks on formatting and shell lint:
 
 ```bash
-zig fmt --check build.zig src
+zig fmt --check build.zig build.zig.zon src
 shellcheck scripts/*.sh
 ```
 
@@ -48,8 +48,8 @@ shellcheck scripts/*.sh
   JSON for most other classes (animations, animator controllers, mixers,
   particle systems, materials, script registries).
 - **Edit in place** - change any field of any object, patch streamed
-  sidecar bytes, and get byte-exact output that re-verifies before it
-  writes (`edit`).
+  sidecar bytes, and get byte-exact output, with `--verify` to
+  round-trip-check the result before it writes (`edit`).
 - **Create from scratch** - build a whole bundle from type trees and
   JSON object values, with no source file (`create`).
 - **Check and compare** - round-trip every object byte-exactly, validate
@@ -75,7 +75,8 @@ read or check failures exit 1, always with the diagnostic on stderr. See
   object table, `--dump` prints every object as JSON)
 - `extract` - pull out embedded assets (filters: `--class`, `--path-id`,
   `--name`, `--raw`; `--json` value trees + manifest; `--summary` dry run)
-- `edit` - change fields, patch sidecars, verify before writing
+- `edit` - change fields, patch sidecars, `--verify` to round-trip-check
+  before writing
 - `verify` - byte-exact round-trip check of every object, non-zero exit
   on failure
 - `stats` - per-class sizes and duplicate-object detection (`--dups`
@@ -204,8 +205,8 @@ canonical home; `unityz --version` reads it at build time), move the
 merge that to `main`, then push the matching tag:
 
 ```bash
-git tag v0.1.4
-git push origin v0.1.4
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 The release workflow rejects a tag that disagrees with `build.zig.zon` or

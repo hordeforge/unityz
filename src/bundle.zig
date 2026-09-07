@@ -562,9 +562,8 @@ pub fn blockCompressionType(block_flags: u16) CompressionType {
     return @enumFromInt(block_flags & 0x3F);
 }
 
-/// Decompresses `raw` to `uncompressed_size` bytes using `ctype`.
-/// Decompresses one block into a caller-owned `dst`, which must be exactly
-/// the block's decompressed size.
+/// Decompresses one block of `raw` with `ctype` into a caller-owned
+/// `dst`, which must be exactly the block's decompressed size.
 fn decompressRawInto(
     allocator: std.mem.Allocator,
     raw: []const u8,

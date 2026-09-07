@@ -71,8 +71,8 @@ pub const bmp = @import("bmp.zig");
 /// FSB5 audio bank metadata parser (sample rate, channels, loop points).
 pub const fsb5 = @import("fsb5.zig");
 
-/// FSB5 audio sample decoding to 16-bit PCM (PCM8/16/24/32/FLOAT, IMA
-/// ADPCM) - no external tools needed.
+/// FSB5 audio sample decoding to 16-bit PCM (PCM8/16/24/32/FLOAT,
+/// GCADPCM, IMA ADPCM) - no external tools needed.
 pub const audio = @import("audio.zig");
 
 /// FSB5 Vorbis (mode 15) to playable Ogg reconstruction - headers

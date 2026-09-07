@@ -332,6 +332,7 @@ uv run scripts/structsdump-to-builtin.py 2021.3.45f2.dump -o src/builtin_trees/2
 
 Then add the release to the table in `src/builtin_trees.zig`; the module's
 tests link every class of every shipped file.
+
 ## Creating files (`create`)
 
 `unityz create <spec.json> --out <file.unity3d>` builds a UnityFS bundle
