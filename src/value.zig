@@ -146,6 +146,179 @@ fn jsonString(s: []const u8, writer: anytype) !void {
     try writer.writeByte('"');
 }
 
+/// Nesting limit for `jsonParse`. The parser recurses once per
+/// `[`/`{`, so without a bound a deeply nested literal overflows the stack
+/// instead of reporting a bad patch. Mirrors `typetree.max_depth`.
+const max_json_depth: u32 = 512;
+
+/// Parses JSON text into a value tree: the inverse of `jsonWrite`, so an
+/// exported object can be read back and re-serialized. Ints, floats,
+/// bools, null, quoted strings (escapes decoded, including surrogate
+/// pairs) and nested arrays/objects; `.bytes` and `.pptr` come back as
+/// their JSON shapes (a base64 string, an object), since JSON does not
+/// carry the distinction.
+///
+/// Everything is allocated from `allocator` (an arena is the intended
+/// usage, as elsewhere in the library) and borrows nothing from `text`.
+pub fn jsonParse(allocator: std.mem.Allocator, text: []const u8) !Value {
+    var pos: usize = 0;
+    const v = try jsonParseValue(text, &pos, 0, allocator);
+    skipWs(text, &pos);
+    if (pos != text.len) return error.TrailingInput;
+    return v;
+}
+
+/// Reads the four hex digits of a `\uXXXX` escape. `pos` points at the `u`
+/// on entry and at the last hex digit on return, so the caller's single
+/// `pos += 1` steps past the whole escape.
+fn readHex4(text: []const u8, pos: *usize) !u16 {
+    if (pos.* + 5 > text.len) return error.BadEscape;
+    var v: u16 = 0;
+    for (text[pos.* + 1 ..][0..4]) |ch| {
+        const d = std.fmt.charToDigit(ch, 16) catch return error.BadEscape;
+        v = (v << 4) | d;
+    }
+    pos.* += 4;
+    return v;
+}
+
+fn jsonParseValue(text: []const u8, pos: *usize, depth: u32, allocator: std.mem.Allocator) !Value {
+    if (depth > max_json_depth) return error.TooDeep;
+    skipWs(text, pos);
+    if (pos.* >= text.len) return error.UnexpectedEnd;
+    const c = text[pos.*];
+    if (c == '"') {
+        pos.* += 1;
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(allocator);
+        while (pos.* < text.len and text[pos.*] != '"') {
+            if (text[pos.*] == '\\') {
+                pos.* += 1;
+                if (pos.* >= text.len) return error.BadEscape;
+                // Decode the escape rather than keeping the escaped byte:
+                // `jsonString` above writes \n/\r/\t and \uXXXX for the C0
+                // controls (Unity strings carry trailing NULs), so an
+                // `extract --json` export fed back through `edit --patch`
+                // has to decode them to round-trip byte-exactly.
+                switch (text[pos.*]) {
+                    '"' => try out.append(allocator, '"'),
+                    '\\' => try out.append(allocator, '\\'),
+                    '/' => try out.append(allocator, '/'),
+                    'b' => try out.append(allocator, 0x08),
+                    'f' => try out.append(allocator, 0x0c),
+                    'n' => try out.append(allocator, '\n'),
+                    'r' => try out.append(allocator, '\r'),
+                    't' => try out.append(allocator, '\t'),
+                    'u' => {
+                        var cp: u21 = try readHex4(text, pos);
+                        if (cp >= 0xd800 and cp <= 0xdbff) {
+                            // high surrogate: pair it with the low one
+                            if (pos.* + 2 >= text.len or text[pos.* + 1] != '\\' or text[pos.* + 2] != 'u') return error.BadEscape;
+                            pos.* += 2;
+                            const lo: u21 = try readHex4(text, pos);
+                            if (lo < 0xdc00 or lo > 0xdfff) return error.BadEscape;
+                            cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                        } else if (cp >= 0xdc00 and cp <= 0xdfff) {
+                            return error.BadEscape;
+                        }
+                        var buf: [4]u8 = undefined;
+                        const n = std.unicode.utf8Encode(cp, &buf) catch return error.BadEscape;
+                        try out.appendSlice(allocator, buf[0..n]);
+                    },
+                    else => return error.BadEscape,
+                }
+            } else {
+                try out.append(allocator, text[pos.*]);
+            }
+            pos.* += 1;
+        }
+        if (pos.* >= text.len) return error.UnterminatedString;
+        pos.* += 1;
+        return .{ .string = try out.toOwnedSlice(allocator) };
+    }
+    if (c == '[') {
+        pos.* += 1;
+        var list: std.ArrayList(Value) = .empty;
+        defer list.deinit(allocator);
+        skipWs(text, pos);
+        if (pos.* < text.len and text[pos.*] == ']') {
+            pos.* += 1;
+            return .{ .array = try list.toOwnedSlice(allocator) };
+        }
+        while (true) {
+            try list.append(allocator, try jsonParseValue(text, pos, depth + 1, allocator));
+            skipWs(text, pos);
+            if (pos.* >= text.len) return error.UnterminatedArray;
+            if (text[pos.*] == ',') {
+                pos.* += 1;
+                continue;
+            }
+            if (text[pos.*] == ']') {
+                pos.* += 1;
+                break;
+            }
+            return error.BadArray;
+        }
+        return .{ .array = try list.toOwnedSlice(allocator) };
+    }
+    if (c == '{') {
+        pos.* += 1;
+        var list: std.ArrayList(Field) = .empty;
+        defer list.deinit(allocator);
+        skipWs(text, pos);
+        if (pos.* < text.len and text[pos.*] == '}') {
+            pos.* += 1;
+            return .{ .obj = try list.toOwnedSlice(allocator) };
+        }
+        while (true) {
+            skipWs(text, pos);
+            if (pos.* >= text.len or text[pos.*] != '"') return error.BadObject;
+            const key = try jsonParseValue(text, pos, depth + 1, allocator);
+            skipWs(text, pos);
+            if (pos.* >= text.len or text[pos.*] != ':') return error.BadObject;
+            pos.* += 1;
+            const val = try jsonParseValue(text, pos, depth + 1, allocator);
+            try list.append(allocator, .{ .name = key.string, .value = val });
+            skipWs(text, pos);
+            if (pos.* >= text.len) return error.UnterminatedObject;
+            if (text[pos.*] == ',') {
+                pos.* += 1;
+                continue;
+            }
+            if (text[pos.*] == '}') {
+                pos.* += 1;
+                break;
+            }
+            return error.BadObject;
+        }
+        return .{ .obj = try list.toOwnedSlice(allocator) };
+    }
+    // number or keyword
+    const start = pos.*;
+    while (pos.* < text.len) : (pos.* += 1) {
+        const ch = text[pos.*];
+        if (ch == ',' or ch == ']' or ch == '}' or ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') break;
+    }
+    const token = text[start..pos.*];
+    if (std.mem.eql(u8, token, "true")) return .{ .bool = true };
+    if (std.mem.eql(u8, token, "false")) return .{ .bool = false };
+    if (std.mem.eql(u8, token, "null")) return .null;
+    if (std.mem.indexOfAny(u8, token, ".eE") != null) {
+        return .{ .float = try std.fmt.parseFloat(f64, token) };
+    }
+    // `-0` only exists as a float (Unity exports negative-zero rotations
+    // and positions); an integer parse would drop the sign.
+    if (std.mem.eql(u8, token, "-0")) return .{ .float = -0.0 };
+    return .{ .int = try std.fmt.parseInt(i64, token, 10) };
+}
+
+fn skipWs(text: []const u8, pos: *usize) void {
+    while (pos.* < text.len) : (pos.* += 1) {
+        const c = text[pos.*];
+        if (c != ' ' and c != '\t' and c != '\n' and c != '\r') break;
+    }
+}
+
 test "value json" {
     const v = Value{ .obj = &[_]Field{
         .{ .name = "m_Enabled", .value = .{ .bool = true } },
@@ -185,4 +358,28 @@ test "value accessors" {
     try std.testing.expectEqual(@as(usize, 0), null_value.childCount());
     const v = Value{ .array = &[_]Value{ .{ .int = 1 }, .{ .int = 2 } } };
     try std.testing.expectEqual(@as(usize, 2), v.childCount());
+}
+
+test "jsonParse round-trips jsonWrite" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const text =
+        \\{"m_Enabled":true,"m_Name":"a\\u0000b","n":-0,"i":7,"f":1.5,"a":[1,null,{}],"e":[]}
+    ;
+    const v = try jsonParse(arena.allocator(), text);
+
+    var buf: [512]u8 = undefined;
+    var bw = std.Io.Writer.fixed(&buf);
+    try jsonWrite(v, &bw);
+    try std.testing.expectEqualStrings(text, bw.buffered());
+}
+
+test "jsonParse rejects malformed input" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.TrailingInput, jsonParse(a, "1 2"));
+    try std.testing.expectError(error.UnexpectedEnd, jsonParse(a, "  "));
+    try std.testing.expectError(error.UnterminatedString, jsonParse(a, "\"abc"));
+    try std.testing.expectError(error.BadObject, jsonParse(a, "{1:2}"));
+    try std.testing.expectError(error.UnterminatedArray, jsonParse(a, "[1"));
+    try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\ud800\""));
 }

@@ -1408,40 +1408,6 @@ fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.Serial
     return null;
 }
 
-/// Serializes decoded 16-bit samples as the little-endian bytes a WAV
-/// `data` chunk requires. `sliceAsBytes` over the `[]i16` would emit host
-/// order, which silently byte-swaps every sample on a big-endian host while
-/// the header it pairs with is written little-endian throughout.
-fn pcm16LeBytes(arena: std.mem.Allocator, pcm: []const i16) ![]u8 {
-    const out = try arena.alloc(u8, pcm.len * 2);
-    for (pcm, 0..) |s, i| std.mem.writeInt(i16, out[i * 2 ..][0..2], s, .little);
-    return out;
-}
-
-/// Wraps interleaved little-endian PCM in a WAV container. `bits` is the
-/// source sample width (16 for decoded FSB5 samples; the raw AudioClip
-/// path passes its own width).
-fn wavPcm16(arena: std.mem.Allocator, pcm: []const u8, channels: u16, rate: u32, bits: u16) ![]u8 {
-    var wav_buf: std.ArrayList(u8) = .empty;
-    var hdr: [44]u8 = undefined;
-    @memcpy(hdr[0..4], "RIFF");
-    std.mem.writeInt(u32, hdr[4..8], @as(u32, @intCast(36 + pcm.len)), .little);
-    @memcpy(hdr[8..12], "WAVE");
-    @memcpy(hdr[12..16], "fmt ");
-    std.mem.writeInt(u32, hdr[16..20], 16, .little);
-    std.mem.writeInt(u16, hdr[20..22], 1, .little); // PCM
-    std.mem.writeInt(u16, hdr[22..24], channels, .little);
-    std.mem.writeInt(u32, hdr[24..28], rate, .little);
-    std.mem.writeInt(u32, hdr[28..32], rate * @as(u32, channels) * @as(u32, bits) / 8, .little);
-    std.mem.writeInt(u16, hdr[32..34], @intCast(@as(u32, channels) * @as(u32, bits) / 8), .little);
-    std.mem.writeInt(u16, hdr[34..36], bits, .little);
-    @memcpy(hdr[36..40], "data");
-    std.mem.writeInt(u32, hdr[40..44], @as(u32, @intCast(pcm.len)), .little);
-    try wav_buf.appendSlice(arena, &hdr);
-    try wav_buf.appendSlice(arena, pcm);
-    return wav_buf.items;
-}
-
 const FsbMetadata = struct { json: []u8, valid: bool };
 
 fn fsbSampleDecodes(audio: []const u8, bank: unityz.fsb5.Bank, sample: unityz.fsb5.Sample) bool {
@@ -1567,7 +1533,7 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
                 try stdout.print("  sample {d} ({s}): decode failed: {s}\n", .{ si, s.name, @errorName(err) });
                 continue;
             };
-            const wav = wavPcm16(arena, try pcm16LeBytes(arena, pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
+            const wav = unityz.wav.encode(arena, try unityz.wav.pcm16LeBytes(arena, pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
                 try stdout.print("  sample {d} ({s}): WAV wrapping failed: {s}\n", .{ si, s.name, @errorName(err) });
                 continue;
             };
@@ -2119,7 +2085,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     // wrap raw PCM in a WAV container
                     const bits: u16 = @intCast(if (ac.bits_per_sample == 0) 16 else ac.bits_per_sample);
                     const ch: u16 = @intCast(if (ac.channels == 0) 1 else ac.channels);
-                    wav_buf.appendSlice(arena, wavPcm16(arena, audio, ch, ac.frequency, bits) catch |err| {
+                    wav_buf.appendSlice(arena, unityz.wav.encode(arena, audio, ch, ac.frequency, bits) catch |err| {
                         try stdout.print("  audio {d}: WAV wrapping failed: {s}\n", .{ o.path_id, @errorName(err) });
                         continue;
                     }) catch continue;
@@ -2156,7 +2122,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                                     skipped += 1;
                                     continue;
                                 };
-                                const wav = wavPcm16(arena, try pcm16LeBytes(arena, pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
+                                const wav = unityz.wav.encode(arena, try unityz.wav.pcm16LeBytes(arena, pcm), @intCast(s.channels), s.frequency, 16) catch |err| {
                                     try stdout.print("  audio {d}: WAV wrapping failed: {s}\n", .{ o.path_id, @errorName(err) });
                                     skipped += 1;
                                     continue;
@@ -8816,179 +8782,23 @@ fn asTargetValue(allocator: std.mem.Allocator, old: unityz.value.Value, new_valu
     return new_value;
 }
 
-/// Nesting limit for `parseJsonLiteral`. The parser recurses once per
-/// `[`/`{`, so without a bound a deeply nested literal overflows the stack
-/// instead of reporting a bad patch. Mirrors `typetree.max_depth`.
-const max_json_depth: u32 = 512;
+/// JSON text back into the value tree, the inverse of
+/// `value.jsonWrite` and owned by the same module: `extract --json`
+/// output has to feed back through `edit --patch`, so both directions
+/// belong together rather than one living out here.
+///
+/// The trees-file and spec paths pass the process arena; the
+/// `parseJsonLiteral` wrapper below uses the page allocator, which
+/// allocates each JSON element separately - a generated
+/// multi-hundred-MB trees file (thousands of inlined MonoBehaviour
+/// layouts) would burn gigabytes of virtual address space on mmap
+/// granularity alone.
+const parseJsonLiteralAlloc = unityz.value.jsonParse;
 
 /// Minimal JSON literal parser: ints, floats, bools, null, quoted strings,
 /// and nested arrays/objects. Enough for `edit`.
 fn parseJsonLiteral(text: []const u8) !unityz.value.Value {
     return parseJsonLiteralAlloc(std.heap.page_allocator, text);
-}
-
-/// Parse into a caller-owned allocator. The trees-file path uses the
-/// process arena: the page_allocator variant allocates each JSON element
-/// separately, and a generated multi-hundred-MB trees file (thousands of
-/// inlined MonoBehaviour layouts) would otherwise burn gigabytes of virtual
-/// address space on mmap granularity alone.
-fn parseJsonLiteralAlloc(allocator: std.mem.Allocator, text: []const u8) !unityz.value.Value {
-    var pos: usize = 0;
-    const v = try parseJsonValueAlloc(text, &pos, 0, allocator);
-    skipWs(text, &pos);
-    if (pos != text.len) return error.TrailingInput;
-    return v;
-}
-
-/// Reads the four hex digits of a `\uXXXX` escape. `pos` points at the `u`
-/// on entry and at the last hex digit on return, so the caller's single
-/// `pos += 1` steps past the whole escape.
-fn readHex4(text: []const u8, pos: *usize) !u16 {
-    if (pos.* + 5 > text.len) return error.BadEscape;
-    var v: u16 = 0;
-    for (text[pos.* + 1 ..][0..4]) |ch| {
-        const d = std.fmt.charToDigit(ch, 16) catch return error.BadEscape;
-        v = (v << 4) | d;
-    }
-    pos.* += 4;
-    return v;
-}
-
-fn parseJsonValueAlloc(text: []const u8, pos: *usize, depth: u32, allocator: std.mem.Allocator) !unityz.value.Value {
-    if (depth > max_json_depth) return error.TooDeep;
-    skipWs(text, pos);
-    if (pos.* >= text.len) return error.UnexpectedEnd;
-    const c = text[pos.*];
-    if (c == '"') {
-        pos.* += 1;
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(allocator);
-        while (pos.* < text.len and text[pos.*] != '"') {
-            if (text[pos.*] == '\\') {
-                pos.* += 1;
-                if (pos.* >= text.len) return error.BadEscape;
-                // Decode the escape rather than keeping the escaped byte:
-                // `value.jsonString` writes \n/\r/\t and \uXXXX for the C0
-                // controls (Unity strings carry trailing NULs), so an
-                // `extract --json` export fed back through `edit --patch`
-                // has to decode them to round-trip byte-exactly.
-                switch (text[pos.*]) {
-                    '"' => try out.append(allocator, '"'),
-                    '\\' => try out.append(allocator, '\\'),
-                    '/' => try out.append(allocator, '/'),
-                    'b' => try out.append(allocator, 0x08),
-                    'f' => try out.append(allocator, 0x0c),
-                    'n' => try out.append(allocator, '\n'),
-                    'r' => try out.append(allocator, '\r'),
-                    't' => try out.append(allocator, '\t'),
-                    'u' => {
-                        var cp: u21 = try readHex4(text, pos);
-                        if (cp >= 0xd800 and cp <= 0xdbff) {
-                            // high surrogate: pair it with the low one
-                            if (pos.* + 2 >= text.len or text[pos.* + 1] != '\\' or text[pos.* + 2] != 'u') return error.BadEscape;
-                            pos.* += 2;
-                            const lo: u21 = try readHex4(text, pos);
-                            if (lo < 0xdc00 or lo > 0xdfff) return error.BadEscape;
-                            cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
-                        } else if (cp >= 0xdc00 and cp <= 0xdfff) {
-                            return error.BadEscape;
-                        }
-                        var buf: [4]u8 = undefined;
-                        const n = std.unicode.utf8Encode(cp, &buf) catch return error.BadEscape;
-                        try out.appendSlice(allocator, buf[0..n]);
-                    },
-                    else => return error.BadEscape,
-                }
-            } else {
-                try out.append(allocator, text[pos.*]);
-            }
-            pos.* += 1;
-        }
-        if (pos.* >= text.len) return error.UnterminatedString;
-        pos.* += 1;
-        return .{ .string = try out.toOwnedSlice(allocator) };
-    }
-    if (c == '[') {
-        pos.* += 1;
-        var list: std.ArrayList(unityz.value.Value) = .empty;
-        defer list.deinit(allocator);
-        skipWs(text, pos);
-        if (pos.* < text.len and text[pos.*] == ']') {
-            pos.* += 1;
-            return .{ .array = try list.toOwnedSlice(allocator) };
-        }
-        while (true) {
-            try list.append(allocator, try parseJsonValueAlloc(text, pos, depth + 1, allocator));
-            skipWs(text, pos);
-            if (pos.* >= text.len) return error.UnterminatedArray;
-            if (text[pos.*] == ',') {
-                pos.* += 1;
-                continue;
-            }
-            if (text[pos.*] == ']') {
-                pos.* += 1;
-                break;
-            }
-            return error.BadArray;
-        }
-        return .{ .array = try list.toOwnedSlice(allocator) };
-    }
-    if (c == '{') {
-        pos.* += 1;
-        var list: std.ArrayList(unityz.value.Field) = .empty;
-        defer list.deinit(allocator);
-        skipWs(text, pos);
-        if (pos.* < text.len and text[pos.*] == '}') {
-            pos.* += 1;
-            return .{ .obj = try list.toOwnedSlice(allocator) };
-        }
-        while (true) {
-            skipWs(text, pos);
-            if (pos.* >= text.len or text[pos.*] != '"') return error.BadObject;
-            const key = try parseJsonValueAlloc(text, pos, depth + 1, allocator);
-            skipWs(text, pos);
-            if (pos.* >= text.len or text[pos.*] != ':') return error.BadObject;
-            pos.* += 1;
-            const val = try parseJsonValueAlloc(text, pos, depth + 1, allocator);
-            try list.append(allocator, .{ .name = key.string, .value = val });
-            skipWs(text, pos);
-            if (pos.* >= text.len) return error.UnterminatedObject;
-            if (text[pos.*] == ',') {
-                pos.* += 1;
-                continue;
-            }
-            if (text[pos.*] == '}') {
-                pos.* += 1;
-                break;
-            }
-            return error.BadObject;
-        }
-        return .{ .obj = try list.toOwnedSlice(allocator) };
-    }
-    // number or keyword
-    const start = pos.*;
-    while (pos.* < text.len) : (pos.* += 1) {
-        const ch = text[pos.*];
-        if (ch == ',' or ch == ']' or ch == '}' or ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') break;
-    }
-    const token = text[start..pos.*];
-    if (std.mem.eql(u8, token, "true")) return .{ .bool = true };
-    if (std.mem.eql(u8, token, "false")) return .{ .bool = false };
-    if (std.mem.eql(u8, token, "null")) return .null;
-    if (std.mem.indexOfAny(u8, token, ".eE") != null) {
-        return .{ .float = try std.fmt.parseFloat(f64, token) };
-    }
-    // `-0` only exists as a float (Unity exports negative-zero rotations
-    // and positions); an integer parse would drop the sign.
-    if (std.mem.eql(u8, token, "-0")) return .{ .float = -0.0 };
-    return .{ .int = try std.fmt.parseInt(i64, token, 10) };
-}
-
-fn skipWs(text: []const u8, pos: *usize) void {
-    while (pos.* < text.len) : (pos.* += 1) {
-        const c = text[pos.*];
-        if (c != ' ' and c != '\t' and c != '\n' and c != '\r') break;
-    }
 }
 
 /// `hierarchy <path> [--json]` — prints the GameObject/Transform tree of

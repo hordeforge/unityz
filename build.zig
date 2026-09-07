@@ -157,6 +157,7 @@ pub fn build(b: *std.Build) void {
         "src/fsb5.zig",
         "src/audio.zig",
         "src/vorbis.zig",
+        "src/wav.zig",
         "src/object_writer.zig",
         "src/serialized_writer.zig",
         "src/dotnet.zig",

@@ -10,10 +10,10 @@
 //! built-in per-release database (`builtin_trees`), or from a Mono game's
 //! assemblies (`dotnet`, `managed_trees`). Textures decode to RGBA8
 //! (`texture`, with PNG/TGA/BMP encoders), FSB5 audio to PCM or Ogg
-//! (`fsb5`, `audio`, `vorbis`), and Shader blobs to their record tables
-//! (`shader`). Every parser allocates from the caller's allocator, prints
-//! nothing, and returns errors instead of panicking; an arena is the
-//! intended usage.
+//! (`fsb5`, `audio`, `vorbis`, with a WAV encoder in `wav`), and Shader
+//! blobs to their record tables (`shader`). Every parser allocates from
+//! the caller's allocator, prints nothing, and returns errors instead of
+//! panicking; an arena is the intended usage.
 
 const std = @import("std");
 
@@ -44,7 +44,7 @@ pub const builtin_trees = @import("builtin_trees.zig");
 /// SerializedFile parser (`.assets` and friends).
 pub const serialized = @import("serialized.zig");
 
-/// Generic object value model + JSON output.
+/// Generic object value model, plus JSON output and parsing.
 pub const value = @import("value.zig");
 
 /// TypeTree-driven object reader.
@@ -78,6 +78,9 @@ pub const audio = @import("audio.zig");
 /// FSB5 Vorbis (mode 15) to playable Ogg reconstruction - headers
 /// synthesized, setup header from the crc-keyed table, no external tools.
 pub const vorbis = @import("vorbis.zig");
+
+/// Minimal WAV encoder for the PCM `audio` decodes.
+pub const wav = @import("wav.zig");
 
 /// TypeTree-driven object serializer (inverse of the reader).
 pub const object_writer = @import("object_writer.zig");

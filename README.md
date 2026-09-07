@@ -181,7 +181,7 @@ UnityArchive container is detected but not yet parsed.
 - `src/builtin_trees.zig` - built-in engine-class type trees indexed by
   exact Unity release, embedded from `src/builtin_trees/<release>.bin`
   (packed by `scripts/structsdump-to-builtin.py` from an AssetRipper dump)
-- `src/value.zig` - generic object value model + JSON output
+- `src/value.zig` - generic object value model + JSON output and parsing
 - `src/object_reader.zig` - type-tree-driven object reader
 - `src/object_writer.zig` - type-tree-driven object writer
 - `src/classes.zig` - typed views for the common classes
@@ -193,6 +193,7 @@ UnityArchive container is detected but not yet parsed.
 - `src/audio.zig` - FSB5 sample decoding to 16-bit PCM, no external tools
 - `src/vorbis.zig` - FSB5 Vorbis to playable Ogg reconstruction, no
   external tools
+- `src/wav.zig` - minimal WAV encoder for the decoded PCM
 - `src/shader.zig` - Shader sub-program blob decoding and skinning
   detection
 - `src/texture.zig` - texture format decoding to RGBA8 (DXT, BC, PVRTC,
