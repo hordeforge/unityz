@@ -62,7 +62,11 @@ with `--format`:
   and the signed variants
 - DXT1/3/5, BC4/5, BC6H (HDR), BC7
 - PVRTC (2bpp/4bpp RGB and RGBA), ATC (RGB4/RGBA8), EAC (R/RG, signed
-  and unsigned)
+  and unsigned). Verification note: these three are validated against
+  texture2ddecoder's own test textures, not against real game data - every
+  available game is a PC/console build that ships none of them. Real-asset
+  verification of PVRTC is a planned item in
+  [ROADMAP.md](ROADMAP.md).
 - ETC1/ETC2/ETC2-RGBA8, ASTC, ASTC HDR (66-71)
 - Crunch-crunched formats (ETC_RGB4, ETC2_RGBA8, DXT1, DXT5) via a
   vendored ZLIB-licensed unitycrunch decompressor, hardened against
@@ -453,6 +457,15 @@ pixel diffs for textures/sprites), `--audio` (streamed audio data),
 `--fields` (the exact changed field paths and values).
 Directory diffs run the same three passes on every matched file pair.
 
+`hash` is the raw material `diff` compares: it prints one content
+fingerprint per object (a Wyhash of the object's raw serialized bytes)
+with its path id, class, name, and byte size, recursing into every
+SerializedFile embedded in a bundle or WebFile. `--path-id` and `--class`
+narrow the output and `--json` returns it as an array, so a build can be
+fingerprinted and tracked externally. The fingerprint covers the
+serialized payload only, so editing a `.resS` sidecar's bytes changes no
+object hash.
+
 ## Batch mode
 
 Every command accepts a directory and runs over each regular file in it.
@@ -470,9 +483,10 @@ own `<outdir>/<file name>/` subdirectory (or `./<file name>/` without
 `--outdir`). Bundles routinely share node names such as `CAB-...`, so a
 flat layout would let one file overwrite another's exports and manifest.
 
-`edit --out` and `trees --out` name one output file, so over a directory
-they are usage errors (exit 2): a batch `edit` rewrites each file in place,
-and a batch `trees` prints one wrapped JSON line per file.
+`edit --out`, `trees --out`, and `create --out` name one output file, so
+over a directory they are usage errors (exit 2): a batch `edit` rewrites
+each file in place, a batch `trees` prints one wrapped JSON line per file,
+and `create` runs once per spec.
 
 A file unityz does not recognize as a Unity asset (not a SerializedFile,
 bundle, or WebFile) is an error for every command, so a stray file in a
@@ -494,6 +508,11 @@ without parsing output:
 - 2: a usage error: an unknown flag, a missing argument, or a malformed
   id. The diagnostic goes to stderr and nothing is written to stdout, so a
   bad flag can never be mistaken for a successful machine-readable run.
+- 141: the consumer closed stdout before the command finished writing
+  (`unityz info big.unity3d | head`), which is the status SIGPIPE would
+  have produced. No diagnostic is printed, and the output is truncated by
+  definition, so a consumer that ends a stream early must not read 141 as
+  a read or check failure.
 
 Whole-file evidence: the real 7DTD bundle (Unity 2022.3.62f2, fully
 typeless) extracts to 8090 files with zero decode failures (260 PNGs,

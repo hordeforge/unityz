@@ -52,8 +52,11 @@ public format documentation only - no code or data taken from UnityPy.
   (e.g. dumping an object to JSON, editing it, and writing back), producing
   a valid file.
 - Beyond the three commands this plan started from, the CLI ships
-  `verify`, `stats`, `find`, `show`, `shader`, `diff`, `hash`, and
-  `skin`; the completion notes below record the pass that added each one.
+  `verify`, `stats`, `find`, `show`, `shader`, `diff`, `hash`, `skin`,
+  `hierarchy`, `fsb`, and `managed`; the completion notes below record the
+  pass that added each one. `trees`, `create`, and the `--builtin`
+  engine-class database came after this plan closed; the current command
+  set is [features.md](../features.md).
 - The library surface (`src/lib.zig`) exposes containers, object access, and
   raw read/write primitives so other Zig tools can build on it.
 
