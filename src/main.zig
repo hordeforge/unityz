@@ -3766,6 +3766,10 @@ fn writeMeshGlb(
     const vch = mesh.channel(0) orelse return &.{};
     if (vch.format != 0 or vch.dimension < 3) return &.{};
     const vcount: usize = mesh.vertex_count;
+    // m_VertexCount is file-supplied and defaults to 0 when absent, which
+    // leaves the position loop below with nothing to run and the accessor
+    // min/max at their +/-inf seeds - printed straight into the JSON.
+    if (vcount == 0) return &.{};
     if (mesh.index_format != 0 and mesh.index_format != 1) return &.{};
     const idx_bytes: usize = if (mesh.index_format == 1) 4 else 2;
     if (mesh.index_buffer.len < idx_bytes * 3) return &.{};
@@ -3859,6 +3863,14 @@ fn writeMeshGlb(
         const x = meshF32(mesh, 0, i, 0, sf.endian) orelse return &.{};
         const y = meshF32(mesh, 0, i, 1, sf.endian) orelse return &.{};
         const z = meshF32(mesh, 0, i, 2, sf.endian) orelse return &.{};
+        // Vertex data is raw file bytes, so a component can be Inf or NaN.
+        // Both reach the POSITION accessor's min/max, which is printed into
+        // the glTF JSON - and JSON spells neither, so the whole GLB would
+        // fail to parse. NaN is worse than that: it compares false against
+        // both bounds, so it leaves the seeded infinities in place without
+        // ever appearing in the output that names it. Report the mesh
+        // unsupported, the way writeObjFloat does on the OBJ path.
+        if (!std.math.isFinite(x) or !std.math.isFinite(y) or !std.math.isFinite(z)) return &.{};
         const fx = -x; // X mirror: left-handed -> right-handed
         if (fx < pos_min[0]) pos_min[0] = fx;
         if (y < pos_min[1]) pos_min[1] = y;
@@ -3916,6 +3928,7 @@ fn writeMeshGlb(
                         const q1 = readIndex(mesh.index_buffer, idx_bytes, face_start + 1, sf.endian);
                         const q2 = readIndex(mesh.index_buffer, idx_bytes, face_start + 2, sf.endian);
                         const q3 = readIndex(mesh.index_buffer, idx_bytes, face_start + 3, sf.endian);
+                        if (!faceInRange(&.{ q0, q1, q2, q3 }, vcount)) continue;
                         try writeIndex(&bin, use_u16, q2);
                         try writeIndex(&bin, use_u16, q1);
                         try writeIndex(&bin, use_u16, q0);
@@ -3926,6 +3939,7 @@ fn writeMeshGlb(
                         const ia = readIndex(mesh.index_buffer, idx_bytes, face_start + 0, sf.endian);
                         const ib = readIndex(mesh.index_buffer, idx_bytes, face_start + 1, sf.endian);
                         const ic = readIndex(mesh.index_buffer, idx_bytes, face_start + 2, sf.endian);
+                        if (!faceInRange(&.{ ia, ib, ic }, vcount)) continue;
                         try writeIndex(&bin, use_u16, ic);
                         try writeIndex(&bin, use_u16, ib);
                         try writeIndex(&bin, use_u16, ia);
@@ -3940,6 +3954,7 @@ fn writeMeshGlb(
             const ia = readIndex(mesh.index_buffer, idx_bytes, f * 3 + 0, sf.endian);
             const ib = readIndex(mesh.index_buffer, idx_bytes, f * 3 + 1, sf.endian);
             const ic = readIndex(mesh.index_buffer, idx_bytes, f * 3 + 2, sf.endian);
+            if (!faceInRange(&.{ ia, ib, ic }, vcount)) continue;
             try writeIndex(&bin, use_u16, ic);
             try writeIndex(&bin, use_u16, ib);
             try writeIndex(&bin, use_u16, ia);
@@ -4103,6 +4118,18 @@ fn readIndex(buffer: []const u8, idx_bytes: usize, slot: usize, endian: std.buil
         std.mem.readInt(u32, buffer[off..][0..4], endian)
     else
         std.mem.readInt(u16, buffer[off..][0..2], endian);
+}
+
+/// True when every index of one face points inside the vertex array. The
+/// index buffer is raw file bytes and need not: a 32-bit index buffer on a
+/// mesh declaring fewer than 0x10000 vertices can name a slot past every
+/// accessor, and `writeIndex` would then truncate it into the u16 form the
+/// small vertex count selected (5123), silently renumbering the triangle.
+/// The whole face is dropped rather than one of its corners, so the index
+/// count stays a multiple of three.
+fn faceInRange(refs: []const u64, vcount: usize) bool {
+    for (refs) |r| if (r >= vcount) return false;
+    return true;
 }
 
 fn writeIndex(w: *unityz.streams.Writer, use_u16: bool, idx: u64) !void {
