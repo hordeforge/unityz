@@ -1255,6 +1255,19 @@ fn resolveSidecar(sidecars: []const Sidecar, stream_path: []const u8, offset: u6
     return &.{};
 }
 
+/// Reports a streamed asset whose declared range did not resolve. Absence
+/// of stream data and a stream that could not be read look identical at the
+/// call site (both leave an empty slice), but only the second is a failure:
+/// the object named bytes that are not here, so extracting it silently would
+/// report a complete run with the asset missing.
+fn reportUnresolvedStream(kind: []const u8, path_id: i64, stream_path: []const u8, offset: u64, size: u64, stdout: *Io.Writer) !void {
+    if (stream_path.len == 0) {
+        try stdout.print("  {s} {d}: streamed range (offset {d}, {d} bytes) lies outside this file\n", .{ kind, path_id, offset, size });
+    } else {
+        try stdout.print("  {s} {d}: streamed data unavailable: '{s}' (offset {d}, {d} bytes); its .resS/.resource sidecar is missing or too short\n", .{ kind, path_id, stream_path, offset, size });
+    }
+}
+
 test "resolveSidecar rejects wrapping ranges" {
     const data = [_]u8{0} ** 200;
     const sidecars = [_]Sidecar{.{ .path = "x.resS", .data = &data }};
@@ -1938,7 +1951,13 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     // streamed from a sibling .resS/.resource node
                     pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
                 }
-                if (pixels.len == 0) continue;
+                if (pixels.len == 0) {
+                    if (t.stream.size > 0) {
+                        try reportUnresolvedStream("texture", o.path_id, t.stream.path, t.stream.offset, t.stream.size, stdout);
+                        skipped += 1;
+                    }
+                    continue;
+                }
                 // The decoded, flipped and encoded buffers are dead once the
                 // PNG is written, and each is on the order of the texture's
                 // pixel count. The extraction arena lives until the whole
@@ -1994,7 +2013,13 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 if (stream_size > 0 and stream_path.len != 0) {
                     video = resolveSidecar(sidecars, stream_path, @intCast(stream_offset), @intCast(stream_size));
                 }
-                if (video.len == 0) continue; // no stream data (embedded or absent)
+                if (video.len == 0) {
+                    if (stream_size > 0 and stream_path.len != 0) {
+                        try reportUnresolvedStream("video clip", o.path_id, stream_path, @intCast(stream_offset), @intCast(stream_size), stdout);
+                        skipped += 1;
+                    }
+                    continue; // otherwise the clip carries no stream data at all
+                }
                 var ext: []const u8 = "mp4";
                 if (std.mem.startsWith(u8, video, "\x1aE\xdf\xa3")) {
                     ext = "webm"; // EBML
@@ -2108,7 +2133,13 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     // streamed from a sibling .resS/.resource sidecar
                     audio = resolveSidecar(sidecars, ac.resource.path, ac.resource.offset, ac.resource.size);
                 }
-                if (audio.len == 0) continue;
+                if (audio.len == 0) {
+                    if (ac.resource.size > 0 and ac.resource.path.len != 0) {
+                        try reportUnresolvedStream("audio clip", o.path_id, ac.resource.path, ac.resource.offset, ac.resource.size, stdout);
+                        skipped += 1;
+                    }
+                    continue;
+                }
                 var ext: []const u8 = "bin";
                 if (std.mem.startsWith(u8, audio, "OggS")) {
                     ext = "ogg";
@@ -2224,7 +2255,13 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     // streamed from a sibling .resS/.resource sidecar
                     pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
                 }
-                if (pixels.len == 0) continue;
+                if (pixels.len == 0) {
+                    if (t.stream.size > 0) {
+                        try reportUnresolvedStream("cubemap", o.path_id, t.stream.path, t.stream.offset, t.stream.size, stdout);
+                        skipped += 1;
+                    }
+                    continue;
+                }
                 const mip0_size = unityz.texture.expectedSize(t.format, t.width, t.height) orelse continue;
                 const face_size: usize = @intCast(t.complete_image_size);
                 const faces: usize = @intCast(t.image_count);
@@ -2366,22 +2403,24 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                         }
                     }
                 }
-                const glb = writeMeshGlb(arena, &sf, mval, &mesh, names.items) catch null;
-                if (glb) |g| {
-                    if (g.len != 0) {
-                        var name_buf: [192]u8 = undefined;
-                        const base = if (renderer_name.len != 0) renderer_name else std.mem.trimEnd(u8, mesh.name, "\x00");
-                        const clipped = if (base.len > 140) base[0..140] else base;
-                        const full = if (clipped.len != 0)
-                            try std.fmt.bufPrint(&name_buf, "character_{d}_{s}.glb", .{ o.path_id, clipped })
-                        else
-                            try std.fmt.bufPrint(&name_buf, "character_{d}.glb", .{o.path_id});
-                        const name = sanitizeComponent(full);
-                        try extractFile(subdir, name, g);
-                        try stdout.print("extracted {s} ({d} bytes, glTF binary, {d} named bones)\n", .{ name, g.len, names.items.len });
-                        try manifest.append(arena, .{ .path_id = o.path_id, .class_id = 137, .name = renderer_name, .subdir = subdir });
-                        extracted += 1;
-                    }
+                const g = writeMeshGlb(arena, &sf, mval, &mesh, names.items) catch |err| {
+                    try stdout.print("  renderer {d}: character GLB conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
+                    skipped += 1;
+                    continue;
+                };
+                if (g.len != 0) {
+                    var name_buf: [192]u8 = undefined;
+                    const base = if (renderer_name.len != 0) renderer_name else std.mem.trimEnd(u8, mesh.name, "\x00");
+                    const clipped = if (base.len > 140) base[0..140] else base;
+                    const full = if (clipped.len != 0)
+                        try std.fmt.bufPrint(&name_buf, "character_{d}_{s}.glb", .{ o.path_id, clipped })
+                    else
+                        try std.fmt.bufPrint(&name_buf, "character_{d}.glb", .{o.path_id});
+                    const name = sanitizeComponent(full);
+                    try extractFile(subdir, name, g);
+                    try stdout.print("extracted {s} ({d} bytes, glTF binary, {d} named bones)\n", .{ name, g.len, names.items.len });
+                    try manifest.append(arena, .{ .path_id = o.path_id, .class_id = 137, .name = renderer_name, .subdir = subdir });
+                    extracted += 1;
                 }
             },
             74 => { // AnimationClip -> curves JSON
@@ -2537,7 +2576,15 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 }
             },
             213 => { // Sprite -> cropped / mesh-rendered image
-                const rr = renderSprite(arena, &sf, sidecars, &sprite_cache, v, o.path_id, basename(path), injected) orelse continue;
+                // Every way `renderSprite` yields null - no atlas entry, a
+                // texture in another file, an unavailable streamed texture, a
+                // failed crop - means this sprite produced no image. Skipping
+                // it silently reports a complete extract with the sprite gone.
+                const rr = renderSprite(arena, &sf, sidecars, &sprite_cache, v, o.path_id, basename(path), injected) orelse {
+                    try stdout.print("  sprite {d}: could not be rendered (its texture is missing, streamed to an absent sidecar, or in another file)\n", .{o.path_id});
+                    skipped += 1;
+                    continue;
+                };
                 const image = encodeImage(arena, format, rr.w, rr.h, rr.data) catch |err| {
                     try stdout.print("  sprite {d}: image encode failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
@@ -9478,7 +9525,7 @@ fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             if (!std.mem.endsWith(u8, ename, ".dll")) continue;
             const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ assembly_dir, ename });
             const data = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch |err| {
-                try stdout.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
+                failure("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 continue;
             };
             try files.names.append(arena, ename);
@@ -9592,7 +9639,10 @@ fn buildManagedTrees(arena: std.mem.Allocator, path: []const u8, files: *const M
     var assemblies: std.ArrayList(unityz.dotnet.Assembly) = .empty;
     for (files.names.items, 0..) |fname, fi| {
         const assembly = unityz.dotnet.parseAssembly(arena, fname, files.datas.items[fi]) catch |err| {
-            try stdout.print("unityz: {s}: {s}\n", .{ fname, @errorName(err) });
+            // The generated trees file silently omits every script type of an
+            // assembly that did not parse, and those MonoBehaviours then read
+            // as typeless. Fail the run, as the listing path does.
+            failure("unityz: {s}: {s}\n", .{ fname, @errorName(err) });
             continue;
         };
         try assemblies.append(arena, assembly);
@@ -9684,7 +9734,7 @@ fn buildManagedTrees(arena: std.mem.Allocator, path: []const u8, files: *const M
     }
     try w.writeAll("]}\n");
     if (warnings.items.len != 0) {
-        try stdout.print("managed: {d} field type(s) fell back to int placeholders (unknown types)\n", .{warnings.items.len});
+        try stdout.print("managed: {d} field(s) with an unresolved type (int placeholder, or dropped when the signature did not parse)\n", .{warnings.items.len});
     }
 
     const out_bytes = jw.toArrayList().items;

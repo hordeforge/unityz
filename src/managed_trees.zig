@@ -298,6 +298,14 @@ fn appendFieldNodes(
         try appendClassField(out, arena, level, depth, budget, field.name, field.type_name, types, warnings);
         return;
     }
+    // elem_type 0 is not a real element type: `parse` substitutes it when a
+    // field's signature blob does not decode. Dropping such a field silently
+    // would emit a tree that is short one member, and every field after it
+    // then decodes off the wrong offset - so say which field was lost.
+    if (t == 0) {
+        try warnings.append(arena, try std.fmt.allocPrint(arena, "  {s}: signature did not parse -> field dropped from the tree", .{field.name}));
+        return;
+    }
     // unknown element types (pointers, byref, fnptr...): skip, Unity does
     // not serialize them
 }
