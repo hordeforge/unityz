@@ -1173,6 +1173,17 @@ fn decodeBc6Block(block: []const u8, dst: *[16][4]u8) void {
     }
 }
 
+/// Writes a decoded 4x4 block into the RGBA8 image at block coordinates
+/// `bx`,`by`, skipping the pixels that fall outside a non-multiple-of-4 image.
+fn blitBlock(out: []u8, w: usize, h: usize, bx: usize, by: usize, px: *const [16][4]u8) void {
+    for (0..16) |i| {
+        const px_ = bx * 4 + i % 4;
+        const py_ = by * 4 + i / 4;
+        if (px_ >= w or py_ >= h) continue;
+        out[(py_ * w + px_) * 4 ..][0..4].* = px[i];
+    }
+}
+
 fn decodeBc6(out: []u8, w: usize, h: usize, data: []const u8) void {
     const nbx = (w + 3) / 4;
     const nby = (h + 3) / 4;
@@ -1181,16 +1192,7 @@ fn decodeBc6(out: []u8, w: usize, h: usize, data: []const u8) void {
             const block = data[(by * nbx + bx) * 16 ..][0..16];
             var px: [16][4]u8 = undefined;
             decodeBc6Block(block, &px);
-            for (0..16) |i| {
-                const px_ = bx * 4 + i % 4;
-                const py_ = by * 4 + i / 4;
-                if (px_ >= w or py_ >= h) continue;
-                const dst = out[(py_ * w + px_) * 4 ..][0..4];
-                dst[0] = px[i][0];
-                dst[1] = px[i][1];
-                dst[2] = px[i][2];
-                dst[3] = px[i][3];
-            }
+            blitBlock(out, w, h, bx, by, &px);
         }
     }
 }
@@ -1596,16 +1598,7 @@ fn decodeAtc(out: []u8, w: usize, h: usize, data: []const u8, rgba: bool) Error!
             } else {
                 decodeAtcBlock(block[0..8], &px);
             }
-            for (0..16) |i| {
-                const px_ = bx * 4 + i % 4;
-                const py_ = by * 4 + i / 4;
-                if (px_ >= w or py_ >= h) continue;
-                const dst = out[(py_ * w + px_) * 4 ..][0..4];
-                dst[0] = px[i][0];
-                dst[1] = px[i][1];
-                dst[2] = px[i][2];
-                dst[3] = px[i][3];
-            }
+            blitBlock(out, w, h, bx, by, &px);
         }
     }
 }
@@ -1647,16 +1640,7 @@ fn decodeEac(out: []u8, w: usize, h: usize, data: []const u8, kind: EacKind) Err
             for (0..16) |i| px[i] = .{ 0, 0, 0, 255 };
             decodeEacChannelBlock(block[0..8], 0, &px, signed_fmt);
             if (two_ch) decodeEacChannelBlock(block[8..16], 1, &px, signed_fmt);
-            for (0..16) |i| {
-                const px_ = bx * 4 + i % 4;
-                const py_ = by * 4 + i / 4;
-                if (px_ >= w or py_ >= h) continue;
-                const dst = out[(py_ * w + px_) * 4 ..][0..4];
-                dst[0] = px[i][0];
-                dst[1] = px[i][1];
-                dst[2] = px[i][2];
-                dst[3] = px[i][3];
-            }
+            blitBlock(out, w, h, bx, by, &px);
         }
     }
 }

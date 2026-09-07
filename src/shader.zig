@@ -267,10 +267,7 @@ pub fn isD3d11Type(gpu_type: u32) bool {
 
 /// True when a `ShaderGpuProgramType` is a d3d11 vertex program.
 pub fn isVertexType(gpu_type: u32) bool {
-    for (gpu_vertex_types) |v| {
-        if (gpu_type == v) return true;
-    }
-    return false;
+    return std.mem.indexOfScalar(u32, &gpu_vertex_types, gpu_type) != null;
 }
 
 /// True when a parameter name looks like a per-mesh bone-matrix binding.
@@ -290,17 +287,7 @@ pub fn isBoneMatrixName(name: []const u8) bool {
 }
 
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return false;
-    if (needle.len > haystack.len) return false;
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        var j: usize = 0;
-        while (j < needle.len) : (j += 1) {
-            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) break;
-        }
-        if (j == needle.len) return true;
-    }
-    return false;
+    return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
 }
 
 // ---------------------------------------------------------------------------
