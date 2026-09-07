@@ -461,7 +461,7 @@ fn readCompressed(r: *streams.Reader) Error!u32 {
 }
 
 /// Resolves a TypeDefOrRef coded value to a full type name.
-fn resolveTypeName(arena: std.mem.Allocator, coded: u32, td: *const TableData, heaps: *const Heaps) Error![]const u8 {
+fn resolveTypeName(arena: std.mem.Allocator, coded: u32, td: *const TableData, heaps: *const Heaps, depth: u32) Error![]const u8 {
     const tag = coded & 0x3;
     const row = coded >> 2;
     switch (tag) {
@@ -485,7 +485,7 @@ fn resolveTypeName(arena: std.mem.Allocator, coded: u32, td: *const TableData, h
             if (row == 0 or row > td.row_counts[tables.typespec]) return arena.dupe(u8, "TypeSpec");
             const blob = try typeSpecBlob(td, heaps, row);
             var r = streams.Reader.init(blob);
-            return readTypeName(arena, &r, td, heaps);
+            return readTypeName(arena, &r, td, heaps, depth + 1);
         },
     }
 }
@@ -496,24 +496,34 @@ fn typeSpecBlob(td: *const TableData, heaps: *const Heaps, row: u32) Error![]con
     return readBlob(&r, heaps);
 }
 
+/// Depth bound for the mutually recursive signature reader below.
+const max_sig_depth: u32 = 64;
+
 /// Reads one type from a signature cursor and names it. Handles primitives,
 /// class/valuetype (compressed coded indices), szarray, and genericinst.
-fn readTypeName(arena: std.mem.Allocator, r: *streams.Reader, td: *const TableData, heaps: *const Heaps) Error![]const u8 {
+fn readTypeName(arena: std.mem.Allocator, r: *streams.Reader, td: *const TableData, heaps: *const Heaps, depth: u32) Error![]const u8 {
+    // Signature nesting is file-supplied and the recursion here is mutual:
+    // a TypeSpec resolves by reading its own blob, so a TypeSpec whose blob
+    // is `CLASS <index of that same TypeSpec>` recurses forever, and a blob
+    // of repeated SZARRAY bytes recurses once per byte. Both overflow the
+    // stack on a crafted assembly, which no `catch` can recover from - bound
+    // the depth instead. Real signatures nest a handful of levels.
+    if (depth > max_sig_depth) return error.Corrupt;
     const e = try r.readByte();
     switch (e) {
         element.class, element.valuetype => {
             const coded = try readCompressed(r);
-            return resolveTypeName(arena, coded, td, heaps);
+            return resolveTypeName(arena, coded, td, heaps, depth + 1);
         },
         element.szarray => {
-            const base = try readTypeName(arena, r, td, heaps);
+            const base = try readTypeName(arena, r, td, heaps, depth + 1);
             return std.fmt.allocPrint(arena, "{s}[]", .{base});
         },
         element.genericinst => {
-            const gtype = try readTypeName(arena, r, td, heaps);
+            const gtype = try readTypeName(arena, r, td, heaps, depth + 1);
             const arity = try readCompressed(r);
             var i: u32 = 0;
-            while (i < arity) : (i += 1) _ = try readTypeName(arena, r, td, heaps);
+            while (i < arity) : (i += 1) _ = try readTypeName(arena, r, td, heaps, depth + 1);
             if (arity == 0) return gtype;
             return std.fmt.allocPrint(arena, "{s}<{d}>", .{ gtype, arity });
         },
@@ -540,18 +550,18 @@ fn parseFieldSig(arena: std.mem.Allocator, blob: []const u8, td: *const TableDat
     switch (e) {
         element.class, element.valuetype => {
             const coded = try readCompressed(&r);
-            field.type_name = try resolveTypeName(arena, coded, td, heaps);
+            field.type_name = try resolveTypeName(arena, coded, td, heaps, 0);
         },
         element.szarray => {
-            field.type_name = try readTypeName(arena, &r, td, heaps);
+            field.type_name = try readTypeName(arena, &r, td, heaps, 0);
             field.elem_type = element.szarray;
         },
         element.genericinst => {
-            field.type_name = try readTypeName(arena, &r, td, heaps);
+            field.type_name = try readTypeName(arena, &r, td, heaps, 0);
             const arity = try readCompressed(&r);
             var gi: u32 = 0;
             while (gi < arity) : (gi += 1) {
-                const arg = try readTypeName(arena, &r, td, heaps);
+                const arg = try readTypeName(arena, &r, td, heaps, 0);
                 if (gi == 0) {
                     field.generic_arg = arg;
                 } else if (gi == 1) {
@@ -746,7 +756,7 @@ pub fn parseAssembly(arena: std.mem.Allocator, name: []const u8, bytes: []const 
                         const marker = sr.readByte() catch 0;
                         if (marker == element.class or marker == element.valuetype) {
                             const coded = readCompressed(&sr) catch 0;
-                            if (coded != 0) d.base_name = resolveTypeName(arena, coded, &table_data, &heaps) catch null;
+                            if (coded != 0) d.base_name = resolveTypeName(arena, coded, &table_data, &heaps, 0) catch null;
                         }
                     }
                 }
@@ -1227,4 +1237,33 @@ pub fn collectFieldsIndexed(
         }
     }
     return out.toOwnedSlice(arena);
+}
+
+test "signature reader bounds its own recursion" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // A TypeSpec is named by reading its own signature blob, so a TypeSpec
+    // whose blob is `CLASS <index of that same TypeSpec>` sends
+    // resolveTypeName and readTypeName around a cycle that consumes no
+    // input. Blob heap: index 0 unused, index 1 = len 2, {CLASS, 0x06},
+    // where the compressed 0x06 is the coded index (row 1, tag 2 =
+    // TypeSpec) pointing back at the row being resolved.
+    const blob = [_]u8{ 0x00, 0x02, element.class, 0x06 };
+    var heaps: Heaps = .{ .blob = &blob, .heap_sizes = 0 };
+    heaps.table_counts[tables.typespec] = 1;
+    const stream = [_]u8{ 0x01, 0x00 }; // TypeSpec row 1: blob index 1
+    var td = TableData{ .bytes = &stream };
+    td.offsets[tables.typespec] = 0;
+    td.row_sizes[tables.typespec] = 2;
+    td.row_counts[tables.typespec] = 1;
+
+    try std.testing.expectError(error.Corrupt, resolveTypeName(a, 0x06, &td, &heaps, 0));
+
+    // The other unbounded shape: one SZARRAY byte per recursion level, so a
+    // blob of them nests as deeply as the blob is long.
+    var deep: [max_sig_depth + 8]u8 = @splat(element.szarray);
+    var r = streams.Reader.init(&deep);
+    try std.testing.expectError(error.Corrupt, readTypeName(a, &r, &td, &heaps, 0));
 }
