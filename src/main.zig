@@ -261,8 +261,11 @@ pub fn main(init: std.process.Init) !void {
     }
     const rest: []const []const u8 = kept.items;
 
-    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
-        try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(error.FileNotFound) });
+    // Report the real stat error: an unreadable directory, a symlink loop
+    // or a too-long name all reach here, and calling every one of them
+    // FileNotFound sends the operator looking for a missing file.
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| {
+        try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
         try stderr.flush();
         std.process.exit(1);
     };
@@ -584,23 +587,23 @@ fn loadTrees(arena: std.mem.Allocator, trees_path: ?[]const u8, stdout: *Io.Writ
 fn parseInjectedTrees(arena: std.mem.Allocator, path: []const u8, stdout: *Io.Writer) !?*const InjectedTrees {
     const io = io_global.io;
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch |err| {
-        diagnostic("unityz: cannot read trees file: {s}\n", .{@errorName(err)});
+        diagnostic("unityz: {s}: cannot read trees file: {s}\n", .{ path, @errorName(err) });
         return null;
     };
     const v = parseJsonLiteralAlloc(arena, text) catch |err| {
-        diagnostic("unityz: bad trees JSON: {s}\n", .{@errorName(err)});
+        diagnostic("unityz: {s}: bad trees JSON: {s}\n", .{ path, @errorName(err) });
         return null;
     };
     const fields = switch (v) {
         .obj => |f| f,
         else => {
-            diagnostic("unityz: trees file must be a JSON object\n", .{});
+            diagnostic("unityz: {s}: trees file must be a JSON object\n", .{path});
             return null;
         },
     };
     const out = try buildInjectedTrees(arena, fields, stdout);
     if (out.trees.count() == 0 and out.script_trees.count() == 0) {
-        diagnostic("unityz: trees file has no class trees\n", .{});
+        diagnostic("unityz: {s}: trees file has no class trees\n", .{path});
         return null;
     }
     const tp = try arena.create(InjectedTrees);
@@ -1259,7 +1262,14 @@ fn diskSidecars(arena: std.mem.Allocator, path: []const u8) ![]const Sidecar {
     const io = io_global.io;
     const dir_path = std.fs.path.dirname(path) orelse ".";
     var list: std.ArrayList(Sidecar) = .empty;
-    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return &.{};
+    // A sidecar that cannot be read is not a fatal error - the file's
+    // non-streamed objects still extract - but it must be said out loud:
+    // every streamed texture/audio clip in it resolves to zero bytes and
+    // is then skipped, so silence here looks like a complete extract.
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| {
+        diagnostic("unityz: {s}: cannot scan for .resS/.resource sidecars: {s}; streamed objects will be skipped\n", .{ dir_path, @errorName(err) });
+        return &.{};
+    };
     defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
@@ -1267,7 +1277,10 @@ fn diskSidecars(arena: std.mem.Allocator, path: []const u8) ![]const Sidecar {
         if (!std.mem.endsWith(u8, entry.name, ".resS") and
             !std.mem.endsWith(u8, entry.name, ".resource")) continue;
         const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir_path, entry.name });
-        const data = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch continue;
+        const data = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch |err| {
+            diagnostic("unityz: {s}: cannot read sidecar: {s}; its streamed objects will be skipped\n", .{ full, @errorName(err) });
+            continue;
+        };
         // entry.name borrows the iterator's reused buffer; copy it.
         try list.append(arena, .{ .path = try arena.dupe(u8, entry.name), .data = data });
     }
@@ -2226,8 +2239,14 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                         try stdout.print("  cubemap {d}: face {s}: {s} ({s}) unsupported\n", .{ o.path_id, face_names[fi], unityz.texture.format.name(t.format), @errorName(err) });
                         continue;
                     };
-                    const flipped = unityz.texture.flipVertical(tex_arena, rgba, t.width, t.height) catch continue;
-                    const image = encodeImage(tex_arena, format, t.width, t.height, flipped) catch continue;
+                    const flipped = unityz.texture.flipVertical(tex_arena, rgba, t.width, t.height) catch |err| {
+                        try stdout.print("  cubemap {d}: face {s}: flip failed: {s}\n", .{ o.path_id, face_names[fi], @errorName(err) });
+                        continue;
+                    };
+                    const image = encodeImage(tex_arena, format, t.width, t.height, flipped) catch |err| {
+                        try stdout.print("  cubemap {d}: face {s}: image encode failed: {s}\n", .{ o.path_id, face_names[fi], @errorName(err) });
+                        continue;
+                    };
                     var face_buf: [160]u8 = undefined;
                     const face_name = sanitizeComponent(try std.fmt.bufPrint(&face_buf, "{s}_{s}.png", .{ base, face_names[fi] }));
                     try extractFile(subdir, face_name, image);
@@ -5900,9 +5919,18 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
                 defer std.heap.page_allocator.free(pa);
                 const pb = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_b, fb.name });
                 defer std.heap.page_allocator.free(pb);
-                const data_a = std.Io.Dir.cwd().readFileAlloc(io, pa, std.heap.page_allocator, .unlimited) catch continue;
-                const data_b = std.Io.Dir.cwd().readFileAlloc(io, pb, std.heap.page_allocator, .unlimited) catch continue;
+                // Each defer must be registered before the next fallible
+                // read: a `continue` from side b's failure would otherwise
+                // skip side a's free and leak a whole asset per pair.
+                const data_a = std.Io.Dir.cwd().readFileAlloc(io, pa, std.heap.page_allocator, .unlimited) catch |err| {
+                    diagnostic("unityz: {s}: {s}; pixel/audio pass skipped\n", .{ pa, @errorName(err) });
+                    continue;
+                };
                 defer std.heap.page_allocator.free(data_a);
+                const data_b = std.Io.Dir.cwd().readFileAlloc(io, pb, std.heap.page_allocator, .unlimited) catch |err| {
+                    diagnostic("unityz: {s}: {s}; pixel/audio pass skipped\n", .{ pb, @errorName(err) });
+                    continue;
+                };
                 defer std.heap.page_allocator.free(data_b);
                 const ka = unityz.container.sniff(data_a).container;
                 const kb = unityz.container.sniff(data_b).container;
@@ -6808,11 +6836,11 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     }
     const io = io_global.io;
     // directory arguments compare the two trees file-by-file
-    const stat_a = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
-        failure("unityz: {s}: FileNotFound\n", .{path});
+    const stat_a = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| {
+        failure("unityz: {s}: {s}\n", .{ path, @errorName(err) });
         return;
     };
-    const stat_b = std.Io.Dir.cwd().statFile(io, rest[0], .{}) catch return failure("unityz: {s}: FileNotFound\n", .{rest[0]});
+    const stat_b = std.Io.Dir.cwd().statFile(io, rest[0], .{}) catch |err| return failure("unityz: {s}: {s}\n", .{ rest[0], @errorName(err) });
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -8093,7 +8121,13 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container == .serialized) {
                     // collect the patch entries this node contains
-                    const node_sf = unityz.serialized.parse(arena, n.data) catch continue;
+                    // Say which node failed to parse: skipping it silently
+                    // leaves any entry aimed at it unmatched, and the
+                    // patch then aborts blaming a missing object.
+                    const node_sf = unityz.serialized.parse(arena, n.data) catch |err| {
+                        diagnostic("unityz: {s}: node '{s}' parse failed: {s}; its patch entries cannot match\n", .{ path, n.path, @errorName(err) });
+                        continue;
+                    };
                     var node_entries: std.ArrayList(unityz.value.Field) = .empty;
                     for (entries, 0..) |entry, ei| {
                         if (isRawNodeKey(entry.name)) continue;
@@ -8168,7 +8202,10 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
             var replacements: std.ArrayList(unityz.webfile.EntryReplacement) = .empty;
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container == .serialized) {
-                    const entry_sf = unityz.serialized.parse(arena, e.data) catch continue;
+                    const entry_sf = unityz.serialized.parse(arena, e.data) catch |err| {
+                        diagnostic("unityz: {s}: entry '{s}' parse failed: {s}; its patch entries cannot match\n", .{ path, e.path, @errorName(err) });
+                        continue;
+                    };
                     var entry_entries: std.ArrayList(unityz.value.Field) = .empty;
                     for (entries, 0..) |entry, ei| {
                         if (isRawNodeKey(entry.name)) continue;
