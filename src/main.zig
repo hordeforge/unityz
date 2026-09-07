@@ -6039,7 +6039,13 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
                 const kb = unityz.container.sniff(data_b).container;
                 if (ka == kb and (ka == .serialized or ka == .bundle or ka == .webfile)) {
                     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-                    defer arena_state.deinit();
+                    defer {
+                        // The lookup caches below key on (arena, bytes) and
+                        // both halves of that key repeat across iterations,
+                        // so the slots have to go with the arena.
+                        dropCachedFor(arena_state.allocator());
+                        arena_state.deinit();
+                    }
                     // directory diffs keep pixel/audio as text diagnostics
                     // (on stderr in --json mode); the --json stats arrays
                     // cover single-file diffs
@@ -6050,6 +6056,10 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
                         err_writer = .initStreaming(.stderr(), io, &err_buf);
                         diag_out = &err_writer.interface;
                     }
+                    // As in the single-file diff: a failing pass would
+                    // otherwise drop the diagnostics already buffered in
+                    // `err_buf`, and here that is once per file pair.
+                    defer if (json) err_writer.flush() catch {};
                     var pixel_stats: std.ArrayList(PixelStat) = .empty;
                     var audio_stats: std.ArrayList(AudioStat) = .empty;
                     if (pixels) {
@@ -6453,6 +6463,27 @@ fn serializedCached(arena: std.mem.Allocator, bytes: []const u8) !*const unityz.
         serialized_cache_next = (serialized_cache_next + 1) % serialized_cache.len;
     }
     return sf;
+}
+
+/// Forgets every cache slot keyed to `allocator`, and must be called
+/// before an arena the lookups above parsed into is torn down. Both slot
+/// keys are (arena, byte range), and neither survives its arena: a
+/// directory `diff` builds and destroys one arena per file pair while
+/// `arena_state` keeps the same stack address every iteration, so the
+/// arena half of the key repeats. The next pair whose file lands at the
+/// same `page_allocator` address with the same length - same-size assets
+/// in a directory, with the mapping reused right after the previous
+/// pair's was released - would then match a slot whose parse output is
+/// already freed, and the diff would read the dead arena.
+fn dropCachedFor(allocator: std.mem.Allocator) void {
+    for (&container_cache) |*slot| {
+        const a = slot.allocator orelse continue;
+        if (a.ptr == allocator.ptr and a.vtable == allocator.vtable) slot.* = .{};
+    }
+    for (&serialized_cache) |*slot| {
+        const a = slot.allocator orelse continue;
+        if (a.ptr == allocator.ptr and a.vtable == allocator.vtable) slot.* = .{};
+    }
 }
 
 /// Resolves an AudioClip object's stream data from a file (container-aware,
@@ -7084,6 +7115,12 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         err_writer = .initStreaming(.stderr(), io_global.io, &err_buf);
         diag_out = &err_writer.interface;
     }
+    // Nothing flushes a File.Writer on the way out, so a failing pass
+    // below would drop whatever diagnostics it had already written into
+    // `err_buf` - the per-object offsets that say what differed. The
+    // flush on the success path stays where it is, so a write error there
+    // is still reported rather than swallowed here.
+    defer if (json) err_writer.flush() catch {};
     if (pixels) try pixelPass(arena, bytes, other_bytes, class_filter, diag_out, &pixel_stats);
     if (audio) try audioPass(arena, bytes, other_bytes, class_filter, diag_out, &audio_stats);
     if (json) try err_writer.flush();
