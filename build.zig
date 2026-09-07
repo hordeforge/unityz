@@ -68,11 +68,19 @@ pub fn build(b: *std.Build) void {
     // The vendored LZHAM decoder (MIT, per src/vendor/lzham/LICENSE.txt and
     // the grant at the end of lzham.h) compiles with the same
     // warnings-as-errors posture as the unitycrunch decoder above.
-    // The single exclusion covers one vendored construct, never the shim:
-    // the prefix-coding table copy in `lzham_prefix_coding.h` memcpies a
-    // non-trivially copyable type, which clang's `-Wnontrivial-memcall`
-    // (on via `-Wall`) rejects.
+    // The single exclusion covers one vendored construct: the prefix-coding
+    // table copy in `lzham_prefix_coding.h` memcpies a non-trivially
+    // copyable type, which clang's `-Wnontrivial-memcall` (on via `-Wall`)
+    // rejects. It is scoped to the vendored translation units; the
+    // hand-written `lzham_shim.cpp` below compiles with no exclusion at all.
     lzham_lib.root_module.addIncludePath(b.path("src/vendor/lzham"));
+    const lzham_flags = [_][]const u8{
+        "-DNDEBUG",
+        "-DLZHAM_NO_FAST_FILE",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    };
     for ([_][]const u8{
         "src/vendor/lzham/lzham_assert.cpp",
         "src/vendor/lzham/lzham_checksum.cpp",
@@ -86,20 +94,16 @@ pub fn build(b: *std.Build) void {
         "src/vendor/lzham/lzham_symbol_codec.cpp",
         "src/vendor/lzham/lzham_timer.cpp",
         "src/vendor/lzham/lzham_vector.cpp",
-        "src/vendor/lzham/lzham_shim.cpp",
     }) |src| {
         lzham_lib.root_module.addCSourceFile(.{
             .file = b.path(src),
-            .flags = &.{
-                "-DNDEBUG",
-                "-DLZHAM_NO_FAST_FILE",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-Wno-nontrivial-memcall",
-            },
+            .flags = &(lzham_flags ++ [_][]const u8{"-Wno-nontrivial-memcall"}),
         });
     }
+    lzham_lib.root_module.addCSourceFile(.{
+        .file = b.path("src/vendor/lzham/lzham_shim.cpp"),
+        .flags = &lzham_flags,
+    });
     lib.linkLibrary(lzham_lib);
 
     // CLI, linking the library module.
@@ -133,7 +137,7 @@ pub fn build(b: *std.Build) void {
     // Each source module carries its own unit tests; imported modules are
     // not analyzed by the lib root, so register every module file as its
     // own test root.
-    for ([_][]const u8{
+    const module_paths = [_][]const u8{
         "src/streams.zig",
         "src/container.zig",
         "src/webfile.zig",
@@ -157,7 +161,44 @@ pub fn build(b: *std.Build) void {
         "src/serialized_writer.zig",
         "src/dotnet.zig",
         "src/managed_trees.zig",
-    }) |module_path| {
+    };
+
+    // Zig analyzes `test` blocks only in a module's root file, so a module
+    // missing from the list above has its tests silently skipped — green
+    // suite, zero coverage, no diagnostic. The list is therefore checked
+    // against src/ at configure time instead of by hand: a new top-level
+    // module either joins `module_paths` or is named below with the reason
+    // it has no tests of its own.
+    const untested_modules = [_][]const u8{
+        "lib.zig", // library test root, registered as lib_tests above
+        "main.zig", // CLI test root, registered as exe_tests below
+        "vorbis_headers_index.zig", // generated offset tables, no logic
+    };
+    const io = b.graph.io;
+    var src_dir = b.build_root.handle.openDir(io, "src", .{ .iterate = true }) catch |err|
+        std.debug.panic("cannot read src/ to check test roots: {t}", .{err});
+    defer src_dir.close(io);
+    var src_it = src_dir.iterate();
+    while (src_it.next(io) catch |err|
+        std.debug.panic("cannot read src/ to check test roots: {t}", .{err})) |entry|
+    {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+        var is_root = false;
+        for (module_paths) |path| {
+            if (std.mem.eql(u8, path["src/".len..], entry.name)) is_root = true;
+        }
+        for (untested_modules) |name| {
+            if (std.mem.eql(u8, name, entry.name)) is_root = true;
+        }
+        if (!is_root) std.debug.panic(
+            "src/{s} is not a test root: add it to module_paths in build.zig so " ++
+                "`zig build test` runs its tests, or to untested_modules with a reason",
+            .{entry.name},
+        );
+    }
+
+    for (module_paths) |module_path| {
         const module = b.createModule(.{
             .root_source_file = b.path(module_path),
             .target = target,
