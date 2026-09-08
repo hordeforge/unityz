@@ -6134,6 +6134,9 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
             // Dropping it silently would report the file as "only in" the
             // other directory, which reads as a real difference.
             diagnostic("unityz: {s}: {s}\n", .{ full, @errorName(err) });
+            // Only the appended entry keeps `full` alive; this file has no
+            // entry, so nothing would ever free it.
+            std.heap.page_allocator.free(full);
             continue;
         };
         // `entry.name` borrows the iterator's buffer and is overwritten by the
@@ -6153,6 +6156,7 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
         const full = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ dir_b, entry.name });
         const data = std.Io.Dir.cwd().readFileAlloc(io, full, std.heap.page_allocator, .unlimited) catch |err| {
             diagnostic("unityz: {s}: {s}\n", .{ full, @errorName(err) });
+            std.heap.page_allocator.free(full);
             continue;
         };
         try files_b.append(std.heap.page_allocator, .{ .name = full[dir_b.len + 1 ..], .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
@@ -8369,7 +8373,7 @@ fn editSerializedObject(arena: std.mem.Allocator, bytes: []const u8, path_id: i6
 
     var pair: usize = 0;
     while (pair + 1 < pairs.len) : (pair += 2) {
-        const new_value = try parseJsonLiteral(pairs[pair + 1]);
+        const new_value = try parseJsonLiteral(arena, pairs[pair + 1]);
         const segs = try parseFieldPath(pairs[pair]);
         edited = setFieldPath(arena, edited, segs, 0, new_value) catch |err| {
             std.heap.page_allocator.free(segs);
@@ -8392,7 +8396,7 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const patch = parseJsonLiteral(patch_text) catch |err| {
+    const patch = parseJsonLiteral(arena, patch_text) catch |err| {
         failure("unityz: bad patch: {s}\n", .{@errorName(err)});
         return;
     };
@@ -8895,7 +8899,7 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     while (pair + 1 < pairs.items.len) : (pair += 2) {
         const field = pairs.items[pair];
         const value_text = pairs.items[pair + 1];
-        const new_value = parseJsonLiteral(value_text) catch |err| {
+        const new_value = parseJsonLiteral(arena, value_text) catch |err| {
             failure("unityz: bad value '{s}': {s}\n", .{ value_text, @errorName(err) });
             return;
         };
@@ -9121,18 +9125,19 @@ fn asTargetValue(allocator: std.mem.Allocator, old: unityz.value.Value, new_valu
 /// output has to feed back through `edit --patch`, so both directions
 /// belong together rather than one living out here.
 ///
-/// The trees-file and spec paths pass the process arena; the
-/// `parseJsonLiteral` wrapper below uses the page allocator, which
-/// allocates each JSON element separately - a generated
-/// multi-hundred-MB trees file (thousands of inlined MonoBehaviour
-/// layouts) would burn gigabytes of virtual address space on mmap
-/// granularity alone.
+/// Every caller passes an arena. The parser allocates each JSON element
+/// separately, so the page allocator is wrong twice over: it rounds every
+/// element up to a page - a generated multi-hundred-MB trees file
+/// (thousands of inlined MonoBehaviour layouts) would burn gigabytes of
+/// virtual address space on mmap granularity alone - and the element tree
+/// has no single owner to free it, so a directory `edit --patch` would
+/// leak the whole parsed patch once per file in the tree.
 const parseJsonLiteralAlloc = unityz.value.jsonParse;
 
 /// Minimal JSON literal parser: ints, floats, bools, null, quoted strings,
 /// and nested arrays/objects. Enough for `edit`.
-fn parseJsonLiteral(text: []const u8) !unityz.value.Value {
-    return parseJsonLiteralAlloc(std.heap.page_allocator, text);
+fn parseJsonLiteral(arena: std.mem.Allocator, text: []const u8) !unityz.value.Value {
+    return parseJsonLiteralAlloc(arena, text);
 }
 
 /// `hierarchy <path> [--json]` — prints the GameObject/Transform tree of
