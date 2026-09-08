@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# /// script
+# # This execs structsdump-to-trees.py at import, so its PEP 604 `X | Y`
+# # signature makes 3.10 a hard floor here too, not a lint preference.
+# # It matches ruff.toml's target-version, and `uv run` reads it here to
+# # pick an interpreter that satisfies it.
+# requires-python = ">=3.10"
+# ///
 """Pack an AssetRipper StructsDump into unityz's embedded built-in tree database.
 
 unityz ships the built-in engine-class type trees of specific Unity releases

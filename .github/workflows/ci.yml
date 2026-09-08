@@ -33,6 +33,27 @@ jobs:
       - name: Lint Python scripts
         run: pipx run ruff==0.16.1 check scripts
 
+  # The README names four targets beyond the two runners below as "known to
+  # build". A platform that is only asserted is not supported: compile each of
+  # them so the claim breaks here rather than in a user's checkout. Build-only
+  # on purpose - none of these can run their tests on this host, and the README
+  # says so. One job rather than a matrix so the four share a checkout and a
+  # Zig cache; `zig build` cross-compiles the vendored C++ too.
+  cross-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - name: Cross-compile the targets the README claims
+        run: |
+          for target in x86_64-linux-musl aarch64-linux-gnu x86-linux-gnu x86_64-macos; do
+            echo "::group::$target"
+            zig build -Dtarget="$target" --prefix "$RUNNER_TEMP/cross/$target"
+            echo "::endgroup::"
+          done
+
   build-test:
     # The library and CLI are developed on macOS and released as a Zig
     # package consumers build for their own target, so both host platforms

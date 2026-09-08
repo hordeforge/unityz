@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# /// script
+# # `X | Y` in a function signature is evaluated at def time (PEP 604),
+# # so this is a hard floor, not a lint preference: on 3.9 the module
+# # fails to import. It matches ruff.toml's target-version, and `uv run`
+# # reads it here to pick an interpreter that satisfies it.
+# requires-python = ">=3.10"
+# ///
 """Convert an AssetRipper TypeTreeDumps StructsDump into a unityz --trees file.
 
 Mono builds of Unity games strip the class type trees from their serialized

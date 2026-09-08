@@ -29,10 +29,11 @@ zig build
 Linux (x86_64) and macOS (aarch64) are built and tested in CI. The Zig
 parsers make no host-endianness or word-size assumptions - every integer
 read and written names its byte order - so other **little-endian POSIX**
-targets `zig build -Dtarget=...` accepts should work, but are not covered
-by CI. `x86_64-linux-musl`, `aarch64-linux-gnu`, `x86-linux-gnu` (32-bit)
-and `x86_64-macos` are known to build; nothing beyond CI's two targets is
-known to *pass tests*.
+targets `zig build -Dtarget=...` accepts should work. CI cross-compiles
+`x86_64-linux-musl`, `aarch64-linux-gnu`, `x86-linux-gnu` (32-bit) and
+`x86_64-macos` on every push, so those four are known to build; nothing
+beyond CI's two runner targets is known to *pass tests*, because nothing
+runs the suite on them.
 
 Two families are **not** supported, both because of the vendored LZHAM
 decoder (`src/vendor/lzham`), which UnityFS block compression type 4
