@@ -1567,6 +1567,7 @@ fn decodeAtcBlock(block: []const u8, dst: *[16][4]u8) void {
 fn decodeDxt5AlphaBlock(block: []const u8, alphas: *[16]u8) void {
     const a0 = block[0];
     const a1 = block[1];
+    // 48 bits of 3-bit alpha indices, LSB-first per pixel
     const a_bits = std.mem.readInt(u48, block[2..8], .little);
     for (0..16) |i| {
         const aidx = (a_bits >> @as(u6, @intCast(3 * i))) & 0x7;

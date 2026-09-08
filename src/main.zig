@@ -6556,14 +6556,7 @@ fn audioPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8,
             try stdout.print("    (audio: object {d} (AudioClip) size differs {d} vs {d})\n", .{ fa.path_id, sa.?.len, sb.?.len });
             try stats.append(arena, .{ .path_id = fa.path_id, .size_a = sa.?.len, .size_b = sb.?.len });
             differ += 1;
-        } else if (!std.mem.eql(u8, sa.?, sb.?)) {
-            var first: usize = sa.?.len;
-            for (sa.?, 0..) |c, i| {
-                if (c != sb.?[i]) {
-                    first = i;
-                    break;
-                }
-            }
+        } else if (std.mem.indexOfDiff(u8, sa.?, sb.?)) |first| {
             try stdout.print("    (audio: object {d} (AudioClip) {d} bytes, first difference at offset {d})\n", .{ fa.path_id, sa.?.len, first });
             try stats.append(arena, .{ .path_id = fa.path_id, .size_a = sa.?.len, .size_b = sb.?.len, .first_diff = first });
             differ += 1;
