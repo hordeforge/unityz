@@ -637,7 +637,10 @@ fn buildInjectedTrees(arena: std.mem.Allocator, fields: []const unityz.value.Fie
         if (std.mem.eql(u8, f.name, "__class_ids__")) {
             const ids = switch (f.value) {
                 .obj => |ff| ff,
-                else => continue,
+                else => {
+                    try stdout.print("unityz: trees entry '__class_ids__': expected an object, got {s}\n", .{@tagName(f.value)});
+                    continue;
+                },
             };
             for (ids) |idf| {
                 const cid = idf.value.asInt() orelse continue;
@@ -648,7 +651,10 @@ fn buildInjectedTrees(arena: std.mem.Allocator, fields: []const unityz.value.Fie
         } else if (std.mem.eql(u8, f.name, "__monoscripts__")) {
             const arr = switch (f.value) {
                 .array => |a| a,
-                else => continue,
+                else => {
+                    try stdout.print("unityz: trees entry '__monoscripts__': expected an array, got {s}\n", .{@tagName(f.value)});
+                    continue;
+                },
             };
             for (arr) |e| {
                 const ef = switch (e) {
@@ -675,7 +681,10 @@ fn buildInjectedTrees(arena: std.mem.Allocator, fields: []const unityz.value.Fie
         } else if (std.mem.eql(u8, f.name, "__script_trees__")) {
             const map = switch (f.value) {
                 .obj => |ff| ff,
-                else => continue,
+                else => {
+                    try stdout.print("unityz: trees entry '__script_trees__': expected an object, got {s}\n", .{@tagName(f.value)});
+                    continue;
+                },
             };
             for (map) |sf| {
                 if (try buildInjectedTree(arena, sf.name, sf.value, stdout)) |tp| {
@@ -699,7 +708,13 @@ fn buildInjectedTrees(arena: std.mem.Allocator, fields: []const unityz.value.Fie
 fn buildInjectedTree(arena: std.mem.Allocator, name: []const u8, value: unityz.value.Value, stdout: *Io.Writer) !?*const unityz.typetree.TypeTree {
     const arr = switch (value) {
         .array => |a| a,
-        else => return null,
+        else => {
+            // Silently dropping the entry left every object of the class
+            // counted as "typeless skipped", with nothing pointing at the
+            // trees file as the cause.
+            try stdout.print("unityz: trees entry '{s}': expected a node list, got {s}\n", .{ name, @tagName(value) });
+            return null;
+        },
     };
     // An empty list links to a tree with no roots, and every consumer of an
     // injected tree reads `roots[0]`. Reject it here, where the entry enters,
@@ -713,7 +728,14 @@ fn buildInjectedTree(arena: std.mem.Allocator, name: []const u8, value: unityz.v
         var node = unityz.typetree.Node{ .level = 0 };
         const ef = switch (e) {
             .obj => |ff| ff,
-            else => continue,
+            // `nodes` comes from `alloc`, so skipping the assignment below
+            // would hand `fromFlatNodes` an uninitialized Node - a garbage
+            // level and, worse, garbage `name`/`type_name` slices that the
+            // object reader later dereferences.
+            else => {
+                try stdout.print("unityz: trees entry '{s}': node {d} is not an object\n", .{ name, i });
+                return null;
+            },
         };
         for (ef) |ff| {
             if (std.mem.eql(u8, ff.name, "m_Type")) {
@@ -1245,6 +1267,18 @@ fn extractFile(subdir: ?[]const u8, name: []const u8, contents: []const u8) !voi
     } else {
         try writeFileToCwd(name, contents);
     }
+}
+
+/// Returns the `size` bytes at `data_offset + offset` of this file's own
+/// data section - a `StreamingInfo` with an empty path - or an empty slice
+/// when the range does not fit. Offset and size come from the file, so an
+/// out-of-range pair has to degrade rather than wrap into an in-bounds
+/// slice (or, on a 32-bit target, panic in the cast).
+fn inFileStream(sf: *const unityz.serialized.SerializedFile, offset: u32, size: u32) []const u8 {
+    const start = std.math.cast(usize, sf.data_offset + offset) orelse return &.{};
+    const end = std.math.add(usize, start, size) catch return &.{};
+    if (end > sf.source.len) return &.{};
+    return sf.source[start..end];
 }
 
 /// Returns the `size` bytes at `offset` of the sidecar whose basename
@@ -1977,9 +2011,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 // embedded pixels: m_ImageData, or streamed range in this file
                 var pixels: []const u8 = t.image_data;
                 if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
-                    const start: usize = @intCast(sf.data_offset + t.stream.offset);
-                    const end = start + t.stream.size;
-                    if (end <= sf.source.len) pixels = sf.source[start..end];
+                    pixels = inFileStream(&sf, t.stream.offset, t.stream.size);
                 }
                 if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
                     // streamed from a sibling .resS/.resource node
@@ -2275,9 +2307,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 if (t.width == 0 or t.height == 0) continue;
                 var pixels: []const u8 = t.image_data;
                 if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
-                    const start: usize = @intCast(sf.data_offset + t.stream.offset);
-                    const end = start + t.stream.size;
-                    if (end <= sf.source.len) pixels = sf.source[start..end];
+                    pixels = inFileStream(&sf, t.stream.offset, t.stream.size);
                 }
                 if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
                     // streamed from a sibling .resS/.resource sidecar
@@ -3215,9 +3245,7 @@ fn texturePixels(sf: *const unityz.serialized.SerializedFile, sidecars: []const 
     if (t.image_data.len != 0) return t.image_data;
     if (t.stream.size == 0) return &.{};
     if (t.stream.path.len == 0) {
-        const start: usize = @intCast(sf.data_offset + t.stream.offset);
-        const end = start + t.stream.size;
-        return if (end <= sf.source.len) sf.source[start..end] else &.{};
+        return inFileStream(sf, t.stream.offset, t.stream.size);
     }
     return resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
 }
@@ -8386,7 +8414,13 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                 for (entries) |entry| {
                     if (!isRawNodeKey(entry.name)) continue;
                     if (!std.mem.eql(u8, entry.name, n.path)) continue;
-                    patched = try applyNodeBytes(arena, patched orelse n.data, entry);
+                    // `BadPatchValue` alone named neither the entry nor what
+                    // was wrong with it, which is unusable against a patch
+                    // file holding dozens of them.
+                    patched = applyNodeBytes(arena, patched orelse n.data, entry) catch |err| {
+                        failure("unityz: {s}: patch entry '{s}': {s}; expected {{\"offset\": <n>, \"bytes\": \"<base64>\"}} landing inside the node's {d} byte(s)\n", .{ path, entry.name, @errorName(err), n.data.len });
+                        return;
+                    };
                 }
                 if (patched) |p| {
                     try replacements.append(arena, .{ .path = n.path, .data = p });
@@ -8462,7 +8496,10 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                 for (entries) |entry| {
                     if (!isRawNodeKey(entry.name)) continue;
                     if (!std.mem.eql(u8, entry.name, e.path)) continue;
-                    patched = try applyNodeBytes(arena, patched orelse e.data, entry);
+                    patched = applyNodeBytes(arena, patched orelse e.data, entry) catch |err| {
+                        failure("unityz: {s}: patch entry '{s}': {s}; expected {{\"offset\": <n>, \"bytes\": \"<base64>\"}} landing inside the entry's {d} byte(s)\n", .{ path, entry.name, @errorName(err), e.data.len });
+                        return;
+                    };
                 }
                 if (patched) |p| {
                     try replacements.append(arena, .{ .path = e.path, .data = p });
@@ -9112,10 +9149,27 @@ fn cmdCreate(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
         } else if (std.mem.eql(u8, f.name, "objects")) {
             if (f.value == .array) objects = f.value.array;
         } else if (std.mem.eql(u8, f.name, "resource")) {
-            if (f.value == .obj) {
-                for (f.value.obj) |rf| {
-                    if (std.mem.eql(u8, rf.name, "file") and rf.value == .string) resource_file = rf.value.string;
+            // Every other spec key rejects a wrong shape; ignoring one here
+            // wrote a bundle with no sidecar node and still reported
+            // success, so its streamed textures/audio resolved to nothing.
+            if (f.value != .obj) {
+                failure("unityz: {s}: \"resource\" must be an object like {{\"file\": \"...\"}}\n", .{path});
+                return;
+            }
+            for (f.value.obj) |rf| {
+                if (!std.mem.eql(u8, rf.name, "file")) {
+                    failure("unityz: {s}: unknown \"resource\" key '{s}'\n", .{ path, rf.name });
+                    return;
                 }
+                if (rf.value != .string) {
+                    failure("unityz: {s}: \"resource\".file must be a string\n", .{path});
+                    return;
+                }
+                resource_file = rf.value.string;
+            }
+            if (resource_file == null) {
+                failure("unityz: {s}: \"resource\" needs a \"file\" path\n", .{path});
+                return;
             }
         } else {
             failure("unityz: {s}: unknown spec key '{s}'\n", .{ path, f.name });
