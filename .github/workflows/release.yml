@@ -82,10 +82,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `zig_target` is what the artifact is built for, and it is named
+          # rather than left to the runner's native default: an unpinned
+          # native build on ubuntu-latest links against whatever glibc that
+          # image happens to ship, so a tarball called `x86_64-linux` would
+          # silently stop running on older distros the day GitHub rolls the
+          # image. Pinning `gnu.2.28` (RHEL 8 / Debian 10) declares the floor
+          # in the one place that decides it.
           - os: ubuntu-latest
             target: x86_64-linux
+            zig_target: x86_64-linux-gnu.2.28
           - os: macos-latest
             target: aarch64-macos
+            zig_target: aarch64-macos
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -94,7 +103,7 @@ jobs:
       - name: Test the tagged tree
         run: zig build test
       - name: Build the CLI in ReleaseSafe
-        run: zig build -Doptimize=ReleaseSafe --prefix "$RUNNER_TEMP/unityz"
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.zig_target }} --prefix "$RUNNER_TEMP/unityz"
       # The binary proves its own version before it ships: what it reports
       # must be the tag, or the tag gate above was wrong about the source.
       - name: Package

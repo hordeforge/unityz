@@ -232,8 +232,10 @@ The release workflow rejects a tag that disagrees with `build.zig.zon` or
 has no changelog section, creates the GitHub Release with that section as
 its notes, then re-runs the tests on the tagged tree and attaches a
 ReleaseSafe build for each platform CI covers (Linux x86_64, macOS arm64)
-with a SHA-256 checksum. Other targets build from source with
-`zig build -Dtarget=...`.
+with a SHA-256 checksum. The Linux tarball is built against glibc 2.28
+(RHEL 8 / Debian 10), so that is its floor; it will not run on a musl
+distro such as Alpine. Other targets - musl included - build from source
+with `zig build -Dtarget=...`.
 
 ## Docs
 
