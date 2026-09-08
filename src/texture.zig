@@ -630,6 +630,19 @@ fn copyPixels(out: []u8, data: []const u8, w: usize, h: usize, stride: usize, co
     }
 }
 
+/// Rounds `n` up to a whole number of `d`-sized units. Block formats size
+/// their payload by block count, so a partial trailing block still costs a
+/// full one - plain `/` would floor it away and under-report the size.
+fn ceilDiv(n: usize, d: usize) usize {
+    return (n + d - 1) / d;
+}
+
+/// Number of 4x4 blocks covering a `w` x `h` image, both dimensions padded
+/// up to whole blocks.
+fn blocks4x4(w: usize, h: usize) usize {
+    return ceilDiv(w, 4) * ceilDiv(h, 4);
+}
+
 pub fn expectedSize(tex_format: i32, width: u32, height: u32) ?usize {
     const w: usize = @intCast(width);
     const h: usize = @intCast(height);
@@ -656,51 +669,42 @@ pub fn expectedSize(tex_format: i32, width: u32, height: u32) ?usize {
         format.rgb48, format.rgb48_signed => w * h * 6,
         format.rgba64, format.rgba64_signed => w * h * 8,
         format.pvrtc_rgb2, format.pvrtc_rgba2 => blk: {
-            const pw = (w + 7) / 8 * 8;
-            const ph = (h + 3) / 4 * 4;
+            const pw = ceilDiv(w, 8) * 8;
+            const ph = ceilDiv(h, 4) * 4;
             break :blk pw * ph / 4;
         },
         format.pvrtc_rgb4, format.pvrtc_rgba4 => blk: {
-            const pw = (w + 3) / 4 * 4;
-            const ph = (h + 3) / 4 * 4;
+            const pw = ceilDiv(w, 4) * 4;
+            const ph = ceilDiv(h, 4) * 4;
             break :blk pw * ph / 2;
         },
-        format.atc_rgb4, format.eac_r, format.eac_r_signed => blk: {
-            const bw = (w + 3) / 4;
-            const bh = (h + 3) / 4;
-            break :blk bw * bh * 8;
-        },
-        format.atc_rgba8, format.eac_rg, format.eac_rg_signed => blk: {
-            const bw = (w + 3) / 4;
-            const bh = (h + 3) / 4;
-            break :blk bw * bh * 16;
-        },
+        // 8 bytes per 4x4 block
+        format.atc_rgb4,
+        format.eac_r,
+        format.eac_r_signed,
+        format.etc_rgb4,
+        format.etc2_rgb,
+        format.etc2_rgba1,
+        format.etc_rgb4_3ds,
+        format.etc_rgba8_3ds,
+        => blocks4x4(w, h) * 8,
+        // 16 bytes per 4x4 block
+        format.atc_rgba8,
+        format.eac_rg,
+        format.eac_rg_signed,
+        format.etc2_rgba8,
+        => blocks4x4(w, h) * 16,
         format.r8_signed => w * h * 1,
         format.rgba32_signed => w * h * 4,
         format.dxt1, format.dxt3, format.dxt5, format.bc4, format.bc5, format.bc6h, format.bc7 => blk: {
-            // dimensions are padded up to multiples of 4
-            const bw = (w + 3) / 4;
-            const bh = (h + 3) / 4;
             const per_block: usize = if (tex_format == format.dxt1 or tex_format == format.bc4) 8 else 16;
-            break :blk bw * bh * per_block;
-        },
-        format.etc_rgb4, format.etc2_rgb, format.etc2_rgba1, format.etc_rgb4_3ds, format.etc_rgba8_3ds => blk: {
-            const bw = (w + 3) / 4;
-            const bh = (h + 3) / 4;
-            break :blk bw * bh * 8;
-        },
-        format.etc2_rgba8 => blk: {
-            const bw = (w + 3) / 4;
-            const bh = (h + 3) / 4;
-            break :blk bw * bh * 16;
+            break :blk blocks4x4(w, h) * per_block;
         },
         // crunched streams are arbitrary size; the crunch decompressor validates them
         format.etc_rgb4_crunched, format.etc2_rgba8_crunched, format.dxt1_crunched, format.dxt5_crunched => 0,
         else => blk: {
             const bs = astcBlockSize(tex_format) orelse return null;
-            const nbx = (w + bs.bw - 1) / bs.bw;
-            const nby = (h + bs.bh - 1) / bs.bh;
-            break :blk nbx * nby * 16;
+            break :blk ceilDiv(w, bs.bw) * ceilDiv(h, bs.bh) * 16;
         },
     };
 }
@@ -1197,8 +1201,8 @@ fn blitBlock(out: []u8, w: usize, h: usize, bx: usize, by: usize, px: *const [16
 }
 
 fn decodeBc6(out: []u8, w: usize, h: usize, data: []const u8) void {
-    const nbx = (w + 3) / 4;
-    const nby = (h + 3) / 4;
+    const nbx = ceilDiv(w, 4);
+    const nby = ceilDiv(h, 4);
     for (0..nby) |by| {
         for (0..nbx) |bx| {
             const block = data[(by * nbx + bx) * 16 ..][0..16];
@@ -1452,8 +1456,8 @@ fn pvrtcApplicate2(data: []const u8, info: [*]*PvrtcTexelInfo, buf: *[32]u32) vo
 
 fn decodePvrtc(out: []u8, w: usize, h: usize, data: []const u8, is2bpp: bool) Error!void {
     const bw: usize = if (is2bpp) 8 else 4;
-    const num_blocks_x = if (is2bpp) (w + 7) / 8 else (w + 3) / 4;
-    const num_blocks_y = (h + 3) / 4;
+    const num_blocks_x = if (is2bpp) ceilDiv(w, 8) else ceilDiv(w, 4);
+    const num_blocks_y = ceilDiv(h, 4);
     const num_blocks = num_blocks_x * num_blocks_y;
     const min_num_blocks = @min(num_blocks_x, num_blocks_y);
     // PVRTC requires each side's block count to be a power of two
@@ -1596,8 +1600,8 @@ fn decodeDxt5AlphaBlock(block: []const u8, alphas: *[16]u8) void {
 }
 
 fn decodeAtc(out: []u8, w: usize, h: usize, data: []const u8, rgba: bool) Error!void {
-    const bw = (w + 3) / 4;
-    const bh = (h + 3) / 4;
+    const bw = ceilDiv(w, 4);
+    const bh = ceilDiv(h, 4);
     const block_size: usize = if (rgba) 16 else 8;
     for (0..bh) |by| {
         for (0..bw) |bx| {
@@ -1641,8 +1645,8 @@ fn decodeEacChannelBlock(block: []const u8, channel: usize, dst: *[16][4]u8, sig
 const EacKind = enum { r_unsigned, r_signed, rg_unsigned, rg_signed };
 
 fn decodeEac(out: []u8, w: usize, h: usize, data: []const u8, kind: EacKind) Error!void {
-    const bw = (w + 3) / 4;
-    const bh = (h + 3) / 4;
+    const bw = ceilDiv(w, 4);
+    const bh = ceilDiv(h, 4);
     const two_ch = kind == .rg_unsigned or kind == .rg_signed;
     const signed_fmt = kind == .r_signed or kind == .rg_signed;
     const block_size: usize = if (two_ch) 16 else 8;
@@ -1733,8 +1737,8 @@ fn colorPalette565(c0: u16, c1: u16) [4][4]u8 {
 }
 
 fn decodeDxt1(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
-    const bw = (w + 3) / 4;
-    const bh = (h + 3) / 4;
+    const bw = ceilDiv(w, 4);
+    const bh = ceilDiv(h, 4);
     for (0..bh) |by| {
         for (0..bw) |bx| {
             const block = data[(by * bw + bx) * 8 ..][0..8];
@@ -1749,8 +1753,8 @@ fn decodeDxt1(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
 }
 
 fn decodeDxt3(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
-    const bw = (w + 3) / 4;
-    const bh = (h + 3) / 4;
+    const bw = ceilDiv(w, 4);
+    const bh = ceilDiv(h, 4);
     for (0..bh) |by| {
         for (0..bw) |bx| {
             const block = data[(by * bw + bx) * 16 ..][0..16];
@@ -1781,8 +1785,8 @@ fn decodeDxt3(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
 }
 
 fn decodeDxt5(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
-    const bw = (w + 3) / 4;
-    const bh = (h + 3) / 4;
+    const bw = ceilDiv(w, 4);
+    const bh = ceilDiv(h, 4);
     for (0..bh) |by| {
         for (0..bw) |bx| {
             const block = data[(by * bw + bx) * 16 ..][0..16];
@@ -3110,8 +3114,8 @@ fn astcBlockSize(tex_format: i32) ?struct { bw: usize, bh: usize } {
 }
 
 fn decodeAstc(out: []u8, w: usize, h: usize, data: []const u8, bw: usize, bh: usize) Error!void {
-    const nbx = (w + bw - 1) / bw;
-    const nby = (h + bh - 1) / bh;
+    const nbx = ceilDiv(w, bw);
+    const nby = ceilDiv(h, bh);
     for (0..nby) |by| {
         for (0..nbx) |bx| {
             const block = data[(by * nbx + bx) * 16 ..][0..16];
@@ -3663,8 +3667,8 @@ fn bcChannelBlock(block: []const u8, pixel: usize) u8 {
 }
 
 fn decodeBc4(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
-    const bw = (w + 3) / 4;
-    const bh = (h + 3) / 4;
+    const bw = ceilDiv(w, 4);
+    const bh = ceilDiv(h, 4);
     for (0..bh) |by| {
         for (0..bw) |bx| {
             const block = data[(by * bw + bx) * 8 ..][0..8];
@@ -3686,8 +3690,8 @@ fn decodeBc4(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
 }
 
 fn decodeBc5(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
-    const bw = (w + 3) / 4;
-    const bh = (h + 3) / 4;
+    const bw = ceilDiv(w, 4);
+    const bh = ceilDiv(h, 4);
     for (0..bh) |by| {
         for (0..bw) |bx| {
             const block = data[(by * bw + bx) * 16 ..][0..16];
@@ -3715,8 +3719,8 @@ const EtcKind = enum { etc1, etc2 };
 /// differential (no T/H/planar); `etc2` applies the full ETC2 mode
 /// selection.
 fn decodeEtc(out: []u8, w: usize, h: usize, data: []const u8, kind: EtcKind) Error!void {
-    const bw = (w + 3) / 4;
-    const bh = (h + 3) / 4;
+    const bw = ceilDiv(w, 4);
+    const bh = ceilDiv(h, 4);
     for (0..bh) |by| {
         for (0..bw) |bx| {
             const block = data[(by * bw + bx) * 8 ..][0..8];
@@ -3727,8 +3731,8 @@ fn decodeEtc(out: []u8, w: usize, h: usize, data: []const u8, kind: EtcKind) Err
 }
 
 fn decodeEtc2Rgba8(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
-    const bw = (w + 3) / 4;
-    const bh = (h + 3) / 4;
+    const bw = ceilDiv(w, 4);
+    const bh = ceilDiv(h, 4);
     for (0..bh) |by| {
         for (0..bw) |bx| {
             const block = data[(by * bw + bx) * 16 ..][0..16];
@@ -3756,8 +3760,8 @@ fn decodeEtc2Rgba8(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
 /// is the punch-through flag (`obaq`); when cleared, a texel that selects the
 /// transparent color (color index 2) is drawn with alpha 0.
 fn decodeEtc2Rgba1(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
-    const bw = (w + 3) / 4;
-    const bh = (h + 3) / 4;
+    const bw = ceilDiv(w, 4);
+    const bh = ceilDiv(h, 4);
     for (0..bh) |by| {
         for (0..bw) |bx| {
             const block = data[(by * bw + bx) * 8 ..][0..8];
@@ -4273,8 +4277,8 @@ fn bc7Expand(v: u8, bits: usize) u8 {
 
 /// BC7 block decode: 16 bytes per 4x4 block, MSB-first mode bits at bit 0.
 fn decodeBc7(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
-    const bw = (w + 3) / 4;
-    const bh = (h + 3) / 4;
+    const bw = ceilDiv(w, 4);
+    const bh = ceilDiv(h, 4);
     for (0..bh) |by| {
         for (0..bw) |bx| {
             decodeBc7Block(out, w, h, bx, by, data[(by * bw + bx) * 16 ..][0..16]);

@@ -27,7 +27,7 @@ pub const Error = error{
 
 /// True when `decodeSample` can convert the mode to PCM16.
 pub fn decodable(mode: u32) bool {
-    return mode >= 1 and mode <= 5 or mode == 6 or mode == 7;
+    return mode >= 1 and mode <= 7;
 }
 
 /// Short codec name for reporting.
@@ -63,14 +63,14 @@ const ima_step_table = [_]i16{
 pub fn decodeSample(allocator: std.mem.Allocator, raw: []const u8, data_start: u32, sample: fsb5.Sample, mode: u32) Error![]i16 {
     if (!decodable(mode)) return error.UnsupportedMode;
     const channels: usize = @intCast(sample.channels);
-    if (channels == 0 or channels > 2 and mode == 7) return error.UnsupportedChannels;
+    if (channels == 0 or (channels > 2 and mode == 7)) return error.UnsupportedChannels;
     // Both come from the bank header and each can reach maxInt(u32), so the
     // sum is taken in usize: as a u32 add it overflows before the bounds
     // check below can reject it.
     const start: usize = @as(usize, data_start) + @as(usize, sample.data_offset);
     const total: usize = @as(usize, sample.sample_count) * channels;
     if (start > raw.len) return error.Corrupt;
-    const data = raw[@intCast(start)..];
+    const data = raw[start..];
     // `sample_count` is a 30-bit header field, so `total` alone would size a
     // multi-gigabyte buffer from a few bytes of file. Every supported mode is
     // bounded by its own per-sample input cost - one byte per sample for PCM8,

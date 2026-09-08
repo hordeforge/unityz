@@ -114,16 +114,12 @@ pub const Reader = struct {
         return @bitCast(std.mem.readInt(std.meta.Int(.unsigned, @sizeOf(T) * 8), &bytes, endian));
     }
 
-    /// Reads a 4-byte-aligned string: u32 length, `length` bytes, then
-    /// zero padding to a 4-byte boundary. Returns an owned copy without the
-    /// padding. The content itself is returned verbatim — Unity files often
-    /// include a trailing NUL *inside* `length`; callers trim as needed.
+    /// `readAlignedStringBorrow` with an owned copy of the result, for
+    /// callers that must outlive the source buffer. The content is copied
+    /// verbatim — Unity files often include a trailing NUL *inside*
+    /// `length`; callers trim as needed.
     pub fn readAlignedString(self: *Reader, allocator: std.mem.Allocator) ![]u8 {
-        const len = try self.readInt(u32);
-        const raw = try self.readSlice(len);
-        const pad = (4 - (len % 4)) % 4;
-        try self.skip(pad);
-        return try allocator.dupe(u8, raw);
+        return try allocator.dupe(u8, try self.readAlignedStringBorrow());
     }
 
     /// Reads a NUL-terminated string and returns a borrowed slice excluding
@@ -259,9 +255,7 @@ pub const Writer = struct {
 
     /// Pads with zero bytes until the total length is a multiple of 4.
     pub fn alignTo4(self: *Writer) !void {
-        const pad = (4 - (self.buf.items.len % 4)) % 4;
-        const zeros = [_]u8{0} ** 4;
-        try self.writeBytes(zeros[0..pad]);
+        try self.alignTo(4);
     }
 
     /// Pads with zero bytes until the total length is a multiple of `n`.
