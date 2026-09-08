@@ -36,9 +36,11 @@
 //! ```
 //!
 //! Each block's compression type comes from the low 6 bits of its own
-//! flags, independent of the header's compression type; bit 0 carries no
-//! type for the decoder and is ignored. A raw block stores its payload
-//! with compressed_size equal to uncompressed_size.
+//! flags, independent of the header's compression type: bit 0 is the low
+//! bit of that type value (1 = LZMA, 3 = LZ4HC), not a separate
+//! "compressed" flag, and the 0x40 bit some writers set alongside it is
+//! outside the mask and ignored. A raw block stores its payload with
+//! compressed_size equal to uncompressed_size.
 //!
 //! Node data slices borrow from the concatenated decompressed block stream,
 //! which `Bundle` owns.

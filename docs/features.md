@@ -334,8 +334,13 @@ curl -sL https://raw.githubusercontent.com/AssetRipper/TypeTreeDumps/main/Struct
 uv run scripts/structsdump-to-builtin.py 2021.3.45f2.dump -o src/builtin_trees/2021.3.45f2.bin
 ```
 
-Then add the release to the table in `src/builtin_trees.zig`; the module's
-tests link every class of every shipped file.
+Then add the release to the `table` in `src/builtin_trees.zig`, add the
+packed file's `shasum -a 256` to the digest list in that module's digest
+test, and record the same digest and byte size in `NOTICE`. The digest
+list is sized from the table, so a new release does not compile until its
+line is there - the intended prompt to confirm the bytes are the ones you
+meant to ship. The module's tests then link every class of every shipped
+file.
 
 ## Creating files (`create`)
 

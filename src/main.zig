@@ -1263,9 +1263,6 @@ fn writeManifest(arena: std.mem.Allocator, entries: []const ManifestEntry, stdou
     try stdout.print("extracted manifest.json ({d} object(s))\n", .{entries.len});
 }
 
-/// Writes an extracted file, placing it under `subdir` when the object
-/// came from a container node (see extractSerialized); the subdirectory
-/// is created under the output directory when missing.
 /// Shared epilogue for the single-sidecar summary exporters: derive the
 /// sidecar name from the prefix and, when supplied, the object's own name
 /// (trimmed of trailing NUL), write the contents under it, count the
@@ -1295,6 +1292,9 @@ fn finalizeSidecar(
     try manifest.append(arena, .{ .path_id = path_id, .class_id = class_id, .name = object_name orelse "", .subdir = subdir });
 }
 
+/// Writes an extracted file, placing it under `subdir` when the object
+/// came from a container node (see extractSerialized); the subdirectory
+/// is created under the output directory when missing.
 fn extractFile(subdir: ?[]const u8, name: []const u8, contents: []const u8) !void {
     if (subdir) |sd| {
         const base_owned = extract_outdir != null;
@@ -3937,12 +3937,6 @@ fn writeMeshObj(
     return arena.dupe(u8, w.getWritten());
 }
 
-/// Prints `v` with 9 significant digits, normal form, trailing zeros
-/// trimmed - C's `%.9g`, the exact format UnityPy's OBJ exporter uses, so
-/// mesh exports match theirs byte for byte. Values outside the normal-form
-/// range (|v| >= 1e9 or < 1e-4) would use exponent form in C; mesh
-/// coordinates and UVs never reach those, and they still print as a valid
-/// decimal here.
 /// Rounds `x` to the nearest integer with ties to even (Python's %.9g and
 /// C's %g rounding), unlike Zig's @round which ties away from zero.
 fn roundHalfEven(x: f64) f64 {
@@ -4348,6 +4342,10 @@ fn writeIndex(w: *unityz.streams.Writer, use_u16: bool, idx: u64) !void {
     }
 }
 
+/// Prints `v` as C's `%.9g` would: 9 significant digits with trailing
+/// zeros trimmed, switching to exponent form (`8.57252764E-18`) once the
+/// decimal exponent leaves [-4, 9). That is the exact format UnityPy's OBJ
+/// exporter uses, so mesh exports match theirs byte for byte.
 fn writeObjFloat(w: *unityz.streams.Writer, v: f64) error{ NonFinite, OutOfMemory }!void {
     // Non-finite values (Inf/NaN bits in corrupt mesh data) would panic in
     // @intFromFloat below; report the mesh unsupported instead, which the
@@ -5154,8 +5152,6 @@ fn printSerialized(bytes: []const u8, dump: bool, objects: bool, json: bool, std
     if (dump) try dumpObjects(&sf, stdout);
 }
 
-/// Prints the object table (path id, class, byte start, size) of a
-/// serialized file.
 /// Best-effort `m_Name` of an object, read through its type tree. Empty
 /// when the object has no usable tree, no name, or fails to read.
 fn objectName(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, o: *const unityz.serialized.ObjectInfo) []const u8 {
@@ -5205,6 +5201,8 @@ fn dumpContainerEntries(
     }
 }
 
+/// Prints the object table (path id, class, byte start, size, and `m_Name`
+/// when one can be read) of a serialized file.
 fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         failure("  serialized parse failed: {s}\n", .{@errorName(err)});
@@ -6161,11 +6159,6 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     if (failures.items.len != 0) verify_failed_flag = true;
 }
 
-/// Routes a diagnostic to stderr while `--json` is in effect, so the
-/// document a script parses off stdout stays well-formed; without `--json`
-/// it stays on stdout with the rest of the human-readable report.
-/// Reports a per-file failure on stderr, keeping it out of the stdout
-/// stream that carries the command's (possibly JSON) result.
 /// Compares two directories file-by-file by content hash, reporting
 /// unchanged/changed/new/deleted files and totals. UnityPy has no tree
 /// comparison.
@@ -6344,7 +6337,6 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
     }
 }
 
-/// Prints `s` as a JSON string literal (quoted, escaped).
 /// One batch-mode `--json` line: `{"file":"<path>","results":[...]}` holding
 /// every document the command emitted for that file (each emitter writes one
 /// document per line; a non-JSON line is kept as a JSON string), plus
@@ -6766,10 +6758,6 @@ const FieldDiff = struct {
     new: []const u8,
 };
 
-/// `diff --fields`: reports the exact fields that changed inside a
-/// changed object, by decoding both value trees and walking them. Field
-/// paths look like `m_LocalPosition.x` or `m_Children[2]`. With
-/// `collect` set (json mode) the entries are appended instead of printed.
 /// The `--fields` pass for one matched file pair: every object whose bytes
 /// changed gets its exact changed field paths printed, as the single-file
 /// diff does.
@@ -6787,6 +6775,10 @@ fn fieldsPass(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8
     }
 }
 
+/// `diff --fields`: reports the exact fields that changed inside a
+/// changed object, by decoding both value trees and walking them. Field
+/// paths look like `m_LocalPosition.x` or `m_Children[2]`. With
+/// `collect` set (json mode) the entries are appended instead of printed.
 fn diffObjectFields(arena: std.mem.Allocator, a_bytes: []const u8, b_bytes: []const u8, fa: Fp, own_basename: []const u8, injected: ?*const InjectedTrees, collect: ?*std.ArrayList(FieldDiff), stdout: *Io.Writer) !void {
     const va = try findObjectValue(arena, a_bytes, fa, own_basename, injected);
     const vb = try findObjectValue(arena, b_bytes, fa, own_basename, injected);
