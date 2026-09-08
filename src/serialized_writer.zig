@@ -1,5 +1,13 @@
-//! SerializedFile rewrite: produce a new `.assets`-style file from a
-//! parsed [`SerializedFile`] with one or more object payloads replaced.
+//! SerializedFile writing, in two entry points:
+//!
+//! - `rewrite` produces a new `.assets`-style file from a parsed
+//!   [`SerializedFile`] with one or more object payloads replaced. The
+//!   rules below describe it.
+//! - `create` builds a file from nothing but declared type trees and
+//!   object payloads (`CreateSpec`), always as format 22
+//!   (`create_version`) and little-endian, with 8-aligned object data
+//!   (`create_data_align`) rather than the 4 `rewrite` keeps. It is
+//!   documented at its own declaration.
 //!
 //! The type section of the metadata (unity version, platform, type trees,
 //! externals, ...) is copied verbatim from the source; only the object

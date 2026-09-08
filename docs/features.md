@@ -346,8 +346,9 @@ file.
 
 `unityz create <spec.json> --out <file.unity3d>` builds a UnityFS bundle
 from empty state: a format-22 little-endian SerializedFile with the
-declared type trees embedded, an 8-aligned object table, no script or
-reference types, and an optional `.resource` sidecar, packed into one
+declared type trees embedded, a 4-aligned object table over 8-aligned
+object data (as Unity 2022.3 writes it), no script or reference types,
+and an optional `.resource` sidecar, packed into one
 format-8 archive (`5.x.x` plus the exact revision in the header, the
 block/directory table at the head, the data hash zero - the layout Unity
 2022.3 itself writes).

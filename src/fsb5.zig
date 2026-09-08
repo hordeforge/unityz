@@ -226,8 +226,9 @@ test "fsb5 frequency codes 0 and 10" {
 
 test "fsb5 DSPCOEFS chunk parse" {
     const a = std.testing.allocator;
-    // header + one sample with a DSPCOEFS chunk (46 bytes: 32 big-endian
-    // s16 coefficient pairs + 14 bytes of per-channel data FMOD writes)
+    // header + one sample with a DSPCOEFS chunk (46 bytes per channel:
+    // 16 big-endian s16 (8 coefficient pairs) + 14 bytes of per-channel
+    // data FMOD writes)
     var blob: [60 + 8 + 4 + 46]u8 = [_]u8{0} ** (60 + 8 + 4 + 46);
     @memcpy(blob[0..4], "FSB5");
     std.mem.writeInt(u32, blob[4..8], 1, .little); // version

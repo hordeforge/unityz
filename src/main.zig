@@ -9,8 +9,7 @@
 //! 3. `Command`, `parseCommand` and `runCommand` — the dispatch table.
 //!    Each subcommand has exactly one `cmd<Name>` entry point below.
 //! 4. The `cmd*` implementations, with the helpers each one owns next to
-//!    it. The convention is a doc comment naming the invocation it serves;
-//!    `cmdExtract`, `cmdTrees` and `cmdHierarchy` still lack one.
+//!    it. Each opens with a doc comment naming the invocation it serves.
 //! 5. Tests, interleaved with the code they cover rather than gathered at
 //!    the end.
 //!
@@ -864,6 +863,15 @@ fn injectedTreeFor(
     return cache.tree(sf.unity_version, class_id);
 }
 
+/// `extract <path>` — write out what a file holds: decoded assets per
+/// class (images, meshes, audio, fonts, JSON for the rest), or the raw
+/// node/object bytes with `--raw`, or value trees plus a `manifest.json`
+/// with `--json`. `--class` / `--path-id` / `--name` narrow the set,
+/// `--format` picks the image encoder, `--outdir` the destination, and
+/// `--trees` supplies the class trees a Mono build stripped. `--summary`
+/// is a dry run: it reports per class and writes nothing. Bundles and
+/// webfiles extract the assets inside their serialized nodes as well as
+/// the raw nodes.
 fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     var raw = false;
     // Bundles and webfiles extract the assets inside their serialized nodes
@@ -9545,6 +9553,16 @@ fn findDanglingPPtr(v: unityz.value.Value, ids: *const std.AutoHashMapUnmanaged(
     return null;
 }
 
+/// `trees <path> [--out <file.json>]` — export the type trees a file
+/// already carries, in the `--trees` JSON shape (stdout without `--out`).
+/// Unity keeps trees in AssetBundles but strips them from a player's
+/// `.assets`, so a game's own bundles are the closest version-exact
+/// source for its typeless files. MonoBehaviour trees are keyed by the
+/// script class reached through `m_Script`, resolved against the
+/// MonoScript objects of every serialized node in the container; one
+/// whose MonoScript lives elsewhere is skipped and counted on stderr.
+/// A node that fails to parse is a failure, not a silent omission: its
+/// classes would otherwise be missing from an output that looks complete.
 fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     var out_path: ?[]const u8 = null;
     var i: usize = 0;
@@ -9823,6 +9841,12 @@ fn flattenNode(arena: std.mem.Allocator, node: *const unityz.typetree.Node, out:
     for (node.children) |*c| try flattenNode(arena, c, out);
 }
 
+/// `hierarchy <path> [--json]` — print a scene's GameObject/Transform
+/// tree, roots first, with each node's name, component classes, local
+/// position, and the bones of any SkinnedMeshRenderer. `--trees` decodes
+/// typeless Mono files. Output is labelled by the container node a tree
+/// came from, never by the file, so `path` is unused; it stays in the
+/// signature to match the shared `cmd*` shape `runCommand` dispatches to.
 fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     _ = path;
     var json = false;
