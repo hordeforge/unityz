@@ -1785,10 +1785,8 @@ fn decodeDxt5(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
     for (0..bh) |by| {
         for (0..bw) |bx| {
             const block = data[(by * bw + bx) * 16 ..][0..16];
-            const a0 = block[0];
-            const a1 = block[1];
-            // 48 bits of 3-bit alpha indices, LSB-first per pixel
-            const a_bits = std.mem.readInt(u48, block[2..8], .little);
+            var alphas: [16]u8 = undefined;
+            decodeDxt5AlphaBlock(block[0..8], &alphas);
             const c0 = std.mem.readInt(u16, block[8..10], .little);
             const c1 = std.mem.readInt(u16, block[10..12], .little);
             const indices = std.mem.readInt(u32, block[12..16], .little);
@@ -1802,33 +1800,11 @@ fn decodeDxt5(out: []u8, w: usize, h: usize, data: []const u8) Error!void {
                     if (px >= w or py >= h) continue;
                     const dst = out[(py * w + px) * 4 ..][0..4];
                     const i = y * 4 + x;
-                    const aidx = (a_bits >> @as(u6, @intCast(3 * i))) & 0x7;
-                    const alpha: u8 = if (a0 > a1)
-                        switch (aidx) {
-                            0 => a0,
-                            1 => a1,
-                            2 => interp7(a0, a1, 6, 1),
-                            3 => interp7(a0, a1, 5, 2),
-                            4 => interp7(a0, a1, 4, 3),
-                            5 => interp7(a0, a1, 3, 4),
-                            6 => interp7(a0, a1, 2, 5),
-                            else => interp7(a0, a1, 1, 6),
-                        }
-                    else switch (aidx) {
-                        0 => a0,
-                        1 => a1,
-                        2 => interp5(a0, a1, 4, 1),
-                        3 => interp5(a0, a1, 3, 2),
-                        4 => interp5(a0, a1, 2, 3),
-                        5 => interp5(a0, a1, 1, 4),
-                        6 => 0,
-                        else => 255,
-                    };
                     const idx = (indices >> @as(u5, @intCast(2 * i))) & 0x3;
                     dst[0] = palette[idx][0];
                     dst[1] = palette[idx][1];
                     dst[2] = palette[idx][2];
-                    dst[3] = alpha;
+                    dst[3] = alphas[i];
                 }
             }
         }

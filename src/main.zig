@@ -8404,7 +8404,7 @@ fn editSerializedObject(arena: std.mem.Allocator, bytes: []const u8, path_id: i6
 
     var pair: usize = 0;
     while (pair + 1 < pairs.len) : (pair += 2) {
-        const new_value = try parseJsonLiteral(arena, pairs[pair + 1]);
+        const new_value = try parseJsonLiteralAlloc(arena, pairs[pair + 1]);
         const segs = try parseFieldPath(pairs[pair]);
         edited = setFieldPath(arena, edited, segs, 0, new_value) catch |err| {
             std.heap.page_allocator.free(segs);
@@ -8427,7 +8427,7 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const patch = parseJsonLiteral(arena, patch_text) catch |err| {
+    const patch = parseJsonLiteralAlloc(arena, patch_text) catch |err| {
         failure("unityz: bad patch: {s}\n", .{@errorName(err)});
         return;
     };
@@ -8930,7 +8930,7 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     while (pair + 1 < pairs.items.len) : (pair += 2) {
         const field = pairs.items[pair];
         const value_text = pairs.items[pair + 1];
-        const new_value = parseJsonLiteral(arena, value_text) catch |err| {
+        const new_value = parseJsonLiteralAlloc(arena, value_text) catch |err| {
             failure("unityz: bad value '{s}': {s}\n", .{ value_text, @errorName(err) });
             return;
         };
@@ -9164,12 +9164,6 @@ fn asTargetValue(allocator: std.mem.Allocator, old: unityz.value.Value, new_valu
 /// has no single owner to free it, so a directory `edit --patch` would
 /// leak the whole parsed patch once per file in the tree.
 const parseJsonLiteralAlloc = unityz.value.jsonParse;
-
-/// Minimal JSON literal parser: ints, floats, bools, null, quoted strings,
-/// and nested arrays/objects. Enough for `edit`.
-fn parseJsonLiteral(arena: std.mem.Allocator, text: []const u8) !unityz.value.Value {
-    return parseJsonLiteralAlloc(arena, text);
-}
 
 /// `hierarchy <path> [--json]` — prints the GameObject/Transform tree of
 /// a scene: root transforms first, recursing through m_Children, each

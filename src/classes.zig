@@ -395,13 +395,9 @@ pub fn className(class_id: i32) ?[]const u8 {
     return null;
 }
 
-/// Finds a named field in a `.obj` value, or null.
-pub fn fieldOf(v: value.Value, name: []const u8) ?value.Value {
-    return value.fieldOf(v, name);
-}
-
 /// The generic variant accessors are owned by `value`; re-exported here so
 /// callers of the typed views keep reaching for one name per field kind.
+pub const fieldOf = value.fieldOf;
 pub const intField = value.intField;
 pub const boolField = value.boolField;
 pub const stringField = value.stringField;

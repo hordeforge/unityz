@@ -195,6 +195,20 @@ test "decompress errors" {
     try std.testing.expectError(error.OutputOverflow, decompress(a, "\x40abcd", 5));
 }
 
+/// Writes the length continuation bytes for a run whose token nibble
+/// saturated at 15 (lz4_Block_format.md): 255 per full step, then the
+/// remainder. A run shorter than 15 fits in the nibble and adds nothing.
+fn writeExtraLen(out: []u8, opos: *usize, len: usize) void {
+    if (len < 15) return;
+    var rest = len - 15;
+    while (rest >= 255) : (rest -= 255) {
+        out[opos.*] = 255;
+        opos.* += 1;
+    }
+    out[opos.*] = @intCast(rest);
+    opos.* += 1;
+}
+
 /// Compresses `src` into a fresh LZ4 block (no frame header, no checksum -
 /// the inverse of `decompress`). Greedy hash-table matcher: every 4-byte
 /// window hashes into a table of the most recent position, and a candidate
@@ -244,35 +258,19 @@ pub fn compress(allocator: std.mem.Allocator, src: []const u8) Error![]u8 {
         if (m < 4) continue;
         // Emit the literal run then the match.
         const lit_len = i - lit_start;
-        const lit_nib: u8 = if (lit_len >= 15) 15 else @intCast(lit_len);
-        const match_nib: u8 = if (m - 4 >= 15) 15 else @intCast(m - 4);
+        const lit_nib: u8 = @intCast(@min(lit_len, 15));
+        const match_nib: u8 = @intCast(@min(m - 4, 15));
         const token: u8 = (lit_nib << 4) | match_nib;
         out[opos] = token;
         opos += 1;
-        if (lit_len >= 15) {
-            var rest = lit_len - 15;
-            while (rest >= 255) : (rest -= 255) {
-                out[opos] = 255;
-                opos += 1;
-            }
-            out[opos] = @intCast(rest);
-            opos += 1;
-        }
+        writeExtraLen(out, &opos, lit_len);
         @memcpy(out[opos .. opos + lit_len], src[lit_start..i]);
         opos += lit_len;
         const dist: u16 = @intCast(i - c);
         out[opos] = @intCast(dist & 0xff);
         out[opos + 1] = @intCast(dist >> 8);
         opos += 2;
-        if (m - 4 >= 15) {
-            var rest = m - 4 - 15;
-            while (rest >= 255) : (rest -= 255) {
-                out[opos] = 255;
-                opos += 1;
-            }
-            out[opos] = @intCast(rest);
-            opos += 1;
-        }
+        writeExtraLen(out, &opos, m - 4);
         i += m - 1; // the loop's own +1 lands on the byte after the match
         lit_start = i + 1;
     }
@@ -280,18 +278,10 @@ pub fn compress(allocator: std.mem.Allocator, src: []const u8) Error![]u8 {
     // Trailing literals-only sequence.
     const lit_len = src.len - lit_start;
     if (lit_len > 0) {
-        const lit_nib: u8 = if (lit_len >= 15) 15 else @intCast(lit_len);
+        const lit_nib: u8 = @intCast(@min(lit_len, 15));
         out[opos] = lit_nib << 4;
         opos += 1;
-        if (lit_len >= 15) {
-            var rest = lit_len - 15;
-            while (rest >= 255) : (rest -= 255) {
-                out[opos] = 255;
-                opos += 1;
-            }
-            out[opos] = @intCast(rest);
-            opos += 1;
-        }
+        writeExtraLen(out, &opos, lit_len);
         @memcpy(out[opos .. opos + lit_len], src[lit_start..]);
         opos += lit_len;
     }

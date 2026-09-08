@@ -19,7 +19,6 @@
 //! per-format modules.
 
 const std = @import("std");
-const streams = @import("streams.zig");
 const serialized = @import("serialized.zig");
 
 pub const ContainerType = enum {
