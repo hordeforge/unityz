@@ -191,6 +191,18 @@ fn finalFlush(stdout: *Io.Writer) void {
     stdout.flush() catch std.process.exit(141);
 }
 
+/// Flushes what stdout already holds before an error exit. The buffer is
+/// Zig-side, so `std.process.exit` drops it without running defers: a
+/// command that printed part of its report and then failed would lose that
+/// part, while the same failure signalled through `command_failed_flag`
+/// keeps it (those paths reach `finalFlush` first). `extract` naming the
+/// objects it did write before hitting a full disk is the case that
+/// matters. Best-effort on purpose - a broken pipe here must not rewrite
+/// the caller's exit status the way `finalFlush` deliberately does.
+fn bailFlush(stdout: *Io.Writer) void {
+    stdout.flush() catch {};
+}
+
 /// Prints a usage diagnostic to stderr and returns `error.Usage`; main() turns
 /// it into exit status 2 without a second generic line, so a bad flag can never
 /// look like a successful run on stdout.
@@ -266,6 +278,7 @@ pub fn main(init: std.process.Init) !void {
         cmdTreesBuiltin(args[2..], stdout) catch |err| {
             if (err == error.Usage) std.process.exit(2);
             if (err == error.WriteFailed) std.process.exit(141);
+            bailFlush(stdout);
             try stderr.print("unityz: {s}\n", .{@errorName(err)});
             try stderr.flush();
             std.process.exit(1);
@@ -312,6 +325,7 @@ pub fn main(init: std.process.Init) !void {
             cmdManaged(path, rest, &.{}, stdout) catch |err| {
                 if (err == error.Usage) std.process.exit(2);
                 if (err == error.WriteFailed) std.process.exit(141);
+                bailFlush(stdout);
                 try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
                 try stderr.flush();
                 std.process.exit(1);
@@ -323,6 +337,7 @@ pub fn main(init: std.process.Init) !void {
         cmdDiff(path, rest, &.{}, stdout) catch |err| {
             if (err == error.Usage) std.process.exit(2);
             if (err == error.WriteFailed) std.process.exit(141);
+            bailFlush(stdout);
             try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
             try stderr.flush();
             std.process.exit(1);
@@ -391,6 +406,7 @@ pub fn main(init: std.process.Init) !void {
     runCommand(command, path, rest, bytes, stdout) catch |err| {
         if (err == error.Usage) std.process.exit(2);
         if (err == error.WriteFailed) std.process.exit(141);
+        bailFlush(stdout);
         try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
         try stderr.flush();
         std.process.exit(1);
