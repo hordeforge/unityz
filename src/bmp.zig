@@ -23,6 +23,12 @@ const file_header_len = 14;
 const info_header_len = 56; // core 40 + 4x 32-bit channel masks
 const data_offset = file_header_len + info_header_len;
 const max_dim: i64 = 0x7fffffff; // i32 header fields
+/// Largest pixel array the headers can describe: both `bfSize` and
+/// `biSizeImage` are u32, and `bfSize` also carries the 70-byte header, so
+/// the per-dimension bound above is not on its own enough - a 32768x32768
+/// texture is 4 GiB of RGBA and would truncate on the way into those
+/// fields.
+const max_pixel_bytes: usize = std.math.maxInt(u32) - data_offset;
 
 /// Encodes `rgba` (width*height*4 bytes, row-major, display order) as a
 /// BMP file.
@@ -32,6 +38,7 @@ pub fn encode(allocator: std.mem.Allocator, width: u32, height: u32, rgba: []con
     const w: usize = @intCast(width);
     const h: usize = @intCast(height);
     if (rgba.len != w * h * 4) return error.SizeMismatch;
+    if (rgba.len > max_pixel_bytes) return error.SizeMismatch;
 
     var out: std.ArrayList(u8) = .empty;
     const pixel_bytes: u32 = @intCast(rgba.len);

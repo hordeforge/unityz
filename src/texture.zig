@@ -232,7 +232,21 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
     // bytes actually present, so the allocation can never outrun the file.
     const expected = expectedSize(tex_format, width, height) orelse return error.UnsupportedFormat;
     if (data.len < expected) return error.BadSize;
-    var out = try allocator.alloc(u8, pixels * 4);
+    // The crunched formats are the hole in that guard: a crunch stream's
+    // length is arbitrary, so `expectedSize` reports 0 for them and the
+    // dimensions stay unbounded by the file. They are handled before the
+    // allocation, not in the switch below, because the buffer would be dead
+    // weight anyway - the recursive decode of the decompressed blocks
+    // allocates its own, under the real block format's size bound.
+    switch (tex_format) {
+        format.etc_rgb4_crunched,
+        format.etc2_rgba8_crunched,
+        format.dxt1_crunched,
+        format.dxt5_crunched,
+        => return decodeCrunched(allocator, tex_format, width, height, data),
+        else => {},
+    }
+    const out = try allocator.alloc(u8, pixels * 4);
     errdefer allocator.free(out);
 
     switch (tex_format) {
@@ -526,32 +540,6 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
         format.etc2_rgba8 => try decodeEtc2Rgba8(out, w, h, data),
         // UnityPy routes the 3DS ETC variants to its ETC1 decoder; match that.
         format.etc_rgb4_3ds, format.etc_rgba8_3ds => try decodeEtc(out, w, h, data, .etc1),
-        format.etc_rgb4_crunched, format.etc2_rgba8_crunched, format.dxt1_crunched, format.dxt5_crunched => {
-            // decompress the crunch stream to raw blocks (ETC1/ETC2/DXT1/DXT5),
-            // then decode those blocks with the corresponding block decoder
-            var out_ptr: ?*anyopaque = null;
-            var out_size: u32 = 0;
-            if (unitycrunch_unpack(data.ptr, @intCast(data.len), 0, &out_ptr, &out_size) == 0 or out_ptr == null)
-                return error.UnsupportedFormat;
-            defer unitycrunch_free(out_ptr);
-            const blocks: []const u8 = @as([*]const u8, @ptrCast(out_ptr.?))[0..out_size];
-            // The crunch stream names the block format, not the Unity texture
-            // format; map the crunched format number back to its raw blocks.
-            const fmt: i32 = switch (tex_format) {
-                format.etc_rgb4_crunched => format.etc_rgb4,
-                format.etc2_rgba8_crunched => format.etc2_rgba8,
-                format.dxt1_crunched => format.dxt1,
-                format.dxt5_crunched => format.dxt5,
-                else => return error.UnsupportedFormat,
-            };
-            // The recursive call allocates the RGBA8 buffer for the real
-            // block format, so this one is dead weight: release it before
-            // recursing, and blank the slice so the errdefer above cannot
-            // free it a second time (freeing an empty slice is a no-op).
-            allocator.free(out);
-            out = &.{};
-            return decode(allocator, fmt, width, height, blocks);
-        },
         else => blk: {
             if (astcBlockSize(tex_format)) |bs| {
                 break :blk try decodeAstc(out, w, h, data, bs.bw, bs.bh);
@@ -560,6 +548,30 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
         },
     }
     return out;
+}
+
+/// Decompresses a crunch stream to raw blocks (ETC1/ETC2/DXT1/DXT5) and
+/// decodes those blocks with the corresponding block decoder. The block
+/// format's own `expectedSize` then bounds the dimensions against the
+/// decompressed byte count, which is the check a crunched header cannot
+/// supply itself.
+fn decodeCrunched(allocator: std.mem.Allocator, tex_format: i32, width: u32, height: u32, data: []const u8) Error![]u8 {
+    var out_ptr: ?*anyopaque = null;
+    var out_size: u32 = 0;
+    if (unitycrunch_unpack(data.ptr, @intCast(data.len), 0, &out_ptr, &out_size) == 0 or out_ptr == null)
+        return error.UnsupportedFormat;
+    defer unitycrunch_free(out_ptr);
+    const blocks: []const u8 = @as([*]const u8, @ptrCast(out_ptr.?))[0..out_size];
+    // The crunch stream names the block format, not the Unity texture
+    // format; map the crunched format number back to its raw blocks.
+    const fmt: i32 = switch (tex_format) {
+        format.etc_rgb4_crunched => format.etc_rgb4,
+        format.etc2_rgba8_crunched => format.etc2_rgba8,
+        format.dxt1_crunched => format.dxt1,
+        format.dxt5_crunched => format.dxt5,
+        else => return error.UnsupportedFormat,
+    };
+    return decode(allocator, fmt, width, height, blocks);
 }
 
 /// One float pixel component to 8-bit, clamped to the [0,1] range.

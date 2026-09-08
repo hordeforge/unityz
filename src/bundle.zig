@@ -372,10 +372,13 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
 
     for (nodes) |*n| {
         // offset/size come straight from the header info; a negative or
-        // overflowing range must not wrap into an in-bounds slice.
+        // overflowing range must not wrap into an in-bounds slice. They are
+        // i64 fields, so a value past `maxInt(usize)` has to be rejected the
+        // way `parseLegacy` and `webfile.parse` reject theirs - an `@intCast`
+        // would fault on a 32-bit target instead of skipping the node.
         if (n.offset < 0 or n.size < 0) continue;
-        const off: usize = @intCast(n.offset);
-        const len: usize = @intCast(n.size);
+        const off = std.math.cast(usize, n.offset) orelse continue;
+        const len = std.math.cast(usize, n.size) orelse continue;
         const end = std.math.add(usize, off, len) catch continue;
         if (end <= stream.len) n.data = stream[off..end];
     }
