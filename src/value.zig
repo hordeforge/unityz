@@ -402,6 +402,36 @@ test "value json escapes control characters" {
         "{\"m_ClassName\":\"MyGame\\u0000\",\"m_Tab\":\"a\\u0001b\",\"m_Del\":\"c\\u007f\"}",
         bw.buffered(),
     );
+
+    // The whole escape set, pinned at the boundary between the bytes that
+    // get a short escape, the ones that fall through to \uXXXX, and the
+    // first printable byte that stays literal: 0x08 escapes but 0x09 is
+    // \t, 0x1f escapes but 0x20 is a plain space, 0x7f escapes but 0x7e
+    // does not. Field names route through the same escaper as values, so
+    // one of them carries a quote and a control byte too.
+    const esc = Value{ .obj = &[_]Field{
+        .{ .name = "q\"\x01", .value = .{ .string = "\x08\x09\x0a\x0b\x0c\x0d\x0e\x1f\x20" } },
+        .{ .name = "quote", .value = .{ .string = "\"\\" } },
+        .{ .name = "hi", .value = .{ .string = "\x7e\x7f" } },
+    } };
+    const want =
+        \\{"q\"\u0001":"\u0008\t\n\u000b\u000c\r\u000e\u001f ","quote":"\"\\","hi":"~\u007f"}
+    ;
+    var ebuf: [512]u8 = undefined;
+    var ew = std.Io.Writer.fixed(&ebuf);
+    try jsonWrite(esc, &ew);
+    try std.testing.expectEqualStrings(want, ew.buffered());
+
+    // `writeJsonString` is the one escaper `jsonParse` has to be able to
+    // read back, so assert the round trip and not just the spelling.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const back = try jsonParse(arena.allocator(), want);
+    try std.testing.expectEqual(esc.obj.len, back.obj.len);
+    for (esc.obj, back.obj) |orig, got| {
+        try std.testing.expectEqualStrings(orig.name, got.name);
+        try std.testing.expectEqualStrings(orig.value.string, got.value.string);
+    }
 }
 
 test "value accessors" {
@@ -439,6 +469,11 @@ test "jsonParse rejects malformed input" {
     try std.testing.expectError(error.UnterminatedString, jsonParse(a, "\"abc"));
     try std.testing.expectError(error.BadObject, jsonParse(a, "{1:2}"));
     try std.testing.expectError(error.UnterminatedArray, jsonParse(a, "[1"));
+    // elements with no comma between them
+    try std.testing.expectError(error.BadArray, jsonParse(a, "[1 2]"));
+    // maxInt(u64) parses (see the round-trip test); one past it does not,
+    // rather than wrapping into a wrong field value.
+    try std.testing.expectError(error.Overflow, jsonParse(a, "18446744073709551616"));
     try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\ud800\""));
     // lone low surrogate, and a high surrogate whose partner is not one
     try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\udc00\""));
@@ -447,6 +482,17 @@ test "jsonParse rejects malformed input" {
     try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\u12\""));
     try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\uzzzz\""));
     try std.testing.expectError(error.BadEscape, jsonParse(a, "\"\\q\""));
+
+    // A member that fails after its key parsed has already allocated that
+    // key, and `jsonParse` frees nothing on the way out - the arena its
+    // callers pass owns the partial tree. These cases therefore need one.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    // a key with no colon, and a member with no comma after it
+    try std.testing.expectError(error.BadObject, jsonParse(ar, "{\"a\" 1}"));
+    try std.testing.expectError(error.BadObject, jsonParse(ar, "{\"a\":1 \"b\":2}"));
+    try std.testing.expectError(error.UnterminatedObject, jsonParse(ar, "{\"a\":1"));
 }
 
 test "jsonParse decodes surrogate pairs and bounds nesting depth" {

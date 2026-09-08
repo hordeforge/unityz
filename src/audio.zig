@@ -280,6 +280,54 @@ test "a sample offset past u32 is rejected, not wrapped" {
     try std.testing.expectError(error.Corrupt, decodeSample(a, &raw, 32, s, 2));
 }
 
+test "decodeSample turns undecodable modes and channel counts into errors" {
+    // `decodeSample` switches on the mode with `else => unreachable` behind
+    // the `decodable` guard, so the two have to agree exactly: a mode the
+    // predicate lets through but the switch does not handle is undefined
+    // behavior, not an error. Pin the predicate at both ends of its range.
+    for ([_]u32{ 1, 2, 3, 4, 5, 6, 7 }) |mode| try std.testing.expect(decodable(mode));
+    for ([_]u32{ 0, 8, 9, 15, 255 }) |mode| try std.testing.expect(!decodable(mode));
+
+    const a = std.testing.allocator;
+    const raw = [_]u8{0} ** 64;
+    const mono = fsb5.Sample{ .data_offset = 0, .sample_count = 4, .channels = 1, .frequency = 8000 };
+    // Vorbis (15) is named but not decoded here; `fsb --json` reports it
+    // undecodable rather than the command failing on an unreachable.
+    try std.testing.expectError(error.UnsupportedMode, decodeSample(a, &raw, 0, mono, 15));
+    try std.testing.expectError(error.UnsupportedMode, decodeSample(a, &raw, 0, mono, 0));
+    try std.testing.expectError(error.UnsupportedMode, decodeSample(a, &raw, 0, mono, 8));
+
+    // A zero channel count would size a zero-stride read; reject it before
+    // the layout maths runs.
+    const no_channels = fsb5.Sample{ .data_offset = 0, .sample_count = 4, .channels = 0, .frequency = 8000 };
+    try std.testing.expectError(error.UnsupportedChannels, decodeSample(a, &raw, 0, no_channels, 2));
+
+    // XBOX IMA framing here covers mono and stereo only.
+    const ima_surround = fsb5.Sample{ .data_offset = 0, .sample_count = 4, .channels = 3, .frequency = 8000 };
+    try std.testing.expectError(error.UnsupportedChannels, decodeSample(a, &raw, 0, ima_surround, 7));
+
+    // GCADPCM is mono-only, and that guard lives past the allocation in
+    // `decodeGcadpcm`: stereo must come back as an error, not as a guess at
+    // vgmstream's subframe interleave.
+    var coefs = [_]i16{0} ** 16;
+    const gc_stereo = fsb5.Sample{ .data_offset = 0, .sample_count = 14, .channels = 2, .frequency = 8000, .dsp_coefs = &coefs };
+    try std.testing.expectError(error.UnsupportedChannels, decodeSample(a, &raw, 0, gc_stereo, 6));
+    // The same sample as mono decodes, so the rejection is the channel
+    // count and not the fixture.
+    const gc_mono = fsb5.Sample{ .data_offset = 0, .sample_count = 14, .channels = 1, .frequency = 8000, .dsp_coefs = &coefs };
+    a.free(try decodeSample(a, &raw, 0, gc_mono, 6));
+}
+
+test "modeName names every mode the reports can print" {
+    try std.testing.expectEqualStrings("PCM16", modeName(2));
+    try std.testing.expectEqualStrings("GCADPCM", modeName(6));
+    try std.testing.expectEqualStrings("IMA ADPCM", modeName(7));
+    // Named but not decodable, and the catch-all for a mode from a newer
+    // FMOD - neither may print an empty string into a report.
+    try std.testing.expectEqualStrings("Vorbis", modeName(15));
+    try std.testing.expectEqualStrings("unknown", modeName(255));
+}
+
 test "IMA decode matches a hand-computed block" {
     const a = std.testing.allocator;
     // mono block: predictor 1000, step index 5, then nibbles for

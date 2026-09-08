@@ -497,6 +497,101 @@ test "write rejects missing field" {
     try std.testing.expectError(error.MissingField, writeObject(&w, root, value.Value{ .obj = &.{} }, &.{}));
 }
 
+test "write rejects type-confused, out-of-range and unwritable nodes" {
+    // `edit`/`create` feed user JSON straight into this writer, so every
+    // mismatch between the value and the node's declared type has to be an
+    // error the CLI reports. Silently narrowing or coercing here writes a
+    // wrong byte into someone's asset. Each case pairs the largest value
+    // the field does hold with the first one it does not, so the check is
+    // pinned at the boundary and not just somewhere past it.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const run = struct {
+        fn go(al: std.mem.Allocator, node: *const typetree.Node, v: value.Value) Error![]const u8 {
+            var w: streams.Writer = .init(al);
+            try writeObject(&w, node, v, &.{});
+            return w.getWritten();
+        }
+    }.go;
+
+    // Integer narrowing: the declared width decides, not the JSON literal.
+    const i8_node = try allocNode(a, "SInt8", "v", 0, &.{});
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x7f}, try run(a, i8_node, .{ .int = 127 }));
+    try std.testing.expectError(error.TypeMismatch, run(a, i8_node, .{ .int = 128 }));
+    const u8_node = try allocNode(a, "UInt8", "v", 0, &.{});
+    try std.testing.expectEqualSlices(u8, &[_]u8{0xff}, try run(a, u8_node, .{ .int = 255 }));
+    try std.testing.expectError(error.TypeMismatch, run(a, u8_node, .{ .int = 256 }));
+    try std.testing.expectError(error.TypeMismatch, run(a, u8_node, .{ .int = -1 }));
+    const i32_node = try allocNode(a, "int", "v", 0, &.{});
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xff, 0xff, 0xff, 0x7f }, try run(a, i32_node, .{ .int = 2147483647 }));
+    // the documented `unityz edit ... m_Width 99999999999` case
+    try std.testing.expectError(error.TypeMismatch, run(a, i32_node, .{ .int = 99999999999 }));
+    // An unsigned field takes the full u64 range but never a negative.
+    const u64_node = try allocNode(a, "UInt64", "v", 0, &.{});
+    try std.testing.expectEqualSlices(u8, &[_]u8{0xff} ** 8, try run(a, u64_node, .{ .uint = std.math.maxInt(u64) }));
+    try std.testing.expectError(error.TypeMismatch, run(a, u64_node, .{ .int = -1 }));
+
+    // Wrong value kind for the node's type.
+    try std.testing.expectError(error.TypeMismatch, run(a, try allocNode(a, "string", "v", 0, &.{}), .{ .int = 5 }));
+    try std.testing.expectError(error.TypeMismatch, run(a, try allocNode(a, "bool", "v", 0, &.{}), .{ .int = 1 }));
+    try std.testing.expectError(error.TypeMismatch, run(a, try allocNode(a, "float", "v", 0, &.{}), .{ .string = "1.5" }));
+    // ... but int/uint literals do widen into a float field.
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x80, 0x3f }, try run(a, try allocNode(a, "float", "v", 0, &.{}), .{ .int = 1 }));
+
+    // A record needs an object, and a PPtr needs both halves.
+    const record = try allocNode(a, "SomeClass", "Base", 0, &.{
+        try allocNode(a, "int", "m_Value", 0, &.{}),
+    });
+    try std.testing.expectError(error.TypeMismatch, run(a, record, .{ .int = 1 }));
+    const pptr = try allocNode(a, "PPtr<GameObject>", "m_Ref", 0, &.{
+        try allocNode(a, "int", "m_FileID", 0, &.{}),
+        try allocNode(a, "SInt64", "m_PathID", 0, &.{}),
+    });
+    try std.testing.expectError(error.TypeMismatch, run(a, pptr, .{ .obj = &[_]value.Field{
+        .{ .name = "m_FileID", .value = .{ .int = 0 } },
+    } }));
+
+    // A base64 payload that does not decode is a bad patch, not raw bytes.
+    const typeless = try allocNode(a, "TypelessData", "m_Blob", 0, &.{});
+    try std.testing.expectError(error.TypeMismatch, run(a, typeless, .{ .string = "abc" }));
+    try std.testing.expectError(error.TypeMismatch, run(a, typeless, .{ .string = "!!!!" }));
+
+    // An opaque fixed-size leaf only takes exactly its declared width.
+    const hash = try allocNode(a, "Hash128", "m_Hash", 0, &.{});
+    hash.byte_size = 16;
+    try std.testing.expectEqualSlices(u8, "0123456789abcdef", try run(a, hash, .{ .bytes = "0123456789abcdef" }));
+    try std.testing.expectError(error.TypeMismatch, run(a, hash, .{ .bytes = "short" }));
+
+    // A byte array carried as a value array narrows each element.
+    const bytes_array = try allocNode(a, "vector", "m_Bytes", 0, &.{
+        try allocNode(a, "Array", "Array", 0, &.{
+            try allocNode(a, "int", "size", 0, &.{}),
+            try allocNode(a, "UInt8", "data", 0, &.{}),
+        }),
+    });
+    try std.testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x02, 0x00, 0x00, 0x00, 0x01, 0xff },
+        try run(a, bytes_array, .{ .array = &[_]value.Value{ .{ .int = 1 }, .{ .int = 255 } } }),
+    );
+    try std.testing.expectError(error.TypeMismatch, run(a, bytes_array, .{ .array = &[_]value.Value{.{ .int = 256 }} }));
+    try std.testing.expectError(error.TypeMismatch, run(a, bytes_array, .{ .array = &[_]value.Value{.{ .string = "x" }} }));
+
+    // Unnamed children cannot be reconstructed from a value tree, and
+    // managed-reference registries have no field layout to write from -
+    // both are documented at the top of this file as hard rejections.
+    const unnamed = try allocNode(a, "SomeClass", "Base", 0, &.{
+        try allocNode(a, "int", "", 0, &.{}),
+    });
+    try std.testing.expectError(error.UnnamedChild, run(a, unnamed, .{ .obj = &.{} }));
+    for ([_][]const u8{ "ReferencedObject", "ManagedReferencesRegistry" }) |t| {
+        const node = try allocNode(a, t, "m_Refs", 0, &.{});
+        try std.testing.expectError(error.UnsupportedManagedReference, run(a, node, .{ .obj = &.{} }));
+    }
+}
+
 // --- shared test helpers (mirror object_reader's) ---
 
 fn allocNode(

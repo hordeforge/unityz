@@ -1410,8 +1410,11 @@ test "shader blob decoder survives mutated payloads" {
     var buf: [4096]u8 = undefined;
     // A decode error is a pass here, so the loop alone would stay green
     // even if every one of the 2000 blobs were turned away. Count the
-    // blobs that verified and assert both forms still get through.
-    var verified: usize = 0;
+    // blobs that verified and assert both forms still get through: a
+    // single combined counter would stay green with the LZ4 path dead,
+    // since the plain blobs alone can carry it.
+    var verified_plain: usize = 0;
+    var verified_lz4: usize = 0;
     var iter: usize = 0;
     while (iter < 2000) : (iter += 1) {
         const source: []const u8 = if (iter % 2 == 0) plain else compressed;
@@ -1432,7 +1435,8 @@ test "shader blob decoder survives mutated payloads" {
         }
         const shader = buildShaderValue(buf[0..blen]);
         _ = verifyBlob(a, shader) catch continue;
-        verified += 1;
+        if (iter % 2 == 0) verified_plain += 1 else verified_lz4 += 1;
     }
-    try std.testing.expect(verified > 0);
+    try std.testing.expect(verified_plain > 0);
+    try std.testing.expect(verified_lz4 > 0);
 }

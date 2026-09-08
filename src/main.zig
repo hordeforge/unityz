@@ -7521,6 +7521,46 @@ fn parseSelector(text: []const u8) !Selector {
     return .{ .node = null, .path_id = try std.fmt.parseInt(i64, text, 10) };
 }
 
+test "parseSelector splits a node-qualified path id" {
+    // Every object-targeting command routes its argument through here, and
+    // `edit --patch` routes untrusted patch-file keys through it too, so
+    // what it accepts is the CLI's whole object-selector contract.
+    const bare = try parseSelector("100");
+    try std.testing.expect(bare.node == null);
+    try std.testing.expectEqual(@as(i64, 100), bare.path_id);
+    // Path ids are signed on the wire; a negative one is a real target.
+    const neg = try parseSelector("-5");
+    try std.testing.expect(neg.node == null);
+    try std.testing.expectEqual(@as(i64, -5), neg.path_id);
+
+    const qualified = try parseSelector("CAB-abc:100");
+    try std.testing.expectEqualStrings("CAB-abc", qualified.node.?);
+    try std.testing.expectEqual(@as(i64, 100), qualified.path_id);
+    const qualified_neg = try parseSelector("CAB-abc:-5");
+    try std.testing.expectEqualStrings("CAB-abc", qualified_neg.node.?);
+    try std.testing.expectEqual(@as(i64, -5), qualified_neg.path_id);
+
+    // The id fills an i64 exactly: the largest one parses, one past it is
+    // rejected rather than wrapping to a different object.
+    try std.testing.expectEqual(@as(i64, std.math.maxInt(i64)), (try parseSelector("9223372036854775807")).path_id);
+
+    const rejects = struct {
+        fn f(text: []const u8) !void {
+            if (parseSelector(text)) |_| {
+                std.debug.print("parseSelector accepted '{s}'\n", .{text});
+                return error.TestUnexpectedResult;
+            } else |_| {}
+        }
+    }.f;
+    try rejects("9223372036854775808");
+    try rejects("abc");
+    try rejects("");
+    try rejects("CAB-abc:");
+    try rejects("CAB-abc:xyz");
+    // The split takes the first colon, so a node name cannot contain one.
+    try rejects("CAB-abc:more:100");
+}
+
 /// `show <path> <path-id> [--raw]` — print one object's JSON (its value
 /// tree), or a hex dump of its serialized bytes with `--raw` (works even
 /// without a type tree). Complementing `find` and `edit`; recurses into
@@ -10585,6 +10625,18 @@ test "writeObjFloat matches Python's %.9g" {
         const got = try std.fmt.bufPrint(&buf, "{s}", .{w.getWritten()});
         try std.testing.expectEqualStrings(c.want, got);
     }
+
+    // Corrupt mesh data carries Inf/NaN bit patterns. Those reach the
+    // `@intFromFloat` below the guard, where they are illegal behavior, so
+    // the guard has to turn them into the conversion failure the caller
+    // already reports rather than a crash.
+    var w: unityz.streams.Writer = .init(std.testing.allocator);
+    defer w.deinit();
+    try std.testing.expectError(error.NonFinite, writeObjFloat(&w, std.math.inf(f64)));
+    try std.testing.expectError(error.NonFinite, writeObjFloat(&w, -std.math.inf(f64)));
+    try std.testing.expectError(error.NonFinite, writeObjFloat(&w, std.math.nan(f64)));
+    // Nothing was emitted for a rejected value.
+    try std.testing.expectEqual(@as(usize, 0), w.getWritten().len);
 }
 
 test "parseFieldPath splits dotted and indexed paths" {
@@ -11299,6 +11351,10 @@ test "verify --path-id fails when the object does not exist" {
     defer verify_failed_flag = false;
     const sf_bytes = try typelessMonoFixture(a, try monoScriptPayload(a));
 
+    // The flag is process-global and every test that reads it clears it
+    // first: inheriting a `true` from an earlier test would make the
+    // assertion below pass without `verify` having failed anything.
+    verify_failed_flag = false;
     var out: std.ArrayList(u8) = .empty;
     var aw = std.Io.Writer.Allocating.fromArrayList(a, &out);
     try runCommand(.verify, "typeless.assets", &.{ "--path-id", "999", "--json" }, sf_bytes, &aw.writer);
