@@ -186,6 +186,27 @@ redistributing the shipped .bin should confirm them at the origin above.
 ================================================================================
 
 ================================================================================
+TerrainData 2021.x tree -- shipped --trees file for Unity class 156
+Location in this distribution: trees/TerrainData-2021.x.json
+  (repository only: it is not listed in build.zig.zon `.paths` and is not
+  copied into the release tarballs, so it travels with a clone or a source
+  archive rather than with the package or a binary release)
+
+The file is Unity's own TerrainData field layout, in this project's
+`--trees` JSON format: the Unity 2021.x editor type tree for class 156,
+with the base fields a stripped build omits removed and the 36-byte
+runtime-only vector region the editor tree does not serialize added back
+from observed objects (commit 0619cd4). It is the same kind of artifact as
+the builtin_trees database above -- serializer layout metadata, carrying no
+Unity code and no game content -- kept as JSON instead of packed into the
+binary database because it covers one class of one release.
+
+The editor tree it was derived from is not identified in this tree, and no
+distribution terms for it are recorded here. Anyone redistributing the JSON
+should confirm them at the origin.
+================================================================================
+
+================================================================================
 texture2ddecoder -- block-format decode routines
 Location in this distribution: src/texture.zig
 
