@@ -22,6 +22,7 @@ required-version = "0.16.1"
 # unenforced. Deliberate omissions are listed under `ignore` and below.
 select = [
     "A",    # a builtin shadowed by a local name
+    "ANN",  # missing annotations, and `Any` used as one
     "ARG",  # unused function arguments
     "B",    # bugbear: mutable defaults, loop-variable capture, silent bugs
     "BLE",  # blind `except Exception`
@@ -50,6 +51,7 @@ select = [
     "RET",  # return-path simplifications
     "RSE",  # `raise X()` vs `raise X`
     "RUF",  # ruff's own rules
+    "S",    # bandit: exec, pickle, weak hashes, unchecked subprocess
     "SLF",  # private member access across objects
     "T10",  # a leftover `breakpoint()` or `pdb` import
     "TC",   # imports only needed for typing
@@ -66,13 +68,19 @@ select = [
 # that a cap would legitimately catch. Turning E501 on therefore means
 # reformatting those lines first, which is a change to the scripts and not to
 # this file. No cap is imposed here in the meantime.
-ignore = ["E501"]
+#
+# S101 (assert) is the one bandit rule dropped, scoped to that rule rather
+# than taken out of the whole group. The tree's single assert narrows a type
+# (`assert _spec.loader is not None` before `exec_module` in
+# structsdump-to-builtin.py); it is not a runtime check on input. Everything
+# else bandit looks for stays blocking: exec, pickle, a weak hash, an
+# unchecked subprocess, a parsed URL opened blind. That matters for scripts
+# that read a third-party dump and emit a blob the binary ships.
+ignore = ["E501", "S101"]
 
 # Not selected, and not oversights:
 #   T20  - these are CLI scripts; `print` is their output channel, not debris.
 #   D    - the modules carry docstrings; per-function ones are not required.
-#   S    - bandit's assert check fires on an invariant assert, and nothing here
-#          takes untrusted input from a network or a shell.
 # The remaining groups (SIM, PTH, TRY, PL, COM, EM) have live findings in the
 # tree today. They are not enabled here because enabling a rule the tree fails
 # would make this file advisory instead of blocking; fix the findings, then add
