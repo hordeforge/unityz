@@ -566,6 +566,15 @@ pub fn blockCompressionType(block_flags: u16) CompressionType {
     return @enumFromInt(block_flags & 0x3F);
 }
 
+/// Collapses a decoder's error onto the bundle's, keeping `OutOfMemory`
+/// itself. A block whose declared output size is absurd fails in the
+/// decoder's allocation, and calling that `DecompressFailed` sent readers
+/// looking for a corrupt stream; the `.none` branch below already reports
+/// the same condition as `OutOfMemory`.
+fn decompressError(err: anyerror) ParseError {
+    return if (err == error.OutOfMemory) error.OutOfMemory else error.DecompressFailed;
+}
+
 /// Decompresses one block of `raw` with `ctype` into a caller-owned
 /// `dst`, which must be exactly the block's decompressed size.
 fn decompressRawInto(
@@ -579,9 +588,9 @@ fn decompressRawInto(
             if (raw.len != dst.len) return error.Corrupt;
             @memcpy(dst, raw);
         },
-        .lz4, .lz4hc => lz4.decompressInto(dst, raw) catch return error.DecompressFailed,
+        .lz4, .lz4hc => lz4.decompressInto(dst, raw) catch |err| return decompressError(err),
         .lzma => {
-            const out = lzmaDecompress(allocator, raw, @intCast(dst.len)) catch return error.DecompressFailed;
+            const out = lzmaDecompress(allocator, raw, @intCast(dst.len)) catch |err| return decompressError(err);
             defer allocator.free(out);
             if (out.len != dst.len) return error.Corrupt;
             @memcpy(dst, out);
@@ -592,7 +601,7 @@ fn decompressRawInto(
         // blocks decode (see build.zig); refusing it here left type 4
         // working for the header-info block only.
         .lzham => {
-            const out = lzhamDecompress(allocator, raw, @intCast(dst.len)) catch return error.DecompressFailed;
+            const out = lzhamDecompress(allocator, raw, @intCast(dst.len)) catch |err| return decompressError(err);
             defer allocator.free(out);
             if (out.len != dst.len) return error.Corrupt;
             @memcpy(dst, out);
@@ -612,9 +621,9 @@ fn decompressRaw(
             if (raw.len != uncompressed_size) return error.Corrupt;
             break :blk allocator.dupe(u8, raw) catch return error.OutOfMemory;
         },
-        .lz4, .lz4hc => lz4.decompress(allocator, raw, uncompressed_size) catch return error.DecompressFailed,
-        .lzma => lzmaDecompress(allocator, raw, uncompressed_size) catch return error.DecompressFailed,
-        .lzham => lzhamDecompress(allocator, raw, uncompressed_size) catch return error.DecompressFailed,
+        .lz4, .lz4hc => lz4.decompress(allocator, raw, uncompressed_size) catch |err| decompressError(err),
+        .lzma => lzmaDecompress(allocator, raw, uncompressed_size) catch |err| decompressError(err),
+        .lzham => lzhamDecompress(allocator, raw, uncompressed_size) catch |err| decompressError(err),
         else => error.UnsupportedCompression,
     };
 }

@@ -34,7 +34,11 @@ pub const Error = error{
 
 /// Decompresses an LZ4 block into a fresh `expected_size`-byte buffer.
 pub fn decompress(allocator: std.mem.Allocator, src: []const u8, expected_size: usize) Error![]u8 {
-    const out = allocator.alloc(u8, expected_size) catch return error.OutputOverflow;
+    // `expected_size` comes from a block header, so an absurd one fails
+    // here. That is an allocation failure, not a malformed stream: naming
+    // it OutputOverflow made it indistinguishable from a genuinely corrupt
+    // block, which is the other thing that error means in this decoder.
+    const out = allocator.alloc(u8, expected_size) catch return error.OutOfMemory;
     errdefer allocator.free(out);
     try decompressInto(out, src);
     return out;
@@ -203,7 +207,7 @@ pub fn compress(allocator: std.mem.Allocator, src: []const u8) Error![]u8 {
     // A literal-only block costs two overhead bytes per 270 literals (one
     // token byte with a 255 extension byte), so bound generously.
     const worst = src.len + src.len / 128 + 32;
-    const out = allocator.alloc(u8, worst) catch return error.OutputOverflow;
+    const out = allocator.alloc(u8, worst) catch return error.OutOfMemory;
     errdefer allocator.free(out);
 
     // 12-bit hash of the last 4 bytes seen at each position; 1-based so 0

@@ -557,7 +557,17 @@ const BuiltinCache = struct {
             const tp = self.arena.create(unityz.typetree.TypeTree) catch return null;
             tp.* = tt;
             break :blk tp;
-        } else |_| null;
+        } else |err| blk: {
+            // `UnknownClass` is the ordinary answer for a class the release
+            // has no built-in tree for. Anything else means the shipped
+            // database itself failed to decode, and swallowing that left the
+            // objects reading as typeless with nothing to point at the cause.
+            // The lookup is memoized below, so this warns once per class.
+            if (err != error.UnknownClass) {
+                diagnostic("unityz: built-in type trees for Unity {s}: class {d}: {s}\n", .{ revision, class_id, @errorName(err) });
+            }
+            break :blk null;
+        };
         self.trees.put(self.arena, class_id, result) catch {};
         return result;
     }
@@ -4796,9 +4806,7 @@ fn printWebFile(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout
             var first = true;
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                if (!first) try stdout.writeByte(',');
-                first = false;
-                try dumpObjectTableJson(arena, e.data, e.path, stdout);
+                try dumpObjectTableJson(arena, e.data, e.path, &first, stdout);
             }
             try stdout.print("]", .{});
         }
@@ -4903,9 +4911,7 @@ fn printBundle(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout:
             var first = true;
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                if (!first) try stdout.writeByte(',');
-                first = false;
-                try dumpObjectTableJson(arena, n.data, n.path, stdout);
+                try dumpObjectTableJson(arena, n.data, n.path, &first, stdout);
             }
             try stdout.print("]", .{});
         }
@@ -4940,7 +4946,8 @@ fn printSerialized(bytes: []const u8, dump: bool, objects: bool, json: bool, std
         });
         if (objects) {
             try stdout.print(",\"object_list\":[", .{});
-            try dumpObjectTableJson(arena, bytes, null, stdout);
+            var first = true;
+            try dumpObjectTableJson(arena, bytes, null, &first, stdout);
             try stdout.print("]", .{});
         }
         try stdout.print(",\"externals_list\":[", .{});
@@ -5078,10 +5085,20 @@ fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writ
 
 /// Emits the object table as JSON array entries (no brackets); `node`
 /// tags each entry with its container path when inside a bundle/webfile.
-fn dumpObjectTableJson(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, stdout: *Io.Writer) !void {
-    const sf = unityz.serialized.parse(arena, bytes) catch return;
-    for (sf.objects, 0..) |*o, i| {
-        if (i != 0) try stdout.writeByte(',');
+/// `first` is the caller's separator state, shared across every node of a
+/// container: a node that emits nothing (parse failure, or no objects) must
+/// not leave a dangling comma behind, which is what a per-call index does.
+fn dumpObjectTableJson(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, first: *bool, stdout: *Io.Writer) !void {
+    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
+        // The caller already sniffed these bytes as a serialized file, so a
+        // parse failure here drops objects from the listing; reporting it
+        // matches `dumpSerializedBytes` on the same condition.
+        failure("unityz: {s}: node parse failed: {s}\n", .{ node orelse "<input>", @errorName(err) });
+        return;
+    };
+    for (sf.objects) |*o| {
+        if (!first.*) try stdout.writeByte(',');
+        first.* = false;
         try stdout.writeByte('{');
         if (node) |n| {
             try stdout.print("\"node\":", .{});
@@ -5772,7 +5789,12 @@ fn skinSerializedBytes(
     own_name: []const u8,
     injected: ?*const InjectedTrees,
 ) !void {
-    const sf = unityz.serialized.parse(arena, bytes) catch return;
+    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
+        // Sniffed as serialized by the caller, so this node's shaders are
+        // simply absent from the report unless the failure is reported.
+        failure("unityz: {s}: node parse failed: {s}; its shaders are missing from this report\n", .{ node orelse own_name, @errorName(err) });
+        return;
+    };
 
     // Per-shader skinning summary.
     for (sf.objects) |*o| {
@@ -7868,7 +7890,7 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, in
             };
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                try collectStats(arena, n.data, class_filter, &classes, &total_objects, &total_bytes, &entries);
+                try collectStats(arena, n.data, n.path, class_filter, &classes, &total_objects, &total_bytes, &entries);
                 if (injected) |inj| {
                     const nsf = unityz.serialized.parse(arena, n.data) catch continue;
                     statsScripts(arena, &nsf, inj, basename(n.path), &scripts);
@@ -7882,7 +7904,7 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, in
             };
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try collectStats(arena, e.data, class_filter, &classes, &total_objects, &total_bytes, &entries);
+                try collectStats(arena, e.data, e.path, class_filter, &classes, &total_objects, &total_bytes, &entries);
                 if (injected) |inj| {
                     const esf = unityz.serialized.parse(arena, e.data) catch continue;
                     statsScripts(arena, &esf, inj, basename(e.path), &scripts);
@@ -7890,7 +7912,7 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, in
             }
         },
         .serialized => {
-            try collectStats(arena, bytes, class_filter, &classes, &total_objects, &total_bytes, &entries);
+            try collectStats(arena, bytes, own_basename, class_filter, &classes, &total_objects, &total_bytes, &entries);
             if (injected) |inj| {
                 const ssf = unityz.serialized.parse(arena, bytes) catch return;
                 statsScripts(arena, &ssf, inj, own_basename, &scripts);
@@ -7975,9 +7997,14 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, in
 const DupGroup = struct { class_id: i32, hash: u64, size: u32, path_ids: []const i64 };
 
 /// Accumulates one serialized file's per-class totals and per-object
-/// entries (the latter feed duplicate detection).
-fn collectStats(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, classes: *std.ArrayList(ClassStat), total_objects: *usize, total_bytes: *u64, entries: *std.ArrayList(StatEntry)) !void {
-    const sf = unityz.serialized.parse(arena, bytes) catch return;
+/// entries (the latter feed duplicate detection). `node` names the source
+/// for the failure message: dropping an unparsable node silently would
+/// understate every total the command reports with no sign of it.
+fn collectStats(arena: std.mem.Allocator, bytes: []const u8, node: []const u8, class_filter: ?i32, classes: *std.ArrayList(ClassStat), total_objects: *usize, total_bytes: *u64, entries: *std.ArrayList(StatEntry)) !void {
+    const sf = unityz.serialized.parse(arena, bytes) catch |err| {
+        failure("unityz: {s}: node parse failed: {s}; its objects are missing from these totals\n", .{ node, @errorName(err) });
+        return;
+    };
     try accumulateStats(arena, &sf, class_filter, classes, total_objects, total_bytes, entries);
 }
 
@@ -8432,7 +8459,14 @@ fn unmatchedPatchEntry(entries: []const unityz.value.Field, matched: []const boo
     var any = false;
     for (entries, matched) |entry, m| {
         if (m or isRawNodeKey(entry.name)) continue;
-        failure("unityz: bad patch entry '{s}': no such object; nothing written\n", .{entry.name});
+        // A key that is not a selector at all was skipped before any object
+        // lookup happened, so calling it a missing object sends the operator
+        // hunting for a path id that was never well-formed.
+        if (parseSelector(entry.name)) |_| {
+            failure("unityz: bad patch entry '{s}': no such object; nothing written\n", .{entry.name});
+        } else |err| {
+            failure("unityz: bad patch entry '{s}': not a path id or 'node:path-id' ({s}); nothing written\n", .{ entry.name, @errorName(err) });
+        }
         any = true;
     }
     return any;
@@ -9299,7 +9333,14 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
             const b = try unityz.bundle.parse(arena, bytes);
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                const sf = unityz.serialized.parse(arena, n.data) catch continue;
+                const sf = unityz.serialized.parse(arena, n.data) catch |err| {
+                    // The generated trees file silently omits every type of a
+                    // node that did not parse, and the MonoBehaviours needing
+                    // them then read as typeless. Fail the run, as the
+                    // assembly path does.
+                    failure("unityz: {s}: node parse failed: {s}; its type trees are missing from the output\n", .{ n.path, @errorName(err) });
+                    continue;
+                };
                 try members.append(arena, .{ .name = basename(n.path), .sf = sf });
             }
         },
@@ -9307,7 +9348,10 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
             const wf = try unityz.webfile.parse(arena, bytes);
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                const sf = unityz.serialized.parse(arena, e.data) catch continue;
+                const sf = unityz.serialized.parse(arena, e.data) catch |err| {
+                    failure("unityz: {s}: entry parse failed: {s}; its type trees are missing from the output\n", .{ e.path, @errorName(err) });
+                    continue;
+                };
                 try members.append(arena, .{ .name = basename(e.path), .sf = sf });
             }
         },
@@ -9318,7 +9362,13 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     // MonoScript objects across the container: "basename:path_id" -> class.
     var scripts: std.StringHashMapUnmanaged([]const u8) = .empty;
     for (members.items) |m| {
-        const refs = unityz.managed_trees.scanMonoScripts(arena, m.sf.source, m.name) catch continue;
+        const refs = unityz.managed_trees.scanMonoScripts(arena, m.sf.source, m.name) catch |err| {
+            // Without this file's MonoScript names, every MonoBehaviour it
+            // owns falls into the `unresolved` bucket for a reason the
+            // operator cannot see from the summary line alone.
+            failure("unityz: {s}: MonoScript scan failed: {s}; its script trees are unnamed\n", .{ m.name, @errorName(err) });
+            continue;
+        };
         for (refs) |r| {
             const full = if (r.namespace.len != 0) try std.fmt.allocPrint(arena, "{s}.{s}", .{ r.namespace, r.class_name }) else r.class_name;
             try scripts.put(arena, try std.fmt.allocPrint(arena, "{s}:{d}", .{ m.name, r.path_id }), full);
