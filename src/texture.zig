@@ -1336,8 +1336,7 @@ fn pvrtcGetTexelWeights2(data: []const u8, info: *PvrtcTexelInfo) void {
     }
 }
 
-fn pvrtcApplicate4(data: []const u8, info: [*]*PvrtcTexelInfo, buf: *[32]u32) void {
-    _ = data;
+fn pvrtcApplicate4(info: [*]*PvrtcTexelInfo, buf: *[32]u32) void {
     const INTERP_WEIGHT = [_][3]i32{ .{ 2, 2, 0 }, .{ 1, 3, 0 }, .{ 0, 4, 0 }, .{ 0, 3, 1 } };
     var clr_a = [_][4]i32{.{ 0, 0, 0, 0 }} ** 16;
     var clr_b = [_][4]i32{.{ 0, 0, 0, 0 }} ** 16;
@@ -1379,8 +1378,7 @@ fn pvrtcApplicate4(data: []const u8, info: [*]*PvrtcTexelInfo, buf: *[32]u32) vo
     }
 }
 
-fn pvrtcApplicate2(data: []const u8, info: [*]*PvrtcTexelInfo, buf: *[32]u32) void {
-    _ = data;
+fn pvrtcApplicate2(info: [*]*PvrtcTexelInfo, buf: *[32]u32) void {
     const INTERP_WEIGHT_X = [_][3]i32{
         .{ 4, 4, 0 }, .{ 3, 5, 0 }, .{ 2, 6, 0 }, .{ 1, 7, 0 },
         .{ 0, 8, 0 }, .{ 0, 7, 1 }, .{ 0, 6, 2 }, .{ 0, 5, 3 },
@@ -1489,11 +1487,10 @@ fn decodePvrtc(out: []u8, w: usize, h: usize, data: []const u8, is2bpp: bool) Er
                     local_info[cy * 3 + cx] = &texel_info[pvrtcMortonIndex(pos_x[cx], pos_y[cy], min_num_blocks)];
                 }
             }
-            const blk_off = pvrtcMortonIndex(bx, by, min_num_blocks) * 8;
             if (is2bpp)
-                pvrtcApplicate2(data[blk_off..][0..8], &local_info, &buffer)
+                pvrtcApplicate2(&local_info, &buffer)
             else
-                pvrtcApplicate4(data[blk_off..][0..8], &local_info, &buffer);
+                pvrtcApplicate4(&local_info, &buffer);
             // copy block to the image (BGRA u32 -> RGBA bytes)
             for (0..4) |yy| {
                 const py_ = by * 4 + yy;

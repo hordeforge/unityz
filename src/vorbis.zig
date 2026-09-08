@@ -152,8 +152,7 @@ const OggStream = struct {
     finished: bool = false,
     body_returned: usize = 0,
 
-    fn init(allocator: std.mem.Allocator, serial: u32) OggStream {
-        _ = allocator;
+    fn init(serial: u32) OggStream {
         return .{
             .serial = serial,
             .body = std.ArrayList(u8).empty,
@@ -336,7 +335,7 @@ pub fn rebuildOgg(
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
 
-    var stream = OggStream.init(allocator, 1);
+    var stream = OggStream.init(1);
     defer stream.deinit(allocator);
 
     // header packets: BOS page (info) then comment + setup
@@ -497,7 +496,7 @@ test "rebuildOgg rejects a wrapping data offset and skips unknown setups" {
 
 test "ogg stream page framing" {
     const a = std.testing.allocator;
-    var s = OggStream.init(a, 7);
+    var s = OggStream.init(7);
     defer s.deinit(a);
     try s.packetIn(a, &buildInfoPacket(2, 44100), 0, false);
     const p0 = (try s.pageOut(a, true)).?; // BOS page with the info packet
