@@ -379,8 +379,7 @@ pub fn main(init: std.process.Init) !void {
             // In --json batch mode each file's output is captured and wrapped
             // with its path, so consumers can tell which file produced which
             // document; plain mode streams through untouched.
-            var captured: std.ArrayList(u8) = .empty;
-            var capture = std.Io.Writer.Allocating.fromArrayList(batch_arena, &captured);
+            var capture = std.Io.Writer.Allocating.init(batch_arena);
             const file_out: *Io.Writer = if (json_batch) &capture.writer else stdout;
             const result = runCommand(command, full, rest, bytes, file_out);
             if (json_batch) try writeBatchJson(stdout, full, capture.toArrayList().items, result);
@@ -1059,11 +1058,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             }
         },
         .serialized => {
-            if (path_filter) |pf| {
-                if (pf.node != null) {
-                    return usageError("unityz: node selector not valid for a serialized file\n", .{});
-                }
-            }
+            try rejectNodeSelector(if (path_filter) |pf| pf.node else null);
             var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena_state.deinit();
             const arena = arena_state.allocator();
@@ -1137,8 +1132,7 @@ const ExtractSummary = struct {
 
 /// Writes the consolidated script registry as one `scripts.json` array.
 fn writeScriptsJson(arena: std.mem.Allocator, entries: []const ScriptEntry, stdout: *Io.Writer) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.writeAll("[");
     for (entries, 0..) |e, i| {
@@ -1163,8 +1157,7 @@ fn writeScriptsJson(arena: std.mem.Allocator, entries: []const ScriptEntry, stdo
         try w.writeByte('}');
     }
     try w.writeAll("]\n");
-    const out = aw.toArrayList();
-    try writeFileToCwd("scripts.json", out.items);
+    try writeFileToCwd("scripts.json", aw.written());
     try stdout.print("extracted scripts.json ({d} script(s))\n", .{entries.len});
 }
 
@@ -1261,8 +1254,7 @@ fn printExtractSummary(arena: std.mem.Allocator, s: *const ExtractSummary, json:
 /// Writes `manifest.json` next to the exported value trees, listing every
 /// object: path id, class, the file it was written to, and its m_Name.
 fn writeManifest(arena: std.mem.Allocator, entries: []const ManifestEntry, stdout: *Io.Writer) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.print("{{\"objects\":[", .{});
     for (entries, 0..) |e, i| {
@@ -1282,8 +1274,7 @@ fn writeManifest(arena: std.mem.Allocator, entries: []const ManifestEntry, stdou
         try w.print("}}", .{});
     }
     try w.print("]}}\n", .{});
-    const out = aw.toArrayList();
-    try writeFileToCwd("manifest.json", out.items);
+    try writeFileToCwd("manifest.json", aw.written());
     try stdout.print("extracted manifest.json ({d} object(s))\n", .{entries.len});
 }
 
@@ -1611,8 +1602,7 @@ fn fsbSampleFileName(buf: []u8, path_id: i64, clip_name: []const u8, index: ?usi
 /// or the header fields.
 fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8, validate_audio: bool) !?FsbMetadata {
     const bank = try unityz.fsb5.parse(arena, audio) orelse return null;
-    var out = std.ArrayList(u8).empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.print("{{\"version\":", .{});
     try w.print("{d},\"mode\":{d},\"codec\":\"{s}\",\"sampleCount\":{d},\"samples\":[", .{ bank.version, bank.mode, unityz.audio.modeName(bank.mode), bank.num_samples });
@@ -1641,8 +1631,7 @@ fn fsb5MetadataJson(arena: std.mem.Allocator, audio: []const u8, validate_audio:
     } else {
         try w.writeAll("]}");
     }
-    var list = aw.toArrayList();
-    return .{ .json = try list.toOwnedSlice(arena), .valid = valid };
+    return .{ .json = try aw.toOwnedSlice(), .valid = valid };
 }
 
 /// `fsb <path> --json` validates every sample in memory and prints metadata
@@ -1796,8 +1785,7 @@ fn writeFontFiles(
 /// pointers, and the embedded data size. UnityPy has no font export at
 /// all, so this metadata is a unityz addition.
 fn fontMetadataJson(arena: std.mem.Allocator, path_id: i64, class_id: i32, f: unityz.classes.Font) !?[]u8 {
-    var out = std.ArrayList(u8).empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.print("{{\"path_id\":{d},\"class\":{d},\"name\":", .{ path_id, class_id });
     try writeJsonString(w, f.name);
@@ -1821,8 +1809,7 @@ fn fontMetadataJson(arena: std.mem.Allocator, path_id: i64, class_id: i32, f: un
         try w.writeByte(']');
     }
     try w.writeByte('}');
-    var list = aw.toArrayList();
-    return try list.toOwnedSlice(arena);
+    return try aw.toOwnedSlice();
 }
 
 /// Extension for a ComputeShader kernel payload, from its magic: DXBC
@@ -1877,8 +1864,7 @@ fn writeComputeShaderFiles(
 /// thread-group sizes, payload format/size, resource binding counts, and
 /// the constant-buffer layouts.
 fn computeShaderJson(arena: std.mem.Allocator, path_id: i64, cs: unityz.classes.ComputeShader) !?[]u8 {
-    var out = std.ArrayList(u8).empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.print("{{\"path_id\":{d},\"class\":72,\"name\":", .{path_id});
     try writeJsonString(w, cs.name);
@@ -1931,8 +1917,7 @@ fn computeShaderJson(arena: std.mem.Allocator, path_id: i64, cs: unityz.classes.
         try w.writeByte('}');
     }
     try w.writeAll("]}");
-    var list = aw.toArrayList();
-    return try list.toOwnedSlice(arena);
+    return try aw.toOwnedSlice();
 }
 
 fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, raw: bool, json_mode: bool, class_filter: ?i32, path_filter: ?i64, subdir: ?[]const u8, sidecars: []const Sidecar, manifest: *std.ArrayList(ManifestEntry), format: ExtractFormat, name_filter: ?[]const u8, injected: ?*const InjectedTrees, summary: ?*ExtractSummary, scripts: *std.ArrayList(ScriptEntry), stdout: *Io.Writer) !void {
@@ -2060,14 +2045,12 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 continue;
             }
             // JSON mode: export the object's value tree, not a decoded asset
-            var buf: std.ArrayList(u8) = .empty;
-            var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+            var aw = std.Io.Writer.Allocating.init(arena);
             try unityz.value.jsonWrite(v, &aw.writer);
-            const out = aw.toArrayList();
             var name_buf: [object_file_name_len]u8 = undefined;
             const name = try objectFileName(&name_buf, o.path_id, o.class_id, "json");
-            try extractFile(subdir, name, out.items);
-            try stdout.print("extracted {s} ({d} bytes)\n", .{ name, out.items.len });
+            try extractFile(subdir, name, aw.written());
+            try stdout.print("extracted {s} ({d} bytes)\n", .{ name, aw.written().len });
             try manifest.append(arena, .{
                 .path_id = o.path_id,
                 .class_id = o.class_id,
@@ -2178,8 +2161,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} ({d} bytes, {s})\n", .{ fname, video.len, ext });
                 extracted += 1;
                 // metadata sidecar: what the type tree says about the clip
-                var mbuf: std.ArrayList(u8) = .empty;
-                var maw = std.Io.Writer.Allocating.fromArrayList(arena, &mbuf);
+                var maw = std.Io.Writer.Allocating.init(arena);
                 const mw = &maw.writer;
                 try mw.writeAll("{\"name\":");
                 try writeJsonString(mw, clip_name);
@@ -2226,8 +2208,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 // numerator below overflow i64. Subtract checked and scale
                 // in i128; the quotient is still bounded by 65535.
                 const range = std.math.sub(i64, max_h, min_h) catch continue;
-                var hbuf: std.ArrayList(u8) = .empty;
-                var haw = std.Io.Writer.Allocating.fromArrayList(arena, &hbuf);
+                var haw = std.Io.Writer.Allocating.init(arena);
                 const hw = &haw.writer;
                 try hw.print("P5\n{d} {d}\n65535\n", .{ side, side });
                 for (hv.array) |h| {
@@ -2246,8 +2227,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try stdout.print("extracted {s} ({d}x{d} heightmap, {d} samples)\n", .{ fname, side, side, hv.array.len });
                 extracted += 1;
                 // metadata sidecar: resolution, scale, height range
-                var mbuf: std.ArrayList(u8) = .empty;
-                var maw = std.Io.Writer.Allocating.fromArrayList(arena, &mbuf);
+                var maw = std.Io.Writer.Allocating.init(arena);
                 const mw = &maw.writer;
                 try mw.writeAll("{\"name\":");
                 try writeJsonString(mw, td_name);
@@ -2559,8 +2539,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const clip_name = unityz.streams.trimNul(unityz.classes.stringField(v, "m_Name") orelse "");
                 const legacy = unityz.classes.boolField(v, "m_Legacy") orelse false;
                 const sample_rate: f64 = if (unityz.classes.fieldOf(v, "m_SampleRate")) |sv| sv.asFloat() orelse 0 else 0;
-                var buf: std.ArrayList(u8) = .empty;
-                var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+                var aw = std.Io.Writer.Allocating.init(arena);
                 const w = &aw.writer;
                 try w.writeAll("{\"name\":");
                 try writeJsonString(w, clip_name);
@@ -2744,8 +2723,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const packed_sprites = unityz.classes.fieldOf(v, "m_PackedSprites") orelse continue;
                 const names = unityz.classes.fieldOf(v, "m_PackedSpriteNamesToIndex") orelse continue;
                 if (packed_sprites != .array or names != .array or packed_sprites.array.len != names.array.len) continue;
-                var buf: std.ArrayList(u8) = .empty;
-                var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+                var aw = std.Io.Writer.Allocating.init(arena);
                 const w = &aw.writer;
                 try w.writeAll("{\"name\":");
                 try writeJsonString(w, atlas_name);
@@ -2780,8 +2758,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const ab_name = unityz.streams.trimNul(unityz.classes.stringField(v, "m_Name") orelse "");
                 const container = unityz.classes.fieldOf(v, "m_Container") orelse continue;
                 if (container != .array) continue;
-                var buf: std.ArrayList(u8) = .empty;
-                var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+                var aw = std.Io.Writer.Allocating.init(arena);
                 const w = &aw.writer;
                 try w.writeAll("{\"name\":");
                 try writeJsonString(w, ab_name);
@@ -3063,8 +3040,7 @@ fn writeMixerFiles(
     extracted: *usize,
     stdout: *Io.Writer,
 ) !void {
-    var out = std.ArrayList(u8).empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
     try writeJsonString(w, ac.name);
@@ -3099,8 +3075,7 @@ fn writeMixerFiles(
         try w.writeAll("null");
     }
     try w.print(",\"updateMode\":{d}}}", .{ac.update_mode});
-    var list = aw.toArrayList();
-    const meta = try list.toOwnedSlice(arena);
+    const meta = try aw.toOwnedSlice();
     try finalizeSidecar(arena, subdir, path_id, "mixer", ac.name, 241, "mixer graph", meta, manifest, extracted, stdout);
 }
 
@@ -3114,8 +3089,7 @@ fn writeMixerGroupFiles(
     extracted: *usize,
     stdout: *Io.Writer,
 ) !void {
-    var out = std.ArrayList(u8).empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
     try writeJsonString(w, g.name);
@@ -3125,8 +3099,7 @@ fn writeMixerGroupFiles(
         try w.print("{d}", .{c.path_id});
     }
     try w.writeAll("]}");
-    var list = aw.toArrayList();
-    const meta = try list.toOwnedSlice(arena);
+    const meta = try aw.toOwnedSlice();
     try finalizeSidecar(arena, subdir, path_id, "mixer_group", g.name, 243, "mixer group", meta, manifest, extracted, stdout);
 }
 
@@ -3141,14 +3114,12 @@ fn writeMixerSnapshotFiles(
     extracted: *usize,
     stdout: *Io.Writer,
 ) !void {
-    var out = std.ArrayList(u8).empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
     try writeJsonString(w, s.name);
     try w.print(",\"time\":{d},\"parameters\":{d}}}", .{ s.time, s.values });
-    var list = aw.toArrayList();
-    const meta = try list.toOwnedSlice(arena);
+    const meta = try aw.toOwnedSlice();
     try finalizeSidecar(arena, subdir, path_id, "mixer_snapshot", s.name, 245, "mixer snapshot", meta, manifest, extracted, stdout);
 }
 
@@ -3164,8 +3135,7 @@ fn writeParticleFiles(
     extracted: *usize,
     stdout: *Io.Writer,
 ) !void {
-    var out = std.ArrayList(u8).empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.print("{{\"path_id\":{d},\"duration\":{d},\"looping\":{},\"prewarm\":{},\"playOnAwake\":{},\"simulationSpeed\":{d},\"scalingMode\":{d},\"stopAction\":{d},\"cullingMode\":{d}", .{ path_id, ps.duration, ps.looping, ps.prewarm, ps.play_on_awake, ps.simulation_speed, ps.scaling_mode, ps.stop_action, ps.culling_mode });
     if (ps.game_object) |go| try w.print(",\"gameObject\":{d}", .{go.path_id});
@@ -3184,8 +3154,7 @@ fn writeParticleFiles(
         try w.print("\"{s}\":{}", .{ mn, ps.module_flags[i] });
     }
     try w.writeAll("}}");
-    var list = aw.toArrayList();
-    const meta = try list.toOwnedSlice(arena);
+    const meta = try aw.toOwnedSlice();
     try finalizeSidecar(arena, subdir, path_id, "particle", null, 198, "particle system summary", meta, manifest, extracted, stdout);
 }
 
@@ -3202,8 +3171,7 @@ fn writeAnimatorFiles(
     extracted: *usize,
     stdout: *Io.Writer,
 ) !void {
-    var out = std.ArrayList(u8).empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
     try writeJsonString(w, ac.name);
@@ -3241,8 +3209,7 @@ fn writeAnimatorFiles(
         try w.writeByte(']');
     }
     try w.writeByte('}');
-    var list = aw.toArrayList();
-    const meta = try list.toOwnedSlice(arena);
+    const meta = try aw.toOwnedSlice();
     try finalizeSidecar(arena, subdir, path_id, "animator", ac.name, 91, "animator controller", meta, manifest, extracted, stdout);
 }
 
@@ -3261,8 +3228,7 @@ fn writeOverrideFiles(
     extracted: *usize,
     stdout: *Io.Writer,
 ) !void {
-    var out = std.ArrayList(u8).empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
     try writeJsonString(w, oc.name);
@@ -3282,8 +3248,7 @@ fn writeOverrideFiles(
         try w.writeByte('}');
     }
     try w.writeAll("]}");
-    var list = aw.toArrayList();
-    const meta = try list.toOwnedSlice(arena);
+    const meta = try aw.toOwnedSlice();
     var label_buf: [48]u8 = undefined;
     const label = try std.fmt.bufPrint(&label_buf, "{d} override pairs", .{oc.overrides.len});
     try finalizeSidecar(arena, subdir, path_id, "animator_override", oc.name, 221, label, meta, manifest, extracted, stdout);
@@ -3303,8 +3268,7 @@ fn writeAnimatorComponentFiles(
     extracted: *usize,
     stdout: *Io.Writer,
 ) !void {
-    var out = std.ArrayList(u8).empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.print("{{\"path_id\":{d},\"gameObject\":", .{path_id});
     if (an.game_object) |go| {
@@ -3320,8 +3284,7 @@ fn writeAnimatorComponentFiles(
         an.culling_mode,            an.update_mode,                               an.apply_root_motion,              an.linear_velocity_blending,        an.stabilize_feet,
         an.has_transform_hierarchy, an.allow_constant_clip_sampling_optimization, an.keep_animator_state_on_disable, an.write_default_values_on_disable,
     });
-    var list = aw.toArrayList();
-    const meta = try list.toOwnedSlice(arena);
+    const meta = try aw.toOwnedSlice();
     try finalizeSidecar(arena, subdir, path_id, "animator", null, 95, "animator component", meta, manifest, extracted, stdout);
 }
 
@@ -3827,8 +3790,7 @@ fn pptrPathId(v: unityz.value.Value) ?i64 {
 
 /// Serializes a value tree to compact JSON in the arena.
 fn writeValueJson(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    var aw = std.Io.Writer.Allocating.init(arena);
     try unityz.value.jsonWrite(v, &aw.writer);
     return aw.toArrayList().items;
 }
@@ -4230,8 +4192,7 @@ fn writeMeshGlb(
     const jnt_acc = idx_acc + 2;
     const ib_acc = idx_acc + 3;
     const name = unityz.streams.trimNul(mesh.name);
-    var jsbuf: std.ArrayList(u8) = .empty;
-    var jaw = std.Io.Writer.Allocating.fromArrayList(arena, &jsbuf);
+    var jaw = std.Io.Writer.Allocating.init(arena);
     const js = &jaw.writer;
     try js.print("{{\"asset\":{{\"version\":\"2.0\",\"generator\":\"unityz\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0,\"name\":", .{});
     try writeJsonString(js, name);
@@ -4513,8 +4474,7 @@ fn writeMaterialText(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u
 /// colors, ints). Null when the material has no saved-properties block.
 fn materialJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
     const props = unityz.classes.fieldOf(v, "m_SavedProperties") orelse return null;
-    var buf: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.writeAll("{\"name\":");
     try writeJsonString(w, fieldStr(v, "m_Name"));
@@ -4618,8 +4578,7 @@ fn materialJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
         }
     }
     try w.writeAll("]}\n");
-    const out = aw.toArrayList();
-    return try arena.dupe(u8, out.items);
+    return try arena.dupe(u8, aw.written());
 }
 
 /// ShaderLab reconstruction of a Shader object: the parsed form's name,
@@ -4831,8 +4790,7 @@ fn writeShaderPrograms(w: *unityz.streams.Writer, pass: unityz.value.Value) !voi
 /// shader has no parsed form.
 fn shaderJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
     const pf = unityz.classes.fieldOf(v, "m_ParsedForm") orelse return null;
-    var buf: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     // the top-level m_Name is often empty; the parsed form carries the real one
     const top_name = fieldStr(v, "m_Name");
@@ -4878,8 +4836,7 @@ fn shaderJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
         }
     }
     try w.writeAll("]}\n");
-    const out = aw.toArrayList();
-    return try arena.dupe(u8, out.items);
+    return try arena.dupe(u8, aw.written());
 }
 
 /// `info <path> [--dump]` — sniff the container and print a summary;
@@ -5460,11 +5417,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
             }
         },
         .serialized => {
-            if (path_filter) |pf| {
-                if (pf.node != null) {
-                    return usageError("unityz: node selector not valid for a serialized file\n", .{});
-                }
-            }
+            try rejectNodeSelector(if (path_filter) |pf| pf.node else null);
             const sidecars = try diskSidecars(arena, path);
             _ = try verifySerializedBytes(arena, bytes, null, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars, basename(path), injected);
         },
@@ -6468,11 +6421,7 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
         },
         .serialized => {
-            if (path_filter) |pf| {
-                if (pf.node != null) {
-                    return usageError("unityz: node selector not valid for a serialized file\n", .{});
-                }
-            }
+            try rejectNodeSelector(if (path_filter) |pf| pf.node else null);
             try hashSerializedBytes(arena, bytes, null, if (path_filter) |pf| pf.path_id else null, class_filter, json, &entries, stdout);
         },
         else => return error.UnknownFormat,
@@ -6866,8 +6815,7 @@ fn diffValueTree(a: unityz.value.Value, b: unityz.value.Value, path_id: i64, buf
 
 /// Renders a leaf value as a short JSON string for the report.
 fn renderValue(v: unityz.value.Value) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(std.heap.page_allocator, &buf);
+    var aw = std.Io.Writer.Allocating.init(std.heap.page_allocator);
     // Only the truncated copy leaves this function, so the full rendering is
     // dead on return. `diff` renders two values per reported field of every
     // changed object and nothing frees a page_allocator buffer later, so
@@ -7060,8 +7008,7 @@ test "diffRgbaPixels counts per-channel diffs and max deltas" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var buf: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const a = [_]u8{ 10, 20, 30, 40, 255, 255, 255, 255 };
     const b = [_]u8{ 12, 20, 35, 44, 250, 245, 255, 255 };
     const stat = try diffRgbaPixels(.{ .path_id = 7, .class_id = 28, .hash = 0, .size = 0 }, &a, &b, 2, 1, &aw.writer);
@@ -7077,8 +7024,7 @@ test "diffRgbaPixels counts per-channel diffs and max deltas" {
     try std.testing.expectEqual([4]u32{ 5, 10, 5, 4 }, stat.?.max_delta);
 
     // identical pixels still report a stat, with every count at zero
-    var same_buf: std.ArrayList(u8) = .empty;
-    var sw = std.Io.Writer.Allocating.fromArrayList(arena, &same_buf);
+    var sw = std.Io.Writer.Allocating.init(arena);
     const same = try diffRgbaPixels(.{ .path_id = 7, .class_id = 28, .hash = 0, .size = 0 }, &a, &a, 2, 1, &sw.writer);
     try std.testing.expect(same != null);
     try std.testing.expectEqual(@as(usize, 0), same.?.diff_pixels);
@@ -7551,6 +7497,12 @@ fn parseSelector(text: []const u8) !Selector {
     return .{ .node = null, .path_id = try std.fmt.parseInt(i64, text, 10) };
 }
 
+/// A `node:path_id` selector names an entry inside a bundle or webfile; a
+/// bare serialized file has no entries, so the node half is a usage error.
+fn rejectNodeSelector(node: ?[]const u8) error{Usage}!void {
+    if (node != null) return usageError("unityz: node selector not valid for a serialized file\n", .{});
+}
+
 test "parseSelector splits a node-qualified path id" {
     // Every object-targeting command routes its argument through here, and
     // `edit --patch` routes untrusted patch-file keys through it too, so
@@ -7655,9 +7607,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             }
         },
         .serialized => {
-            if (sel.node != null) {
-                return usageError("unityz: node selector not valid for a serialized file\n", .{});
-            }
+            try rejectNodeSelector(sel.node);
             mergeShowResult(try showSerializedBytes(arena, bytes, sel.path_id, raw, shader_only, stdout, basename(path), injected), &found, &failed);
         },
         else => return error.UnknownFormat,
@@ -7738,8 +7688,7 @@ fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64
         if (o.class_id == 48) {
             if (try unityz.shader.decodeShader(arena, v)) |sb| {
                 // Merge the decoded sub-program blob into the Shader JSON.
-                var buf: std.ArrayList(u8) = .empty;
-                var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+                var aw = std.Io.Writer.Allocating.init(arena);
                 try unityz.value.jsonWrite(v, &aw.writer);
                 const base = aw.toArrayList().items;
                 if (base.len > 0 and base[base.len - 1] == '}') {
@@ -8516,9 +8465,7 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                     failure("unityz: bad patch entry '{s}'\n", .{entry.name});
                     return;
                 };
-                if (sel.node != null) {
-                    return usageError("unityz: node selector not valid for a serialized file\n", .{});
-                }
+                try rejectNodeSelector(sel.node);
             }
             rewritten = try editSerializedPatches(arena, bytes, entries, basename(path), injected);
             edited_count = entries.len;
@@ -8942,11 +8889,7 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     switch (unityz.container.sniff(bytes).container) {
         .bundle => return cmdEditBundle(path, out_path, sel, pairs.items, verify, bytes, injected, stdout),
         .webfile => return cmdEditWebFile(path, out_path, sel, pairs.items, verify, bytes, injected, stdout),
-        .serialized => {
-            if (sel.node != null) {
-                return usageError("unityz: node selector not valid for a serialized file\n", .{});
-            }
-        },
+        .serialized => try rejectNodeSelector(sel.node),
         else => return error.UnknownFormat,
     }
 
@@ -9529,8 +9472,7 @@ fn cmdCreate(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
         // The round-trip check (objects byte-exact, streamed references
         // inside the sidecar) reports through the edit path's writer; keep
         // its lines off stdout, which carries one JSON line on success.
-        var report: std.ArrayList(u8) = .empty;
-        var capture = std.Io.Writer.Allocating.fromArrayList(arena, &report);
+        var capture = std.Io.Writer.Allocating.init(arena);
         const ok = try verifyEditResult(arena, bundle_bytes, &capture.writer);
         try capture.writer.flush();
         if (!ok) {
@@ -9706,8 +9648,7 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
         return;
     }
 
-    var json: std.ArrayList(u8) = .empty;
-    var jw = std.Io.Writer.Allocating.fromArrayList(arena, &json);
+    var jw = std.Io.Writer.Allocating.init(arena);
     const w = &jw.writer;
     try w.writeAll("{\"__meta__\":{\"unity\":");
     try writeJsonString(w, unity_version);
@@ -9800,8 +9741,7 @@ fn cmdTreesBuiltin(rest: []const []const u8, stdout: *Io.Writer) !void {
         }
     }
 
-    var json: std.ArrayList(u8) = .empty;
-    var jw = std.Io.Writer.Allocating.fromArrayList(arena, &json);
+    var jw = std.Io.Writer.Allocating.init(arena);
     const w = &jw.writer;
     try w.writeAll("{\"__meta__\":{\"unity\":");
     try writeJsonString(w, release);
@@ -10154,8 +10094,7 @@ fn buildManagedTrees(arena: std.mem.Allocator, path: []const u8, files: *const M
     // assemblies (skip UnityEngine/UnityEditor built-ins).
     const header = try unityz.managed_trees.monoBehaviourHeader(arena);
     var warnings: std.ArrayList([]const u8) = .empty;
-    var json: std.ArrayList(u8) = .empty;
-    var jw = std.Io.Writer.Allocating.fromArrayList(arena, &json);
+    var jw = std.Io.Writer.Allocating.init(arena);
     const w = &jw.writer;
     try w.writeAll("{\"__class_ids__\":{\"MonoBehaviour\":114},\"MonoBehaviour\":");
     try w.writeAll(try unityz.managed_trees.nodesToJson(arena, try unityz.managed_trees.monoHeaderTree(arena, header)));
@@ -10464,8 +10403,7 @@ test "hierarchy JSON counts an unreadable child without leaving a dangling comma
     try children.append(arena, 999);
     const nodes = [_]TEntry{.{ .path_id = 10, .node = .{ .go = 20, .children = children } }};
     const gos = [_]GoInfo{.{ .path_id = 20, .name = "root" }};
-    var output: std.ArrayList(u8) = .empty;
-    var writer = std.Io.Writer.Allocating.fromArrayList(arena, &output);
+    var writer = std.Io.Writer.Allocating.init(arena);
     var skipped: usize = 0;
 
     const index = try HierarchyIndex.build(arena, &nodes, &gos);
@@ -10496,8 +10434,7 @@ test "hierarchy JSON reports subtree skips on the affected branch" {
         .{ .path_id = 20, .name = "root" },
         .{ .path_id = 21, .name = "child" },
     };
-    var output: std.ArrayList(u8) = .empty;
-    var writer = std.Io.Writer.Allocating.fromArrayList(arena, &output);
+    var writer = std.Io.Writer.Allocating.init(arena);
     var skipped: usize = 0;
 
     const index = try HierarchyIndex.build(arena, &nodes, &gos);
@@ -10516,8 +10453,7 @@ test "emitVerifyReport JSON carries checked, failed, and skipped" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    var json: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(a, &json);
+    var aw = std.Io.Writer.Allocating.init(a);
     var report: VerifyReport = .{
         .checked = 3,
         .failed = 1,
@@ -10529,8 +10465,7 @@ test "emitVerifyReport JSON carries checked, failed, and skipped" {
     // recordFailure bumps `failed` itself, so the report ends at 2.
     try std.testing.expectEqualStrings("{\"checked\":3,\"failed\":2,\"skipped\":2,\"failures\":[{\"path_id\":7,\"error\":\"read failed: Corrupt\"}]}\n", out);
     // text mode emits nothing on stdout (the report is printed separately)
-    var text: std.ArrayList(u8) = .empty;
-    var tw = std.Io.Writer.Allocating.fromArrayList(a, &text);
+    var tw = std.Io.Writer.Allocating.init(a);
     try emitVerifyReport(false, &report, &tw.writer);
     try std.testing.expectEqual(@as(usize, 0), tw.toArrayList().items.len);
 }
@@ -10571,8 +10506,7 @@ test "show failures set command status while a raw object succeeds" {
     defer command_failed_flag = false;
 
     command_failed_flag = false;
-    var missing: std.ArrayList(u8) = .empty;
-    var missing_writer = std.Io.Writer.Allocating.fromArrayList(arena, &missing);
+    var missing_writer = std.Io.Writer.Allocating.init(arena);
     try runCommand(.show, "typeless.assets", &.{ "999", "--raw" }, sf_bytes, &missing_writer.writer);
     try missing_writer.writer.flush();
     try std.testing.expect(command_failed_flag);
@@ -10580,8 +10514,7 @@ test "show failures set command status while a raw object succeeds" {
     try std.testing.expectEqual(0, missing_writer.toArrayList().items.len);
 
     command_failed_flag = false;
-    var typeless: std.ArrayList(u8) = .empty;
-    var typeless_writer = std.Io.Writer.Allocating.fromArrayList(arena, &typeless);
+    var typeless_writer = std.Io.Writer.Allocating.init(arena);
     try runCommand(.show, "typeless.assets", &.{"1"}, sf_bytes, &typeless_writer.writer);
     try typeless_writer.writer.flush();
     try std.testing.expect(command_failed_flag);
@@ -10591,8 +10524,7 @@ test "show failures set command status while a raw object succeeds" {
     try std.testing.expect(std.mem.indexOf(u8, typeless_output, "--raw") != null);
 
     command_failed_flag = false;
-    var raw: std.ArrayList(u8) = .empty;
-    var raw_writer = std.Io.Writer.Allocating.fromArrayList(arena, &raw);
+    var raw_writer = std.Io.Writer.Allocating.init(arena);
     try runCommand(.show, "typeless.assets", &.{ "1", "--raw" }, sf_bytes, &raw_writer.writer);
     try raw_writer.writer.flush();
     try std.testing.expect(!command_failed_flag);
@@ -10623,8 +10555,7 @@ test "fsb json validates samples read-only and sets command failure status" {
     defer command_failed_flag = false;
 
     command_failed_flag = false;
-    var valid: std.ArrayList(u8) = .empty;
-    var valid_writer = std.Io.Writer.Allocating.fromArrayList(arena, &valid);
+    var valid_writer = std.Io.Writer.Allocating.init(arena);
     try runCommand(.fsb, "valid.fsb", &.{"--json"}, &bank, &valid_writer.writer);
     try valid_writer.writer.flush();
     try std.testing.expect(!command_failed_flag);
@@ -10634,8 +10565,7 @@ test "fsb json validates samples read-only and sets command failure status" {
     try std.testing.expect(std.mem.indexOf(u8, valid_json, "\"valid\":true") != null);
 
     command_failed_flag = false;
-    var corrupt: std.ArrayList(u8) = .empty;
-    var corrupt_writer = std.Io.Writer.Allocating.fromArrayList(arena, &corrupt);
+    var corrupt_writer = std.Io.Writer.Allocating.init(arena);
     try runCommand(.fsb, "truncated-data.fsb", &.{"--json"}, bank[0..68], &corrupt_writer.writer);
     try corrupt_writer.writer.flush();
     try std.testing.expect(command_failed_flag);
@@ -10644,8 +10574,7 @@ test "fsb json validates samples read-only and sets command failure status" {
     try std.testing.expect(std.mem.indexOf(u8, corrupt_json, "\"valid\":false") != null);
 
     command_failed_flag = false;
-    var invalid: std.ArrayList(u8) = .empty;
-    var invalid_writer = std.Io.Writer.Allocating.fromArrayList(arena, &invalid);
+    var invalid_writer = std.Io.Writer.Allocating.init(arena);
     try runCommand(.fsb, "not-a-bank.fsb", &.{"--json"}, "not an FSB5 bank", &invalid_writer.writer);
     try invalid_writer.writer.flush();
     try std.testing.expect(command_failed_flag);
@@ -11094,8 +11023,7 @@ test "container info JSON includes embedded SerializedFile metadata" {
     const a = arena_state.allocator();
 
     const sf_bytes = try typelessMonoFixture(a, try monoScriptPayload(a));
-    var json: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(a, &json);
+    var aw = std.Io.Writer.Allocating.init(a);
     try writeContainerEntryJson(a, "CAB-\"quoted", sf_bytes, &aw.writer);
     const actual = aw.toArrayList().items;
 
@@ -11154,8 +11082,7 @@ test "--builtin decodes a stripped 2022.3.62f2 file through the shipped trees" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    var sink: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(a, &sink);
+    var aw = std.Io.Writer.Allocating.init(a);
 
     // A TextAsset (class 49) serialized with the built-in 2022.3.62f2 tree,
     // then stored in a file whose trees are stripped.
@@ -11217,8 +11144,7 @@ test "trees --builtin exports the --trees JSON shape and rejects unknowns" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    var sink: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(a, &sink);
+    var aw = std.Io.Writer.Allocating.init(a);
 
     try cmdTreesBuiltin(&.{ "2022.3.62f2", "--class", "49" }, &aw.writer);
     const out = aw.toArrayList().items;
@@ -11380,8 +11306,7 @@ test "diffDirectories visits every matched file, not only the first" {
 
     const dir_a = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/a", .{&tmp.sub_path});
     const dir_b = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/b", .{&tmp.sub_path});
-    var out: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(a, &out);
+    var aw = std.Io.Writer.Allocating.init(a);
     try diffDirectories(io, dir_a, dir_b, true, false, false, false, null, null, &aw.writer);
     const json = aw.toArrayList().items;
     try std.testing.expect(std.mem.indexOf(u8, json, "\"unchanged\":1,\"changed\":2,\"only_a\":0,\"only_b\":1") != null);
@@ -11413,8 +11338,7 @@ test "verify --path-id fails when the object does not exist" {
     // first: inheriting a `true` from an earlier test would make the
     // assertion below pass without `verify` having failed anything.
     verify_failed_flag = false;
-    var out: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(a, &out);
+    var aw = std.Io.Writer.Allocating.init(a);
     try runCommand(.verify, "typeless.assets", &.{ "--path-id", "999", "--json" }, sf_bytes, &aw.writer);
     try std.testing.expect(verify_failed_flag);
     const missing = aw.toArrayList().items;
@@ -11423,8 +11347,7 @@ test "verify --path-id fails when the object does not exist" {
 
     // The object that does exist is typeless here, so it is skipped, not failed.
     verify_failed_flag = false;
-    var out2: std.ArrayList(u8) = .empty;
-    var aw2 = std.Io.Writer.Allocating.fromArrayList(a, &out2);
+    var aw2 = std.Io.Writer.Allocating.init(a);
     try runCommand(.verify, "typeless.assets", &.{ "--path-id", "1", "--json" }, sf_bytes, &aw2.writer);
     try std.testing.expect(!verify_failed_flag);
     try std.testing.expect(std.mem.indexOf(u8, aw2.toArrayList().items, "\"skipped\":1") != null);
@@ -11449,8 +11372,7 @@ test "diff --fields decodes typeless objects through injected trees" {
     try inj.trees.put(a, "MonoScript", tp);
 
     const fa: Fp = .{ .path_id = 1, .class_id = 115, .hash = 0, .size = 0 };
-    var out: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(a, &out);
+    var aw = std.Io.Writer.Allocating.init(a);
 
     // Without trees the objects cannot be decoded, so no field is reported.
     var none: std.ArrayList(FieldDiff) = .empty;
@@ -11481,8 +11403,7 @@ test "flattenTree reproduces the flat node list a tree was built from" {
     }
     // The exported JSON parses back through the --trees loader.
     const json = try unityz.managed_trees.nodesToJson(a, back);
-    var out: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(a, &out);
+    var aw = std.Io.Writer.Allocating.init(a);
     const v = try parseJsonLiteralAlloc(a, json);
     const reparsed = (try buildInjectedTree(a, "MonoScript", v, &aw.writer)).?;
     try std.testing.expectEqual(tree.roots.len, reparsed.roots.len);
@@ -11549,8 +11470,7 @@ const create_test_text =
 fn runCreate(a: std.mem.Allocator, spec: []const u8, out: []const u8) ![]const u8 {
     command_failed_flag = false;
     verify_failed_flag = false;
-    var buf: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(a, &buf);
+    var aw = std.Io.Writer.Allocating.init(a);
     try runCommand(.create, "spec.json", &.{ "--out", out }, spec, &aw.writer);
     try aw.writer.flush();
     return aw.toArrayList().items;
@@ -11602,15 +11522,13 @@ test "create builds a verified bundle with a resource sidecar" {
     try std.testing.expectEqual(@as(i32, 83), sf.objects[2].class_id);
 
     // unityz's own verify accepts the result, including the streamed reference
-    var vbuf: std.ArrayList(u8) = .empty;
-    var vw = std.Io.Writer.Allocating.fromArrayList(a, &vbuf);
+    var vw = std.Io.Writer.Allocating.init(a);
     try runCommand(.verify, out, &.{"--json"}, bytes, &vw.writer);
     try std.testing.expect(!verify_failed_flag);
     try std.testing.expect(std.mem.indexOf(u8, vw.toArrayList().items, "\"checked\":3,\"failed\":0") != null);
 
     // and `show` decodes the text asset back through the embedded tree
-    var sbuf: std.ArrayList(u8) = .empty;
-    var sw = std.Io.Writer.Allocating.fromArrayList(a, &sbuf);
+    var sw = std.Io.Writer.Allocating.init(a);
     try runCommand(.show, out, &.{"CAB-test:2"}, bytes, &sw.writer);
     try std.testing.expect(std.mem.indexOf(u8, sw.toArrayList().items, "\"m_Script\":\"payload\"") != null);
 }

@@ -639,8 +639,7 @@ pub fn monoHeaderTree(arena: std.mem.Allocator, header: []const typetree.Node) !
 
 /// Serializes a flat node list to the injected-trees JSON form.
 pub fn nodesToJson(arena: std.mem.Allocator, nodes: []const typetree.Node) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
+    var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
     try w.writeByte('[');
     for (nodes, 0..) |n, i| {
@@ -652,8 +651,7 @@ pub fn nodesToJson(arena: std.mem.Allocator, nodes: []const typetree.Node) ![]co
         try w.print(",\"m_Level\":{d},\"m_MetaFlag\":{d},\"m_ByteSize\":{d},\"m_Version\":{d},\"m_TypeFlags\":{d},\"m_Index\":{d}}}", .{ n.level, n.meta_flags, n.byte_size, n.version, n.type_flags, n.index });
     }
     try w.writeByte(']');
-    var list = aw.toArrayList();
-    return list.toOwnedSlice(arena);
+    return aw.toOwnedSlice();
 }
 
 // ---------------------------------------------------------------------------
