@@ -1681,10 +1681,12 @@ fn fontMetadataJson(arena: std.mem.Allocator, path_id: i64, class_id: i32, f: un
     var out = std.ArrayList(u8).empty;
     var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
     const w = &aw.writer;
-    try w.print("{{\"path_id\":{d},\"class\":{d},\"name\":\"{s}\",\"font_names\":[", .{ path_id, class_id, f.name });
+    try w.print("{{\"path_id\":{d},\"class\":{d},\"name\":", .{ path_id, class_id });
+    try writeJsonString(w, f.name);
+    try w.writeAll(",\"font_names\":[");
     for (f.font_names, 0..) |n, i| {
         if (i != 0) try w.writeByte(',');
-        try w.print("\"{s}\"", .{n});
+        try writeJsonString(w, n);
     }
     try w.print("],\"font_size\":{d},\"line_spacing\":{d},\"tracking\":{d},\"pixel_scale\":{d}", .{ f.font_size, f.line_spacing, f.tracking, f.pixel_scale });
     try w.print(",\"ascent\":{d},\"descent\":{d},\"ascii_start_offset\":{d},\"character_spacing\":{d},\"character_padding\":{d},\"convert_case\":{d}", .{ f.ascent, f.descent, f.ascii_start_offset, f.character_spacing, f.character_padding, f.convert_case });
@@ -1760,13 +1762,17 @@ fn computeShaderJson(arena: std.mem.Allocator, path_id: i64, cs: unityz.classes.
     var out = std.ArrayList(u8).empty;
     var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
     const w = &aw.writer;
-    try w.print("{{\"path_id\":{d},\"class\":72,\"name\":\"{s}\",\"variants\":[", .{ path_id, cs.name });
+    try w.print("{{\"path_id\":{d},\"class\":72,\"name\":", .{path_id});
+    try writeJsonString(w, cs.name);
+    try w.writeAll(",\"variants\":[");
     for (cs.variants, 0..) |v, vi| {
         if (vi != 0) try w.writeByte(',');
         try w.print("{{\"renderer\":{d},\"level\":{d},\"format\":\"{s}\",\"resourcesResolved\":{},\"kernels\":[", .{ v.target_renderer, v.target_level, if (v.kernels.len != 0 and v.kernels[0].code.len != 0) computeCodeExt(v.kernels[0].code) else "none", v.resources_resolved });
         for (v.kernels, 0..) |k, ki| {
             if (ki != 0) try w.writeByte(',');
-            try w.print("{{\"name\":\"{s}\",\"threadGroupSize\":[", .{k.name});
+            try w.writeAll("{\"name\":");
+            try writeJsonString(w, k.name);
+            try w.writeAll(",\"threadGroupSize\":[");
             for (k.thread_group_size, 0..) |t, ti| {
                 if (ti != 0) try w.writeByte(',');
                 try w.print("{d}", .{t});
@@ -1790,10 +1796,14 @@ fn computeShaderJson(arena: std.mem.Allocator, path_id: i64, cs: unityz.classes.
             try w.writeAll(",\"constantBuffers\":[");
             for (v.constant_buffers, 0..) |cb, ci| {
                 if (ci != 0) try w.writeByte(',');
-                try w.print("{{\"name\":\"{s}\",\"byteSize\":{d},\"params\":[", .{ cb.name, cb.byte_size });
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, cb.name);
+                try w.print(",\"byteSize\":{d},\"params\":[", .{cb.byte_size});
                 for (cb.params, 0..) |p, pi| {
                     if (pi != 0) try w.writeByte(',');
-                    try w.print("{{\"name\":\"{s}\",\"type\":{d},\"offset\":{d},\"arraySize\":{d},\"rowCount\":{d},\"colCount\":{d}}}", .{ p.name, p.type, p.offset, p.array_size, p.row_count, p.col_count });
+                    try w.writeAll("{\"name\":");
+                    try writeJsonString(w, p.name);
+                    try w.print(",\"type\":{d},\"offset\":{d},\"arraySize\":{d},\"rowCount\":{d},\"colCount\":{d}}}", .{ p.type, p.offset, p.array_size, p.row_count, p.col_count });
                 }
                 try w.writeByte(']');
                 try w.writeByte('}');
@@ -2848,7 +2858,8 @@ fn writeMixerGroupJson(
     try w.print("{{\"path_id\":{d}", .{path_id});
     if (readObjectValue(arena, sf, path_id, own_basename, injected)) |obj| {
         const g = try unityz.classes.AudioMixerGroup.fromValue(arena, obj);
-        try w.print(",\"name\":\"{s}\"", .{g.name});
+        try w.writeAll(",\"name\":");
+        try writeJsonString(w, g.name);
         if (g.children.len != 0 and depth < 32) {
             try w.writeAll(",\"children\":[");
             for (g.children, 0..) |c, i| {
@@ -2882,7 +2893,9 @@ fn writeMixerFiles(
     var out = std.ArrayList(u8).empty;
     var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
     const w = &aw.writer;
-    try w.print("{{\"path_id\":{d},\"name\":\"{s}\",\"masterGroup\":", .{ path_id, ac.name });
+    try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
+    try writeJsonString(w, ac.name);
+    try w.writeAll(",\"masterGroup\":");
     if (ac.master_group) |mg| {
         try writeMixerGroupJson(w, arena, sf, own_basename, injected, mg.path_id, 0);
     } else {
@@ -2894,7 +2907,8 @@ fn writeMixerFiles(
         try w.print("{{\"path_id\":{d}", .{s.path_id});
         if (readObjectValue(arena, sf, s.path_id, own_basename, injected)) |sv| {
             const sn = unityz.classes.AudioMixerSnapshot.fromValue(sv);
-            try w.print(",\"name\":\"{s}\"", .{sn.name});
+            try w.writeAll(",\"name\":");
+            try writeJsonString(w, sn.name);
         }
         try w.writeByte('}');
     }
@@ -2904,7 +2918,8 @@ fn writeMixerFiles(
         try w.print("{{\"path_id\":{d}", .{ss.path_id});
         if (readObjectValue(arena, sf, ss.path_id, own_basename, injected)) |sv| {
             const sn = unityz.classes.AudioMixerSnapshot.fromValue(sv);
-            try w.print(",\"name\":\"{s}\"", .{sn.name});
+            try w.writeAll(",\"name\":");
+            try writeJsonString(w, sn.name);
         }
         try w.writeByte('}');
     } else {
@@ -2929,7 +2944,9 @@ fn writeMixerGroupFiles(
     var out = std.ArrayList(u8).empty;
     var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
     const w = &aw.writer;
-    try w.print("{{\"path_id\":{d},\"name\":\"{s}\",\"children\":[", .{ path_id, g.name });
+    try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
+    try writeJsonString(w, g.name);
+    try w.writeAll(",\"children\":[");
     for (g.children, 0..) |c, i| {
         if (i != 0) try w.writeByte(',');
         try w.print("{d}", .{c.path_id});
@@ -2954,7 +2971,9 @@ fn writeMixerSnapshotFiles(
     var out = std.ArrayList(u8).empty;
     var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
     const w = &aw.writer;
-    try w.print("{{\"path_id\":{d},\"name\":\"{s}\",\"time\":{d},\"parameters\":{d}}}", .{ path_id, s.name, s.time, s.values });
+    try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
+    try writeJsonString(w, s.name);
+    try w.print(",\"time\":{d},\"parameters\":{d}}}", .{ s.time, s.values });
     var list = aw.toArrayList();
     const meta = try list.toOwnedSlice(arena);
     try finalizeSidecar(arena, subdir, path_id, "mixer_snapshot", s.name, 245, "mixer snapshot", meta, manifest, extracted, stdout);
@@ -3013,16 +3032,24 @@ fn writeAnimatorFiles(
     var out = std.ArrayList(u8).empty;
     var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
     const w = &aw.writer;
-    try w.print("{{\"path_id\":{d},\"name\":\"{s}\",\"layers\":[", .{ path_id, ac.name });
+    try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
+    try writeJsonString(w, ac.name);
+    try w.writeAll(",\"layers\":[");
     for (ac.layers, 0..) |l, i| {
         if (i != 0) try w.writeByte(',');
-        try w.print("{{\"stateMachineIndex\":{d},\"name\":\"{s}\",\"blendingMode\":{d},\"defaultWeight\":{d},\"ikPass\":{}}}", .{ l.state_machine_index, ac.tosPath(l.binding), l.blending_mode, l.default_weight, l.ik_pass });
+        try w.print("{{\"stateMachineIndex\":{d},\"name\":", .{l.state_machine_index});
+        try writeJsonString(w, ac.tosPath(l.binding));
+        try w.print(",\"blendingMode\":{d},\"defaultWeight\":{d},\"ikPass\":{}}}", .{ l.blending_mode, l.default_weight, l.ik_pass });
     }
     try w.writeByte(']');
     try w.print(",\"stateMachines\":{d},\"states\":[", .{ac.state_machine_count});
     for (ac.states, 0..) |st, i| {
         if (i != 0) try w.writeByte(',');
-        try w.print("{{\"name\":\"{s}\",\"fullPath\":\"{s}\",\"speed\":{d},\"loop\":{},\"transitions\":{d},\"blendTrees\":{d}}}", .{ ac.tosPath(st.name_id), ac.tosPath(st.full_path_id), st.speed, st.loop, st.transition_count, st.blend_tree_count });
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, ac.tosPath(st.name_id));
+        try w.writeAll(",\"fullPath\":");
+        try writeJsonString(w, ac.tosPath(st.full_path_id));
+        try w.print(",\"speed\":{d},\"loop\":{},\"transitions\":{d},\"blendTrees\":{d}}}", .{ st.speed, st.loop, st.transition_count, st.blend_tree_count });
     }
     try w.print("],\"anyStateTransitions\":{d},\"defaultState\":{d},\"parameters\":{d},\"clips\":[", .{ ac.any_state_transitions, ac.default_state, ac.parameters });
     for (ac.clips, 0..) |c, i| {
@@ -3034,7 +3061,9 @@ fn writeAnimatorFiles(
         try w.writeAll(",\"paths\":[");
         for (ac.tos, 0..) |t, i| {
             if (i != 0) try w.writeByte(',');
-            try w.print("{{\"hash\":{d},\"path\":\"{s}\"}}", .{ t.hash, t.path });
+            try w.print("{{\"hash\":{d},\"path\":", .{t.hash});
+            try writeJsonString(w, t.path);
+            try w.writeByte('}');
         }
         try w.writeByte(']');
     }
@@ -3062,7 +3091,9 @@ fn writeOverrideFiles(
     var out = std.ArrayList(u8).empty;
     var aw = std.Io.Writer.Allocating.fromArrayList(arena, &out);
     const w = &aw.writer;
-    try w.print("{{\"path_id\":{d},\"name\":\"{s}\",\"controller\":", .{ path_id, oc.name });
+    try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
+    try writeJsonString(w, oc.name);
+    try w.writeAll(",\"controller\":");
     if (oc.controller) |c| {
         try w.print("{{\"path_id\":{d}}}", .{c.path_id});
     } else {
