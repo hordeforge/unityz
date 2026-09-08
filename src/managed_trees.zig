@@ -22,6 +22,11 @@ const value = @import("value.zig");
 const object_reader = @import("object_reader.zig");
 const serialized = @import("serialized.zig");
 
+/// Re-export of the tree's one JSON string escaper, which lives with the
+/// value model that has to parse it back. Kept for the `--trees` writers
+/// below and for callers that reached it here before it moved.
+pub const writeJsonString = value.writeJsonString;
+
 /// One MonoScript object found in a serialized file: the script identity
 /// that links a MonoBehaviour's m_Script PPtr to a class in the assemblies.
 pub const ScriptRef = struct {
@@ -649,22 +654,6 @@ pub fn nodesToJson(arena: std.mem.Allocator, nodes: []const typetree.Node) ![]co
     try w.writeByte(']');
     var list = aw.toArrayList();
     return list.toOwnedSlice(arena);
-}
-
-pub fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            0...8, 11, 12, 14...31 => try w.print("\\u{x:0>4}", .{c}),
-            else => try w.writeByte(c),
-        }
-    }
-    try w.writeByte('"');
 }
 
 // ---------------------------------------------------------------------------

@@ -133,7 +133,7 @@ pub fn jsonWrite(v: Value, writer: anytype) !void {
             try writer.print("{d}", .{f})
         else
             try writer.writeAll("null"),
-        .string => |s| try jsonString(s, writer),
+        .string => |s| try writeJsonString(writer, s),
         .bytes => |b| {
             try writer.writeAll("\"");
             try writer.print("{b64}", .{b});
@@ -151,7 +151,7 @@ pub fn jsonWrite(v: Value, writer: anytype) !void {
             try writer.writeAll("{");
             for (o, 0..) |f, i| {
                 if (i != 0) try writer.writeAll(",");
-                try jsonString(f.name, writer);
+                try writeJsonString(writer, f.name);
                 try writer.writeAll(":");
                 try jsonWrite(f.value, writer);
             }
@@ -161,7 +161,14 @@ pub fn jsonWrite(v: Value, writer: anytype) !void {
     }
 }
 
-fn jsonString(s: []const u8, writer: anytype) !void {
+/// Writes `s` as a JSON string literal, quotes included.
+///
+/// The one JSON string escaper in the tree: `jsonWrite` above,
+/// `managed_trees` and the CLI all route here, so the escaping `jsonParse`
+/// has to read back is defined in exactly one place. It lives with the
+/// value model rather than with a caller because the model owns both ends
+/// of that round trip.
+pub fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
     for (s) |c| {
         switch (c) {
@@ -233,7 +240,7 @@ fn jsonParseValue(text: []const u8, pos: *usize, depth: u32, allocator: std.mem.
                 pos.* += 1;
                 if (pos.* >= text.len) return error.BadEscape;
                 // Decode the escape rather than keeping the escaped byte:
-                // `jsonString` above writes \n/\r/\t and \uXXXX for the C0
+                // `writeJsonString` above writes \n/\r/\t and \uXXXX for the C0
                 // controls (Unity strings carry trailing NULs), so an
                 // `extract --json` export fed back through `edit --patch`
                 // has to decode them to round-trip byte-exactly.

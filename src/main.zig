@@ -1,3 +1,28 @@
+//! unityz CLI — the command-line front end over the `unityz` library.
+//!
+//! Layout, in file order:
+//!
+//! 1. `usage`, then the small output helpers (`failure`, `diagnostic`,
+//!    `usageError`) every command reports through.
+//! 2. `main` — argument parsing, the global flags, and reading the input
+//!    file. It is the top of the flow and sits near the top of the file.
+//! 3. `Command`, `parseCommand` and `runCommand` — the dispatch table.
+//!    Each subcommand has exactly one `cmd<Name>` entry point below.
+//! 4. The `cmd*` implementations, with the helpers each one owns next to
+//!    it. The convention is a doc comment naming the invocation it serves;
+//!    `cmdExtract`, `cmdTrees` and `cmdHierarchy` still lack one.
+//! 5. Tests, interleaved with the code they cover rather than gathered at
+//!    the end.
+//!
+//! Container and object parsing belongs to the library, not here: framing,
+//! type trees and the value model are `unityz.bundle`, `unityz.serialized`,
+//! `unityz.object_reader` and friends, and this file only drives them and
+//! formats their results as text or JSON. The exporters are the exception
+//! that has not been paid off — `readChannelMesh`, `writeMeshObj` and
+//! `writeMeshGlb` decode Mesh vertex and index buffers here rather than in
+//! the library, so a second consumer of that decode would have to
+//! reimplement it.
+
 const std = @import("std");
 const Io = std.Io;
 
@@ -8,6 +33,12 @@ const className = unityz.classes.className;
 
 /// Sprite render-data triangle-index reader, owned by the library.
 const readSpriteTriangles = unityz.classes.readSpriteTriangles;
+
+/// Prints `s` as a JSON string literal, escaping the C0 controls Unity
+/// strings carry (trailing NULs in particular). Owned by the library's
+/// value model, which parses the same escaping back, so every JSON this
+/// CLI prints agrees byte for byte with the library's own.
+const writeJsonString = unityz.value.writeJsonString;
 
 const usage =
     \\unityz — read, extract, and edit Unity assets
@@ -6321,11 +6352,6 @@ fn writeBatchJson(stdout: *Io.Writer, file: []const u8, output: []const u8, resu
     };
     try stdout.print("}}\n", .{});
 }
-
-/// Prints `s` as a JSON string literal, escaping the C0 controls Unity
-/// strings carry (trailing NULs in particular). Same escaper the library
-/// uses for its own tree JSON, so both outputs agree byte for byte.
-const writeJsonString = unityz.managed_trees.writeJsonString;
 
 /// Prints a JSON array of string literals.
 fn writeJsonStringList(stdout: *Io.Writer, items: []const []const u8) !void {
