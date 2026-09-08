@@ -13,9 +13,6 @@
 
 Resolved
 
-One of Open / Resolved / Reopened on the line above; it is what the index
-shows. Link the investigation that established the cause, if one exists.
-
 ## Blocked on
 
 ## Symptom and impact

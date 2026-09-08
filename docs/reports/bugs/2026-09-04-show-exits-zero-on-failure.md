@@ -2,9 +2,9 @@
 
 ## TL;DR
 
-- **What failed:** `unityz show` prints target, option, container, and object
-  decode failures but exits zero.
-- **Impact:** Shell automation and downstream JSON adapters can mistake a
+- **What failed:** `unityz show` printed target, option, container, and object
+  decode failures but exited zero.
+- **Impact:** Shell automation and downstream JSON adapters could mistake a
   missing or undecodable object for a successful inspection.
 - **Resolution:** `show` now distinguishes shown, absent, and undecodable
   objects and propagates failures through the CLI's command status without
@@ -14,11 +14,7 @@
 
 Resolved
 
-One of Open / Resolved / Reopened on the line above; it is what the index
-shows. Link the investigation that established the cause, if one exists.
-
 ## Blocked on
-
 
 ## Symptom and impact
 
@@ -85,6 +81,12 @@ successful class-142 JSON status 0.
 The release-indexed built-in type-tree database remains separate open work.
 UnityPy covers that case; `--trees` remains unityz's explicit external-tree
 route.
+
+2026-09-05: that follow-up is closed. The database shipped in 0.1.4 (#156) as
+`src/builtin_trees.zig`, so `--builtin` now decodes a stripped file's built-in
+classes from the trees for its own exact release; `--trees` is still the only
+route for MonoBehaviour script fields. See "Built-in engine-class trees" in
+[features.md](../../features.md).
 
 ## References
 

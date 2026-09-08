@@ -1,5 +1,7 @@
 # ADR NNNN - <Decision, phrased as the choice made>
 
+**Date:** YYYY-MM-DD
+
 ## Status
 
 Accepted / Superseded by ADR-NNNN / Deprecated. Record one decision per ADR.

@@ -1,5 +1,7 @@
 # PRD - <Feature name>
 
+**Date:** YYYY-MM-DD
+
 ## Status
 
 Draft / In progress / Shipped. Name the code, configuration, API, or user
