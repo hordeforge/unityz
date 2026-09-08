@@ -27,6 +27,7 @@
 const std = @import("std");
 const streams = @import("streams.zig");
 const serialized = @import("serialized.zig");
+const typetree = @import("typetree.zig");
 
 pub const Error = error{
     UnsupportedFormat,
@@ -821,8 +822,6 @@ test "rewrite survives mutated parsed files and hostile replacements" {
 // ---------------------------------------------------------------------------
 // Creation from empty state (format 22, the layout Unity 2022.3 writes).
 // ---------------------------------------------------------------------------
-
-const typetree = @import("typetree.zig");
 
 pub const CreateError = error{
     NoObjects,

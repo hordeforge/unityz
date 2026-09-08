@@ -42,87 +42,6 @@ pub const WebFile = struct {
     }
 };
 
-/// One entry's replacement data for `rebuild`.
-pub const EntryReplacement = struct {
-    path: []const u8,
-    data: []const u8,
-};
-
-/// Rebuilds a WebFile with the given entries replaced, keeping the
-/// source's framing: a gzip-wrapped source is re-wrapped in gzip, a plain
-/// one stays plain. The caller owns the returned bytes.
-pub fn rebuild(allocator: std.mem.Allocator, wf: *const WebFile, replacements: []const EntryReplacement) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    // signature + head_size placeholder
-    try out.appendSlice(allocator, container.webfile_magic);
-    try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
-
-    // data begins right after the header table
-    var data_start: u64 = container.webfile_magic.len + 4;
-    for (wf.entries) |e| data_start += 12 + e.path.len;
-
-    var offset = data_start;
-    var data_offsets: std.ArrayList(u64) = .empty;
-    defer data_offsets.deinit(allocator);
-    for (wf.entries) |e| {
-        var data = e.data;
-        for (replacements) |r| {
-            if (std.mem.eql(u8, r.path, e.path)) {
-                data = r.data;
-                break;
-            }
-        }
-        var buf: [12]u8 = undefined;
-        std.mem.writeInt(u32, buf[0..4], @intCast(offset), .little);
-        std.mem.writeInt(u32, buf[4..8], @intCast(data.len), .little);
-        std.mem.writeInt(u32, buf[8..12], @intCast(e.path.len), .little);
-        try out.appendSlice(allocator, &buf);
-        try out.appendSlice(allocator, e.path);
-        try data_offsets.append(allocator, offset);
-        offset += data.len;
-    }
-    // patch head_size: the offset where the data begins
-    std.mem.writeInt(u32, out.items[container.webfile_magic.len..][0..4], @intCast(out.items.len), .little);
-    // write the data
-    for (wf.entries, 0..) |e, i| {
-        var data = e.data;
-        for (replacements) |r| {
-            if (std.mem.eql(u8, r.path, e.path)) {
-                data = r.data;
-                break;
-            }
-        }
-        // pad to the recorded offset (should be exact, but be safe)
-        while (out.items.len < data_offsets.items[i]) try out.append(allocator, 0);
-        try out.appendSlice(allocator, data);
-    }
-    const plain = try out.toOwnedSlice(allocator);
-    // A gzip-wrapped source stays gzip-wrapped: `owned` is only set when
-    // the parser had to decompress the input, so the rebuilt file keeps
-    // the source's compression instead of silently growing.
-    if (wf.owned == null) return plain;
-    errdefer allocator.free(plain);
-    const gz = try gzipCompress(allocator, plain);
-    allocator.free(plain);
-    return gz;
-}
-
-/// Compresses a whole buffer into a gzip stream (std flate, gzip
-/// container). The caller owns the returned bytes.
-fn gzipCompress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-    // `initCapacity` gives the writer a real buffer up front: flate's
-    // Compress asserts on an output buffer of <= 8 bytes.
-    var aw = std.Io.Writer.Allocating.initCapacity(allocator, 64 * 1024) catch return error.OutOfMemory;
-    errdefer aw.deinit();
-    var input: [std.compress.flate.max_window_len]u8 = undefined;
-    var c = try std.compress.flate.Compress.init(&aw.writer, &input, .gzip, .default);
-    try c.writer.writeAll(data);
-    try c.finish();
-    return aw.toOwnedSlice();
-}
-
 pub const ParseError = error{
     BadSignature,
     ShortData,
@@ -283,6 +202,91 @@ const EndlessFFReader = struct {
         return 0;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Writing: rebuild an existing WebFile with entries replaced.
+// ---------------------------------------------------------------------------
+
+/// One entry's replacement data for `rebuild`.
+pub const EntryReplacement = struct {
+    path: []const u8,
+    data: []const u8,
+};
+
+/// Rebuilds a WebFile with the given entries replaced, keeping the
+/// source's framing: a gzip-wrapped source is re-wrapped in gzip, a plain
+/// one stays plain. The caller owns the returned bytes.
+pub fn rebuild(allocator: std.mem.Allocator, wf: *const WebFile, replacements: []const EntryReplacement) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    // signature + head_size placeholder
+    try out.appendSlice(allocator, container.webfile_magic);
+    try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
+
+    // data begins right after the header table
+    var data_start: u64 = container.webfile_magic.len + 4;
+    for (wf.entries) |e| data_start += 12 + e.path.len;
+
+    var offset = data_start;
+    var data_offsets: std.ArrayList(u64) = .empty;
+    defer data_offsets.deinit(allocator);
+    for (wf.entries) |e| {
+        var data = e.data;
+        for (replacements) |r| {
+            if (std.mem.eql(u8, r.path, e.path)) {
+                data = r.data;
+                break;
+            }
+        }
+        var buf: [12]u8 = undefined;
+        std.mem.writeInt(u32, buf[0..4], @intCast(offset), .little);
+        std.mem.writeInt(u32, buf[4..8], @intCast(data.len), .little);
+        std.mem.writeInt(u32, buf[8..12], @intCast(e.path.len), .little);
+        try out.appendSlice(allocator, &buf);
+        try out.appendSlice(allocator, e.path);
+        try data_offsets.append(allocator, offset);
+        offset += data.len;
+    }
+    // patch head_size: the offset where the data begins
+    std.mem.writeInt(u32, out.items[container.webfile_magic.len..][0..4], @intCast(out.items.len), .little);
+    // write the data
+    for (wf.entries, 0..) |e, i| {
+        var data = e.data;
+        for (replacements) |r| {
+            if (std.mem.eql(u8, r.path, e.path)) {
+                data = r.data;
+                break;
+            }
+        }
+        // pad to the recorded offset (should be exact, but be safe)
+        while (out.items.len < data_offsets.items[i]) try out.append(allocator, 0);
+        try out.appendSlice(allocator, data);
+    }
+    const plain = try out.toOwnedSlice(allocator);
+    // A gzip-wrapped source stays gzip-wrapped: `owned` is only set when
+    // the parser had to decompress the input, so the rebuilt file keeps
+    // the source's compression instead of silently growing.
+    if (wf.owned == null) return plain;
+    errdefer allocator.free(plain);
+    const gz = try gzipCompress(allocator, plain);
+    allocator.free(plain);
+    return gz;
+}
+
+/// Compresses a whole buffer into a gzip stream (std flate, gzip
+/// container). The caller owns the returned bytes.
+fn gzipCompress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    // `initCapacity` gives the writer a real buffer up front: flate's
+    // Compress asserts on an output buffer of <= 8 bytes.
+    var aw = std.Io.Writer.Allocating.initCapacity(allocator, 64 * 1024) catch return error.OutOfMemory;
+    errdefer aw.deinit();
+    var input: [std.compress.flate.max_window_len]u8 = undefined;
+    var c = try std.compress.flate.Compress.init(&aw.writer, &input, .gzip, .default);
+    try c.writer.writeAll(data);
+    try c.finish();
+    return aw.toOwnedSlice();
+}
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -205,15 +205,24 @@ UnityArchive container is detected but not yet parsed.
 - `src/fsb5.zig` - FSB5 audio bank metadata parser
 - `src/audio.zig` - FSB5 sample decoding to 16-bit PCM, no external tools
 - `src/vorbis.zig` - FSB5 Vorbis to playable Ogg reconstruction, no
-  external tools
+  external tools; the setup headers it keys by CRC32 are embedded from
+  `src/vorbis_headers.bin` with the generated offset tables in
+  `src/vorbis_headers_index.zig`
 - `src/wav.zig` - minimal WAV encoder for the decoded PCM
 - `src/shader.zig` - Shader sub-program blob decoding and skinning
   detection
 - `src/texture.zig` - texture format decoding to RGBA8 (DXT, BC, PVRTC,
   ATC, EAC, ETC, ASTC, crunch, and the raw half/float/16-bit formats)
 - `src/png.zig`, `src/tga.zig`, `src/bmp.zig` - minimal image encoders
-- `src/vendor/unitycrunch/` - vendored unitycrunch decompressor (ZLIB)
-- `src/vendor/lzham/` - vendored LZHAM decompressor (MIT)
+- `src/vendor/unitycrunch/` - vendored unitycrunch decompressor (ZLIB),
+  reached through the hand-written `src/vendor/unitycrunch_shim.cpp`
+- `src/vendor/lzham/` - vendored LZHAM decompressor (MIT), reached
+  through the hand-written `src/vendor/lzham/lzham_shim.cpp`
+- `scripts/` - offline tooling that produces inputs rather than shipping
+  in the binary: the `--trees` and built-in-tree generators, the trees
+  merger, and the docs index generator
+- `trees/` - hand-derived `--trees` JSON checked in because it cannot be
+  generated from a dump (currently 2021.x TerrainData)
 - `build.zig`, `build.zig.zon` - package metadata and build steps
 
 ## Releases

@@ -9693,36 +9693,35 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     var json: std.ArrayList(u8) = .empty;
     var jw = std.Io.Writer.Allocating.fromArrayList(arena, &json);
     const w = &jw.writer;
-    const js = unityz.managed_trees.writeJsonString;
     try w.writeAll("{\"__meta__\":{\"unity\":");
-    try js(w, unity_version);
+    try writeJsonString(w, unity_version);
     try w.writeAll(",\"source\":");
-    try js(w, basename(path));
+    try writeJsonString(w, basename(path));
     try w.writeAll("},\"__class_ids__\":{");
     for (class_ids.keys(), class_ids.values(), 0..) |k, v, n| {
         if (n != 0) try w.writeByte(',');
-        try js(w, k);
+        try writeJsonString(w, k);
         try w.print(":{d}", .{v});
     }
     try w.writeByte('}');
     for (class_trees.keys(), class_trees.values()) |k, v| {
         try w.writeByte(',');
-        try js(w, k);
+        try writeJsonString(w, k);
         try w.print(":{s}", .{v});
     }
     try w.writeAll(",\"__script_trees__\":{");
     for (script_trees.keys(), script_trees.values(), 0..) |k, v, n| {
         if (n != 0) try w.writeByte(',');
-        try js(w, k);
+        try writeJsonString(w, k);
         try w.print(":{s}", .{v});
     }
     try w.writeAll("},\"__monoscripts__\":[");
     for (monoscripts.items, 0..) |m, n| {
         if (n != 0) try w.writeByte(',');
         try w.writeAll("{\"file\":");
-        try js(w, m.file);
+        try writeJsonString(w, m.file);
         try w.print(",\"path_id\":{d},\"class\":", .{m.path_id});
-        try js(w, m.class);
+        try writeJsonString(w, m.class);
         try w.writeByte('}');
     }
     try w.writeAll("]}\n");
@@ -9788,16 +9787,15 @@ fn cmdTreesBuiltin(rest: []const []const u8, stdout: *Io.Writer) !void {
     var json: std.ArrayList(u8) = .empty;
     var jw = std.Io.Writer.Allocating.fromArrayList(arena, &json);
     const w = &jw.writer;
-    const js = unityz.managed_trees.writeJsonString;
     try w.writeAll("{\"__meta__\":{\"unity\":");
-    try js(w, release);
+    try writeJsonString(w, release);
     try w.writeAll(",\"source\":\"builtin\"},\"__class_ids__\":{");
     var first = true;
     for (db.classes) |c| {
         if (class_filter) |cid| if (c.class_id != cid) continue;
         if (!first) try w.writeByte(',');
         first = false;
-        try js(w, c.name);
+        try writeJsonString(w, c.name);
         try w.print(":{d}", .{c.class_id});
     }
     try w.writeByte('}');
@@ -9805,7 +9803,7 @@ fn cmdTreesBuiltin(rest: []const []const u8, stdout: *Io.Writer) !void {
         if (class_filter) |cid| if (c.class_id != cid) continue;
         const tree = try db.tree(arena, c.class_id);
         try w.writeByte(',');
-        try js(w, c.name);
+        try writeJsonString(w, c.name);
         try w.writeByte(':');
         try w.writeAll(try unityz.managed_trees.nodesToJson(arena, try flattenTree(arena, &tree)));
     }
@@ -10157,7 +10155,7 @@ fn buildManagedTrees(arena: std.mem.Allocator, path: []const u8, files: *const M
         const info = types.get(full_name) orelse continue;
         if (!info.is_object_derived or info.is_enum) continue;
         if (trees_written != 0) try w.writeByte(',');
-        try unityz.managed_trees.writeJsonString(w, full_name);
+        try writeJsonString(w, full_name);
         try w.writeAll(":");
         var budget: unityz.managed_trees.NodeBudget = .{};
         const tree_nodes = try unityz.managed_trees.buildScriptTree(arena, full_name, header, info.fields, &budget, &types, &warnings);
@@ -10169,13 +10167,13 @@ fn buildManagedTrees(arena: std.mem.Allocator, path: []const u8, files: *const M
     for (monos.items, 0..) |r, k| {
         if (k != 0) try w.writeByte(',');
         try w.writeAll("{\"file\":");
-        try unityz.managed_trees.writeJsonString(w, r.file);
+        try writeJsonString(w, r.file);
         try w.print(",\"path_id\":{d},\"class\":", .{r.path_id});
         const full_name = if (r.namespace.len != 0)
             try std.fmt.allocPrint(arena, "{s}.{s}", .{ r.namespace, r.class_name })
         else
             r.class_name;
-        try unityz.managed_trees.writeJsonString(w, full_name);
+        try writeJsonString(w, full_name);
         try w.writeByte('}');
     }
     try w.writeAll("]}\n");
