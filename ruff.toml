@@ -8,6 +8,13 @@
 # no `from __future__ import annotations`), so 3.10 is the real floor.
 target-version = "py310"
 
+# The same version CI runs (`pipx run ruff==0.16.1`, .github/workflows/ci.yml).
+# The pin in the workflow only binds the runner: a local `ruff check scripts`
+# would otherwise enforce whatever version happens to be installed, which is a
+# different rule set from the blocking one. Stated here, a mismatched ruff says
+# so instead of reporting a green or red tree CI will not reproduce.
+required-version = "0.16.1"
+
 [lint]
 # Every rule group the tree already passes, on rather than off: the default set
 # is pyflakes plus a slice of pycodestyle, which leaves bugbear, the

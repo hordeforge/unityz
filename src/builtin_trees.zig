@@ -261,6 +261,25 @@ test "decode rejects a corrupt database" {
     try std.testing.expectError(error.Corrupt, db.tree(a, 28));
 }
 
+test "the embedded databases match the digests recorded in NOTICE" {
+    // Each .bin is a repack of an upstream StructsDump fetched over the
+    // network (scripts/structsdump-to-builtin.py records the procedure) and
+    // it travels inside every released binary. Nothing else in the tree
+    // pins its bytes: a refresh from a moved upstream ref, a truncated
+    // download or the checkin normalization .gitattributes guards against
+    // all change the shipped layout table without a diagnostic. Pinning the
+    // digest makes any such change fail here, so refreshing a release means
+    // updating its line below on purpose.
+    const digests = [table.len][]const u8{
+        "6e1a6f760832a3740f9637275845e6102d8a0de36a536f12f0508fb6f743c4c2", // 2022.3.62f2
+    };
+    for (table, digests) |r, expected| {
+        var got: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(r.data, &got, .{});
+        try std.testing.expectEqualStrings(expected, &std.fmt.bytesToHex(got, .lower));
+    }
+}
+
 fn hasChild(node: typetree.Node, name: []const u8) bool {
     for (node.children) |c| if (std.mem.eql(u8, c.name, name)) return true;
     return false;

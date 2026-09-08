@@ -15,6 +15,12 @@ To add or refresh a release:
 then add the release to the table in `src/builtin_trees.zig`. The output is
 deterministic for a given dump.
 
+The dump is fetched from a moving branch and carries no checksum, so the
+packed file is what gets pinned: record its `shasum -a 256` in NOTICE and in
+the digest test in `src/builtin_trees.zig`, both of which name the release.
+The test fails until they agree, which is the intended prompt to check that
+the new bytes are the ones you meant to ship.
+
 Layout (all integers little-endian):
 
     magic "UZBT", u8 format (1), u8 release length, release bytes

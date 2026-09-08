@@ -142,6 +142,13 @@ the MIT License:
 The table itself is encoder-generated data (Vorbis codebook and mode
 configuration packets) extracted from FMOD-produced FSB5 banks; it contains
 no audio content.
+
+The shipped bytes are pinned by digest, and a test in src/vorbis.zig
+recomputes it, so the blob the offset table indexes cannot change unnoticed:
+
+  src/vorbis_headers.bin
+    sha256  8e2cffdcfbfbee2a0f555bded2b169a45f3d009b2b0978a86614eccb7d4987fe
+    size    621095 bytes
 ================================================================================
 
 ================================================================================
@@ -157,6 +164,17 @@ scripts/structsdump-to-builtin.py, whose header records the exact source
 path and the command used. No AssetRipper source code is vendored here --
 only the dumped layout table, re-encoded into this project's own binary
 format.
+
+The shipped bytes are pinned by digest, because the dump is fetched from a
+moving upstream branch and carries no checksum of its own:
+
+  src/builtin_trees/2022.3.62f2.bin
+    sha256  6e1a6f760832a3740f9637275845e6102d8a0de36a536f12f0508fb6f743c4c2
+    size    425875 bytes
+
+A test in src/builtin_trees.zig recomputes that digest, so the shipped table
+can be traced to a known repack and refreshing a release means updating both
+the file and the line above deliberately.
 
 The content is Unity's own engine-class field layout metadata (per node:
 type name, field name, nesting level, version, byte size and serializer

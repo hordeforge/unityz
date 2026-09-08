@@ -522,3 +522,17 @@ test "ogg stream page framing" {
     try std.testing.expectEqual(@as(u8, 0x04), p1[5]); // EOS
     try std.testing.expectEqual(@as(i64, 200), std.mem.readInt(i64, p1[6..14], .little));
 }
+
+test "the embedded setup-header table matches the digest recorded in NOTICE" {
+    // The table is derived from Fmod5Sharp's vorbis_headers_converted.json
+    // and ships inside every released binary, paired with the offsets in
+    // vorbis_headers_index.zig. Neither file pins the other, so a
+    // regenerated or partially written blob would silently hand the offsets
+    // different bytes; the digest makes that fail here instead.
+    var got: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(blob, &got, .{});
+    try std.testing.expectEqualStrings(
+        "8e2cffdcfbfbee2a0f555bded2b169a45f3d009b2b0978a86614eccb7d4987fe",
+        &std.fmt.bytesToHex(got, .lower),
+    );
+}
