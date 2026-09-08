@@ -905,6 +905,31 @@ pub fn isMonoBehaviour(arena: std.mem.Allocator, td: TypeDef, type_defs: []const
     return false;
 }
 
+/// Same as `isMonoBehaviour`, but resolves each base-chain step through a
+/// name index built once by the caller. Callers testing every definition
+/// in an assembly must use this one: the scan above compares against
+/// `fullName`, which allocates a name per candidate, so testing N
+/// definitions costs N*N comparisons and N*N names left in the arena.
+pub fn isMonoBehaviourIndexed(
+    td: TypeDef,
+    type_defs: []const TypeDef,
+    index: *const std.StringHashMapUnmanaged(u32),
+) bool {
+    var seen: usize = 0;
+    var current: ?TypeDef = td;
+    while (current) |c| {
+        if (seen > 64) return false; // cycle guard
+        seen += 1;
+        const base = c.base_name orelse return false;
+        if (std.mem.eql(u8, base, "MonoBehaviour") or std.mem.endsWith(u8, base, ".MonoBehaviour")) return true;
+        // `indexTypeDefs` keeps the first definition per name, so this
+        // resolves to what the forward scan above would have found.
+        const idx = index.get(base) orelse return false;
+        current = type_defs[idx];
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

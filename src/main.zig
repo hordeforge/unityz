@@ -2854,6 +2854,66 @@ fn writeFileToCwd(name: []const u8, contents: []const u8) !void {
     try file.writeStreamingAll(io, contents);
 }
 
+/// Memoizes the path-id index the per-object lookups resolve through.
+/// Every caller looks up one referenced object at a time, and the lookup
+/// used to scan `sf.objects` linearly: a SkinnedMeshRenderer walks its
+/// whole bone list at two lookups per bone, so one rig in a scene file
+/// paid `bones x objects` comparisons and the renderer loop paid that per
+/// renderer, while a `diff` resolving every changed object paid one scan
+/// per object on each side. The key is the arena plus the exact `objects`
+/// slice, so a different file - or the same slice under a different arena
+/// - never reuses an index whose memory is gone. Four slots, like
+/// `serialized_cache`: both sides of a comparison plus the node a
+/// bundle's objects resolve through.
+const ObjectIndexSlot = struct {
+    allocator: ?std.mem.Allocator = null,
+    ptr: [*]const unityz.serialized.ObjectInfo = undefined,
+    len: usize = 0,
+    map: std.AutoHashMapUnmanaged(i64, usize) = .empty,
+};
+var object_index_cache = [_]ObjectIndexSlot{.{}} ** 4;
+var object_index_cache_next: usize = 0;
+
+/// The object `path_id` names, at most one index build per (arena,
+/// objects slice). Falls back to the scan when the index cannot be
+/// allocated, so a failure costs speed and not a wrong answer.
+fn objectByPathId(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    path_id: i64,
+) ?*const unityz.serialized.ObjectInfo {
+    if (sf.objects.len == 0) return null;
+    for (&object_index_cache) |*slot| {
+        const a = slot.allocator orelse continue;
+        if (a.ptr != arena.ptr or a.vtable != arena.vtable) continue;
+        if (slot.ptr != sf.objects.ptr or slot.len != sf.objects.len) continue;
+        const i = slot.map.get(path_id) orelse return null;
+        return &sf.objects[i];
+    }
+    var map: std.AutoHashMapUnmanaged(i64, usize) = .empty;
+    map.ensureTotalCapacity(arena, @intCast(sf.objects.len)) catch {
+        // Scan instead: first match wins, as the index does.
+        for (sf.objects) |*o| {
+            if (o.path_id == path_id) return o;
+        }
+        return null;
+    };
+    // First entry wins, matching the first-match semantics of the scan.
+    for (sf.objects, 0..) |*o, i| {
+        const gop = map.getOrPutAssumeCapacity(o.path_id);
+        if (!gop.found_existing) gop.value_ptr.* = i;
+    }
+    object_index_cache[object_index_cache_next] = .{
+        .allocator = arena,
+        .ptr = sf.objects.ptr,
+        .len = sf.objects.len,
+        .map = map,
+    };
+    object_index_cache_next = (object_index_cache_next + 1) % object_index_cache.len;
+    const i = map.get(path_id) orelse return null;
+    return &sf.objects[i];
+}
+
 /// Reads and type-tree-decodes another object of the same file, or null.
 fn readObjectValue(
     arena: std.mem.Allocator,
@@ -2862,8 +2922,7 @@ fn readObjectValue(
     own_basename: []const u8,
     injected: ?*const InjectedTrees,
 ) ?unityz.value.Value {
-    for (sf.objects) |*other| {
-        if (other.path_id != path_id) continue;
+    if (objectByPathId(arena, sf, path_id)) |other| {
         const ti = other.type_index orelse return null;
         if (ti >= sf.types.len) return null;
         const od = sf.objectData(other) orelse return null;
@@ -5102,10 +5161,20 @@ fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writ
         return;
     };
     try stdout.print("objects by id:\n", .{});
+    // Whenever m_Name is not the root's first field, `objectName` falls
+    // back to decoding the whole object, and that decode used to land in
+    // `arena`, which spans the entire listing: naming every object of a
+    // large container held every one of those trees at once. The name is
+    // consumed inside the iteration, so a scratch arena reset per object
+    // bounds the peak by the largest single object.
+    var name_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer name_arena_state.deinit();
+    const name_arena = name_arena_state.allocator();
     for (sf.objects) |*o| {
+        defer _ = name_arena_state.reset(.retain_capacity);
         const name = className(o.class_id) orelse "Class";
         try stdout.print("  {d}  {s} (class {d})  start {d}  size {d}", .{ o.path_id, name, o.class_id, o.byte_start, o.byte_size });
-        const nm = objectName(arena, &sf, o);
+        const nm = objectName(name_arena, &sf, o);
         if (nm.len != 0) try stdout.print("  \"{s}\"", .{nm});
         try stdout.writeByte('\n');
     }
@@ -5124,7 +5193,12 @@ fn dumpObjectTableJson(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
         failure("unityz: {s}: node parse failed: {s}\n", .{ node orelse "<input>", @errorName(err) });
         return;
     };
+    // Bounded per object, for the reason `dumpObjectTable` gives.
+    var name_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer name_arena_state.deinit();
+    const name_arena = name_arena_state.allocator();
     for (sf.objects) |*o| {
+        defer _ = name_arena_state.reset(.retain_capacity);
         if (!first.*) try stdout.writeByte(',');
         first.* = false;
         try stdout.writeByte('{');
@@ -5134,7 +5208,7 @@ fn dumpObjectTableJson(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
             try stdout.writeByte(',');
         }
         try stdout.print("\"path_id\":{d},\"class\":{d},\"offset\":{d},\"size\":{d}", .{ o.path_id, o.class_id, o.byte_start, o.byte_size });
-        const nm = objectName(arena, &sf, o);
+        const nm = objectName(name_arena, &sf, o);
         if (nm.len != 0) {
             try stdout.writeAll(",\"name\":");
             try writeJsonString(stdout, std.mem.trimEnd(u8, nm, "\x00"));
@@ -6586,6 +6660,10 @@ fn dropCachedFor(allocator: std.mem.Allocator) void {
         const a = slot.allocator orelse continue;
         if (a.ptr == allocator.ptr and a.vtable == allocator.vtable) slot.* = .{};
     }
+    for (&object_index_cache) |*slot| {
+        const a = slot.allocator orelse continue;
+        if (a.ptr == allocator.ptr and a.vtable == allocator.vtable) slot.* = .{};
+    }
 }
 
 /// Resolves an AudioClip object's stream data from a file (container-aware,
@@ -6619,9 +6697,8 @@ fn findObjectStream(arena: std.mem.Allocator, bytes: []const u8, fa: Fp) !?[]con
 
 fn findAudioStreamInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, sidecars: []const Sidecar) !?[]const u8 {
     const sf = serializedCached(arena, bytes) catch return null;
-    const o = for (sf.objects) |*oo| {
-        if (oo.class_id == 83 and oo.path_id == path_id) break oo;
-    } else return null;
+    const o = objectByPathId(arena, sf, path_id) orelse return null;
+    if (o.class_id != 83) return null;
     const data = sf.objectData(o) orelse return null;
     const ti = o.type_index orelse return null;
     if (ti >= sf.types.len) return null;
@@ -6829,9 +6906,7 @@ fn findObjectValue(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, own_base
 
 fn findObjectValueInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, own_basename: []const u8, injected: ?*const InjectedTrees) !?unityz.value.Value {
     const sf = serializedCached(arena, bytes) catch return null;
-    const o = for (sf.objects) |*oo| {
-        if (oo.path_id == path_id) break oo;
-    } else return null;
+    const o = objectByPathId(arena, sf, path_id) orelse return null;
     const data = sf.objectData(o) orelse return null;
     const ti = o.type_index orelse return null;
     if (ti >= sf.types.len) return null;
@@ -6995,9 +7070,8 @@ fn findObjectRgbaInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_
         .texture => 28,
         .sprite => 213,
     };
-    const o = for (sf.objects) |*oo| {
-        if (oo.class_id == want and oo.path_id == path_id) break oo;
-    } else return null;
+    const o = objectByPathId(arena, sf, path_id) orelse return null;
+    if (o.class_id != want) return null;
     const data = sf.objectData(o) orelse return null;
     const ti = o.type_index orelse return null;
     if (ti >= sf.types.len) return null;
@@ -9818,10 +9892,15 @@ fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             failure("unityz: {s}: {s}\n", .{ fname, @errorName(err) });
             continue;
         };
-        // collect MonoBehaviour subclasses
+        // collect MonoBehaviour subclasses, resolving every base chain
+        // through one name index: the unindexed test scans the whole
+        // definition list per chain step and allocates a full name per
+        // candidate, so an assembly with tens of thousands of definitions
+        // spent quadratic time and left a quadratic arena behind.
+        const type_index = try unityz.dotnet.indexTypeDefs(arena, assembly.type_defs);
         var scripts: std.ArrayList(unityz.dotnet.TypeDef) = .empty;
         for (assembly.type_defs) |td| {
-            if (unityz.dotnet.isMonoBehaviour(arena, td, assembly.type_defs)) try scripts.append(arena, td);
+            if (unityz.dotnet.isMonoBehaviourIndexed(td, assembly.type_defs, &type_index)) try scripts.append(arena, td);
         }
         if (scripts.items.len == 0) {
             if (json) {
