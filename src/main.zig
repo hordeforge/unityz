@@ -5755,6 +5755,11 @@ fn writeShaderRecordJson(rec: unityz.shader.DecodedRecord, stdout: *Io.Writer) !
     try stdout.writeAll("}");
 }
 
+/// One shader's cached skinning verdict: its display name and whether it
+/// skins. Absent from the cache means undecided; a cached null means the
+/// shader was reached and could not be decided.
+const ShaderSkinVerdict = struct { name: []const u8, skins: bool };
+
 /// Writes the decoded sub-program blob of a Shader as a JSON object.
 fn writeShaderBlobJson(sb: unityz.shader.ShaderBlob, stdout: *Io.Writer) !void {
     try stdout.print("{{\"name\":", .{});
@@ -5831,6 +5836,13 @@ fn skinSerializedBytes(
     // A SkinnedMeshRenderer only renders if its shader skins. Resolve
     // renderer -> materials -> shader (same-file references only) and flag a
     // shader that is deterministically non-skinning.
+    // Renderers share materials and materials share shaders, so the same
+    // shader is reached many times over. Deciding it costs a full object
+    // decode plus `skinInfo`, which decompresses the platform blob; keyed
+    // by path id, that work now happens once per shader instead of once
+    // per reference. Null caches "no verdict" so a shader that cannot be
+    // decided is not retried either.
+    var verdicts: std.AutoHashMapUnmanaged(i64, ?ShaderSkinVerdict) = .empty;
     for (sf.objects) |*o| {
         if (o.class_id != 137) continue;
         const rv = shaderObjectValue(arena, &sf, o, own_name, injected) orelse continue;
@@ -5845,10 +5857,19 @@ fn skinSerializedBytes(
             const mv = readObjectValue(arena, &sf, mp.path_id, "", null) orelse continue;
             const sp = unityz.classes.pptrField(mv, "m_Shader") orelse continue;
             if (sp.file_id != 0 or sp.path_id == 0) continue;
-            const sv = readObjectValue(arena, &sf, sp.path_id, "", null) orelse continue;
-            const sname = shaderDisplayName(sv);
-            const info = (try unityz.shader.skinInfo(arena, sv)) orelse continue; // unknown -> no verdict
-            if (!info.skins) {
+            const verdict = (if (verdicts.get(sp.path_id)) |cached| cached else blk: {
+                const fresh: ?ShaderSkinVerdict = decide: {
+                    const sv = readObjectValue(arena, &sf, sp.path_id, "", null) orelse break :decide null;
+                    const sname = shaderDisplayName(sv);
+                    // unknown -> no verdict
+                    const info = (try unityz.shader.skinInfo(arena, sv)) orelse break :decide null;
+                    break :decide .{ .name = sname, .skins = info.skins };
+                };
+                try verdicts.put(arena, sp.path_id, fresh);
+                break :blk fresh;
+            }) orelse continue;
+            const sname = verdict.name;
+            if (!verdict.skins) {
                 try failures.append(arena, .{
                     .node = node,
                     .path_id = sp.path_id,
@@ -7833,13 +7854,23 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
 /// With injected trees, counts a file's MonoBehaviours by their resolved
 /// script class name (the script the m_Script PPtr points at).
 fn statsScripts(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, injected: *const InjectedTrees, own_basename: []const u8, counts: *std.StringHashMapUnmanaged(usize)) void {
+    // A whole script value tree is decoded per MonoBehaviour, and all that
+    // survives is the class name — which `injected` owns, not the decode.
+    // Holding those trees in `arena`, which spans every object of every
+    // node, made peak memory the sum of the file's decoded MonoBehaviours;
+    // a scratch arena reset per object bounds it by the largest one.
+    // `counts` stays on `arena`: it outlives the loop.
+    var obj_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer obj_arena_state.deinit();
+    const obj_arena = obj_arena_state.allocator();
     for (sf.objects) |*o| {
+        defer _ = obj_arena_state.reset(.retain_capacity);
         if (o.class_id != 114) continue;
         const data = sf.objectData(o) orelse continue;
-        if (injectedTreeFor(arena, injected, sf, own_basename, 114, data)) |tree| {
+        if (injectedTreeFor(obj_arena, injected, sf, own_basename, 114, data)) |tree| {
             var r = unityz.streams.Reader.init(data);
             r.endian = sf.endian;
-            const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+            const v = unityz.object_reader.readObject(obj_arena, &r, &tree.roots[0]) catch continue;
             const script = unityz.classes.pptrField(v, "m_Script") orelse continue;
             const cls = injectedScriptClass(injected, sf, own_basename, script) orelse continue;
             const gop = counts.getOrPut(arena, cls) catch continue;
@@ -9387,10 +9418,14 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
         if (unity_version.len == 0) unity_version = sf.unity_version;
         for (sf.types, 0..) |t, ti| {
             if (t.type_tree.roots.len == 0) continue;
-            const flat = try flattenTree(arena, &t.type_tree);
+            // Flatten only once the tree is known to be new. Every member
+            // redeclares the common classes, so flattening up front copied
+            // each of those trees once per serialized node and discarded
+            // all but the first - arena the run never gets back.
             if (t.class_id != 114) {
                 const name = className(t.class_id) orelse try std.fmt.allocPrint(arena, "Class{d}", .{t.class_id});
                 if (class_trees.contains(name)) continue;
+                const flat = try flattenTree(arena, &t.type_tree);
                 try class_trees.put(arena, name, try unityz.managed_trees.nodesToJson(arena, flat));
                 try class_ids.put(arena, name, t.class_id);
                 continue;
@@ -9412,6 +9447,7 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
                 continue;
             };
             if (script_trees.contains(cls.class)) continue;
+            const flat = try flattenTree(arena, &t.type_tree);
             try script_trees.put(arena, cls.class, try unityz.managed_trees.nodesToJson(arena, flat));
             try monoscripts.append(arena, cls);
         }
@@ -9957,6 +9993,15 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
         if (!gop.found_existing) gop.value_ptr.* = o.class_id;
     }
     for (sf.objects) |*o| {
+        // Only Transform, GameObject and SkinnedMeshRenderer contribute to
+        // the hierarchy. Decoding the rest built a full value tree in
+        // `arena` for every object in the file and dropped it at the
+        // switch's `else`, so a scene paid its whole decoded size in
+        // memory to read three classes.
+        switch (o.class_id) {
+            1, 4, 137 => {},
+            else => continue,
+        }
         const data = sf.objectData(o) orelse continue;
         const ti = o.type_index orelse continue;
         if (ti >= sf.types.len) continue;

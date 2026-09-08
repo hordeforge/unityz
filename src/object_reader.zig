@@ -180,12 +180,19 @@ fn readNode(
     // remaining data stops corrupt files from triggering huge allocations
     // or effectively-infinite loops
     if (n > r.remaining()) return error.Corrupt;
-    const element_is_primitive = element_node.children.len == 0 and primitiveKind(element_node.type_name) != null;
+    // Resolved once: `primitiveKind` walks a chain of up to 22 name
+    // comparisons, and "float" sits near its end. Re-asking per element
+    // made a mesh's vertex or index array pay that walk hundreds of
+    // thousands of times for an answer fixed by the element node.
+    const element_prim: ?Primitive = if (element_node.children.len == 0)
+        primitiveKind(element_node.type_name)
+    else
+        null;
 
     // Arrays of 1-byte integers (char / UInt8 / SInt8) coalesce into a raw
     // byte string, matching UnityPy's read_u_byte_array — far more compact
     // than one value per byte (e.g. a mesh index buffer).
-    if (element_is_primitive and isByteKind(primitiveKind(element_node.type_name).?)) {
+    if (element_prim != null and isByteKind(element_prim.?)) {
         const raw = try r.readSlice(n);
         const aligns = nodeAligned(node) or nodeAligned(array_node) or nodeAligned(element_node);
         if (!suppress_align and aligns) try r.alignTo4();
@@ -195,10 +202,10 @@ fn readNode(
     var items: []value.Value = undefined;
     if (n != 0) {
         items = allocator.alloc(value.Value, n) catch return error.OutOfMemory;
-        if (element_is_primitive) {
+        if (element_prim) |prim| {
             // Contiguous run of scalars.
             for (items) |*item| {
-                item.* = try readPrimitive(r, primitiveKind(element_node.type_name).?);
+                item.* = try readPrimitive(r, prim);
             }
         } else {
             const suppress_element = nodeAligned(element_node);
