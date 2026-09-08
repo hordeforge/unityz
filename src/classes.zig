@@ -2015,8 +2015,8 @@ pub const MonoScript = struct {
     /// Best available script name (`Namespace` when set, else the class
     /// name), with the trailing NUL Unity's string fields carry trimmed.
     pub fn fullName(self: MonoScript) []const u8 {
-        const ns = std.mem.trimEnd(u8, self.namespace, "\x00");
-        const cn = std.mem.trimEnd(u8, self.class_name, "\x00");
+        const ns = streams.trimNul(self.namespace);
+        const cn = streams.trimNul(self.class_name);
         return if (ns.len != 0) ns else cn;
     }
 };

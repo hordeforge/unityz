@@ -1072,6 +1072,20 @@ const Sidecar = struct { path: []const u8, data: []const u8 };
 /// so identical path ids in different nodes do not collide).
 const ManifestEntry = struct { path_id: i64, class_id: i32, name: []const u8, subdir: ?[]const u8 = null };
 
+/// Longest `objectFileName` result: both ids at their full signed decimal
+/// width, plus the longest extension it is called with.
+const object_file_name_len = "object_".len + "-9223372036854775808".len +
+    "_class".len + "-2147483648".len + ".json".len;
+
+/// The per-object export file name for `path_id`/`class_id` with extension
+/// `ext` (no dot). `writeManifest` has to name the same files the extractor
+/// wrote, and the raw and JSON export paths name them the same way bar the
+/// extension, so all three format the stem here rather than each repeating
+/// it: a manifest whose `file` disagrees with what landed on disk is silent.
+fn objectFileName(buf: *[object_file_name_len]u8, path_id: i64, class_id: i32, ext: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "object_{d}_class{d}.{s}", .{ path_id, class_id, ext });
+}
+
 /// One consolidated MonoScript registry entry (`scripts.json`): the script
 /// metadata plus the payload reference. Replaces one file per script, which
 /// a large game (7DTD alone ships 6,500) turns into thousands of tiny JSON
@@ -1106,15 +1120,15 @@ fn writeScriptsJson(arena: std.mem.Allocator, entries: []const ScriptEntry, stdo
     for (entries, 0..) |e, i| {
         if (i != 0) try w.writeByte(',');
         try w.print("{{\"path_id\":{d},\"name\":", .{e.path_id});
-        try writeJsonString(w, std.mem.trimEnd(u8, e.name, "\x00"));
+        try writeJsonString(w, unityz.streams.trimNul(e.name));
         try w.print(",\"execution_order\":{d},\"properties_hash\":\"", .{e.execution_order});
         for (e.properties_hash) |b| try w.print("{x:0>2}", .{b});
         try w.writeAll("\",\"class\":");
-        try writeJsonString(w, std.mem.trimEnd(u8, e.class_name, "\x00"));
+        try writeJsonString(w, unityz.streams.trimNul(e.class_name));
         try w.writeAll(",\"namespace\":");
-        try writeJsonString(w, std.mem.trimEnd(u8, e.namespace, "\x00"));
+        try writeJsonString(w, unityz.streams.trimNul(e.namespace));
         try w.writeAll(",\"assembly\":");
-        try writeJsonString(w, std.mem.trimEnd(u8, e.assembly, "\x00"));
+        try writeJsonString(w, unityz.streams.trimNul(e.assembly));
         if (e.script) |sp| {
             try w.print(",\"script\":{{\"file_id\":{d},\"path_id\":{d}}}", .{ sp.file_id, sp.path_id });
         }
@@ -1230,8 +1244,8 @@ fn writeManifest(arena: std.mem.Allocator, entries: []const ManifestEntry, stdou
     for (entries, 0..) |e, i| {
         if (i != 0) try w.writeByte(',');
         try w.print("{{\"path_id\":{d},\"class\":{d},\"file\":", .{ e.path_id, e.class_id });
-        var name_buf: [64]u8 = undefined;
-        const fname = try std.fmt.bufPrint(&name_buf, "object_{d}_class{d}.json", .{ e.path_id, e.class_id });
+        var name_buf: [object_file_name_len]u8 = undefined;
+        const fname = try objectFileName(&name_buf, e.path_id, e.class_id, "json");
         if (e.subdir) |sd| {
             var full_buf: [160]u8 = undefined;
             const full_name = try std.fmt.bufPrint(&full_buf, "{s}/{s}", .{ sd, fname });
@@ -1240,7 +1254,7 @@ fn writeManifest(arena: std.mem.Allocator, entries: []const ManifestEntry, stdou
             try writeJsonString(w, fname);
         }
         try w.print(",\"name\":", .{});
-        try writeJsonString(w, std.mem.trimEnd(u8, e.name, "\x00"));
+        try writeJsonString(w, unityz.streams.trimNul(e.name));
         try w.print("}}", .{});
     }
     try w.print("]}}\n", .{});
@@ -1271,7 +1285,7 @@ fn finalizeSidecar(
 ) !void {
     var name_buf: [160]u8 = undefined;
     const name = sanitizeComponent(if (object_name) |n| blk: {
-        const base = std.mem.trimEnd(u8, n, "\x00");
+        const base = unityz.streams.trimNul(n);
         if (base.len != 0) break :blk try std.fmt.bufPrint(&name_buf, "{s}_{d}_{s}.json", .{ prefix, path_id, base });
         break :blk try std.fmt.bufPrint(&name_buf, "{s}_{d}.json", .{ prefix, path_id });
     } else try std.fmt.bufPrint(&name_buf, "{s}_{d}.json", .{ prefix, path_id }));
@@ -1733,7 +1747,7 @@ fn writeFontFiles(
 ) !void {
     var ext: []const u8 = "ttf";
     if (f.font_data.len >= 4 and std.mem.eql(u8, f.font_data[0..4], "OTTO")) ext = "otf";
-    const base_name = std.mem.trimEnd(u8, f.name, "\x00");
+    const base_name = unityz.streams.trimNul(f.name);
     var name_buf: [160]u8 = undefined;
     const name = sanitizeComponent(if (base_name.len != 0)
         try std.fmt.bufPrint(&name_buf, "font_{d}_{s}.{s}", .{ path_id, base_name, ext })
@@ -1810,7 +1824,7 @@ fn writeComputeShaderFiles(
     extracted: *usize,
     stdout: *Io.Writer,
 ) !void {
-    const base_name = std.mem.trimEnd(u8, cs.name, "\x00");
+    const base_name = unityz.streams.trimNul(cs.name);
     var cs_name_buf: [160]u8 = undefined;
     const cs_base = if (base_name.len != 0)
         try std.fmt.bufPrint(&cs_name_buf, "compute_{d}_{s}", .{ path_id, base_name })
@@ -1860,7 +1874,7 @@ fn computeShaderJson(arena: std.mem.Allocator, path_id: i64, cs: unityz.classes.
             try w.print("],\"uniqueVariants\":{d},\"codeSize\":{d},\"codeFile\":\"{s}_{s}_v{d}.{s}\",\"cbs\":{d},\"textures\":{d},\"inBuffers\":{d},\"outBuffers\":{d}", .{
                 k.unique_variants,
                 k.code.len,
-                std.mem.trimEnd(u8, cs.name, "\x00"),
+                unityz.streams.trimNul(cs.name),
                 k.name,
                 vi,
                 computeCodeExt(k.code),
@@ -1923,8 +1937,8 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
         const data = sf.objectData(o) orelse continue;
         if (raw) {
             // raw mode: dump every object's serialized bytes as-is
-            var name_buf: [128]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buf, "object_{d}_class{d}.bin", .{ o.path_id, o.class_id });
+            var name_buf: [object_file_name_len]u8 = undefined;
+            const name = try objectFileName(&name_buf, o.path_id, o.class_id, "bin");
             try extractFile(subdir, name, data);
             try stdout.print("extracted {s} ({d} bytes)\n", .{ name, data.len });
             extracted += 1;
@@ -2026,8 +2040,8 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
             var aw = std.Io.Writer.Allocating.fromArrayList(arena, &buf);
             try unityz.value.jsonWrite(v, &aw.writer);
             const out = aw.toArrayList();
-            var name_buf: [96]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buf, "object_{d}_class{d}.json", .{ o.path_id, o.class_id });
+            var name_buf: [object_file_name_len]u8 = undefined;
+            const name = try objectFileName(&name_buf, o.path_id, o.class_id, "json");
             try extractFile(subdir, name, out.items);
             try stdout.print("extracted {s} ({d} bytes)\n", .{ name, out.items.len });
             try manifest.append(arena, .{
@@ -2101,7 +2115,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 extracted += 1;
             },
             329 => { // VideoClip -> streamed video file + metadata JSON
-                const clip_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const clip_name = unityz.streams.trimNul(unityz.classes.stringField(v, "m_Name") orelse "");
                 const orig_path = unityz.classes.stringField(v, "m_OriginalPath") orelse "";
                 var stream_path: []const u8 = "";
                 var stream_offset: i64 = 0;
@@ -2164,7 +2178,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 extracted += 1;
             },
             156 => { // TerrainData -> normalized heightmap PGM + metadata JSON
-                const td_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const td_name = unityz.streams.trimNul(unityz.classes.stringField(v, "m_Name") orelse "");
                 const hm = unityz.classes.fieldOf(v, "m_Heightmap") orelse continue;
                 const hv = unityz.classes.fieldOf(hm, "m_Heights") orelse continue;
                 if (hv != .array or hv.array.len == 0) continue;
@@ -2263,7 +2277,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     audio = wav_buf.items;
                 }
                 var name_buf: [128]u8 = undefined;
-                const base_name = std.mem.trimEnd(u8, ac.name, "\x00");
+                const base_name = unityz.streams.trimNul(ac.name);
                 const name = sanitizeComponent(if (base_name.len != 0)
                     try std.fmt.bufPrint(&name_buf, "audio_{d}_{s}.{s}", .{ o.path_id, base_name, ext })
                 else
@@ -2360,7 +2374,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const face_size: usize = @intCast(t.complete_image_size);
                 const faces: usize = @intCast(t.image_count);
                 if (faces == 0 or face_size == 0) continue;
-                const base_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const base_name = unityz.streams.trimNul(unityz.classes.stringField(v, "m_Name") orelse "");
                 var name_buf: [96]u8 = undefined;
                 const base = sanitizeComponent(if (base_name.len != 0)
                     try std.fmt.bufPrint(&name_buf, "cubemap_{d}_{s}", .{ o.path_id, base_name })
@@ -2439,7 +2453,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 };
                 if (obj.len == 0) continue; // unsupported layout, nothing written
                 var name_buf: [160]u8 = undefined;
-                const mesh_name = std.mem.trimEnd(u8, mesh.name, "\x00");
+                const mesh_name = unityz.streams.trimNul(mesh.name);
                 const name = sanitizeComponent(if (mesh_name.len != 0)
                     try std.fmt.bufPrint(&name_buf, "mesh_{d}_{s}.obj", .{ o.path_id, mesh_name })
                 else
@@ -2468,7 +2482,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 // joint from its Transform's GameObject, so the GLB's
                 // skeleton carries real bone names (the per-Mesh export at
                 // class 43 keeps generic Bone0..N joints).
-                const renderer_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const renderer_name = unityz.streams.trimNul(unityz.classes.stringField(v, "m_Name") orelse "");
                 const mesh_path = if (unityz.classes.fieldOf(v, "m_Mesh")) |mv| pptrPathId(mv) orelse null else null;
                 if (mesh_path == null or mesh_path.? == 0) continue;
                 const mval = readObjectValue(arena, &sf, mesh_path.?, basename(path), injected) orelse continue;
@@ -2485,7 +2499,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                                             if (pptrPathId(gv)) |gid| {
                                                 if (gid != 0) {
                                                     if (readObjectValue(arena, &sf, gid, basename(path), injected)) |gov| {
-                                                        nm = std.mem.trimEnd(u8, unityz.classes.stringField(gov, "m_Name") orelse "", "\x00");
+                                                        nm = unityz.streams.trimNul(unityz.classes.stringField(gov, "m_Name") orelse "");
                                                     }
                                                 }
                                             }
@@ -2504,7 +2518,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 };
                 if (g.len != 0) {
                     var name_buf: [192]u8 = undefined;
-                    const base = if (renderer_name.len != 0) renderer_name else std.mem.trimEnd(u8, mesh.name, "\x00");
+                    const base = if (renderer_name.len != 0) renderer_name else unityz.streams.trimNul(mesh.name);
                     const clipped = if (base.len > 140) base[0..140] else base;
                     const full = if (clipped.len != 0)
                         try std.fmt.bufPrint(&name_buf, "character_{d}_{s}.glb", .{ o.path_id, clipped })
@@ -2518,7 +2532,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 }
             },
             74 => { // AnimationClip -> curves JSON
-                const clip_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const clip_name = unityz.streams.trimNul(unityz.classes.stringField(v, "m_Name") orelse "");
                 const legacy = unityz.classes.boolField(v, "m_Legacy") orelse false;
                 const sample_rate: f64 = if (unityz.classes.fieldOf(v, "m_SampleRate")) |sv| sv.asFloat() orelse 0 else 0;
                 var buf: std.ArrayList(u8) = .empty;
@@ -2645,11 +2659,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 if (shd.len == 0) continue;
                 // the top-level m_Name is often empty for built-ins; the
                 // parsed form carries the real one (as in writeShaderText)
-                const top_name = std.mem.trimEnd(u8, fieldStr(v, "m_Name"), "\x00");
+                const top_name = unityz.streams.trimNul(fieldStr(v, "m_Name"));
                 var pf_name: []const u8 = top_name;
                 if (pf_name.len == 0) {
                     if (unityz.classes.fieldOf(v, "m_ParsedForm")) |pf| {
-                        pf_name = std.mem.trimEnd(u8, fieldStr(pf, "m_Name"), "\x00");
+                        pf_name = unityz.streams.trimNul(fieldStr(pf, "m_Name"));
                     }
                 }
                 var name_buf: [192]u8 = undefined;
@@ -2686,7 +2700,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 };
                 const sprite = unityz.classes.Sprite.fromValue(v);
                 var name_buf: [192]u8 = undefined;
-                const sprite_name = std.mem.trimEnd(u8, sprite.name, "\x00");
+                const sprite_name = unityz.streams.trimNul(sprite.name);
                 // raw RGBA has no header, so the name carries the dimensions
                 const name = sanitizeComponent(if (format == .raw)
                     if (sprite_name.len != 0)
@@ -2702,7 +2716,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 extracted += 1;
             },
             687078895 => { // SpriteAtlas -> packed-sprite mapping JSON
-                const atlas_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const atlas_name = unityz.streams.trimNul(unityz.classes.stringField(v, "m_Name") orelse "");
                 const packed_sprites = unityz.classes.fieldOf(v, "m_PackedSprites") orelse continue;
                 const names = unityz.classes.fieldOf(v, "m_PackedSpriteNamesToIndex") orelse continue;
                 if (packed_sprites != .array or names != .array or packed_sprites.array.len != names.array.len) continue;
@@ -2739,7 +2753,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 extracted += 1;
             },
             142 => { // AssetBundle -> asset manifest JSON
-                const ab_name = std.mem.trimEnd(u8, unityz.classes.stringField(v, "m_Name") orelse "", "\x00");
+                const ab_name = unityz.streams.trimNul(unityz.classes.stringField(v, "m_Name") orelse "");
                 const container = unityz.classes.fieldOf(v, "m_Container") orelse continue;
                 if (container != .array) continue;
                 var buf: std.ArrayList(u8) = .empty;
@@ -2795,8 +2809,8 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 // filename uses the qualified name (namespace.class) so
                 // scripts sharing a namespace do not collide; the label
                 // adds the assembly
-                const ms_ns = std.mem.trimEnd(u8, ms.namespace, "\x00");
-                const ms_cn = std.mem.trimEnd(u8, ms.class_name, "\x00");
+                const ms_ns = unityz.streams.trimNul(ms.namespace);
+                const ms_cn = unityz.streams.trimNul(ms.class_name);
                 var qual_buf: [192]u8 = undefined;
                 const qual = if (ms_ns.len != 0)
                     try std.fmt.bufPrint(&qual_buf, "{s}.{s}", .{ ms_ns, ms_cn })
@@ -2811,7 +2825,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 var label_buf: [192]u8 = undefined;
                 const label = try std.fmt.bufPrint(&label_buf, "{s} ({s})", .{
                     qual,
-                    std.mem.trimEnd(u8, ms.assembly, "\x00"),
+                    unityz.streams.trimNul(ms.assembly),
                 });
                 try stdout.print("extracted {s} ({d} bytes) [{s}]\n", .{ fname, payload.len, label });
                 // The decoded managed object graph (the type-tree fields plus
@@ -3836,7 +3850,7 @@ fn writeMeshObj(
     var w: unityz.streams.Writer = .init(arena);
     // UnityPy's OBJ layout: `g` group names (not `o`), per-submesh group
     // lines, and floats with 9 significant digits.
-    const name = std.mem.trimEnd(u8, mesh.name, "\x00");
+    const name = unityz.streams.trimNul(mesh.name);
     try w.print("g {s}\n", .{name});
     for (0..vcount) |i| {
         const x = meshF32(&mv, 0, i, 0, sf.endian) orelse return &.{};
@@ -4197,7 +4211,7 @@ fn writeMeshGlb(
     const wgt_acc = idx_acc + 1;
     const jnt_acc = idx_acc + 2;
     const ib_acc = idx_acc + 3;
-    const name = std.mem.trimEnd(u8, mesh.name, "\x00");
+    const name = unityz.streams.trimNul(mesh.name);
     var jsbuf: std.ArrayList(u8) = .empty;
     var jaw = std.Io.Writer.Allocating.fromArrayList(arena, &jsbuf);
     const js = &jaw.writer;
@@ -4951,7 +4965,7 @@ fn printWebFile(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout
 fn shaderDisplayName(v: unityz.value.Value) []const u8 {
     if (unityz.classes.fieldOf(v, "m_ParsedForm")) |pf| {
         if (unityz.classes.stringField(pf, "m_Name")) |n| {
-            return std.mem.trimEnd(u8, n, "\x00");
+            return unityz.streams.trimNul(n);
         }
     }
     return unityz.classes.stringField(v, "m_Name") orelse "";
@@ -5247,7 +5261,7 @@ fn dumpObjectTableJson(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
         const nm = objectName(name_arena, &sf, o);
         if (nm.len != 0) {
             try stdout.writeAll(",\"name\":");
-            try writeJsonString(stdout, std.mem.trimEnd(u8, nm, "\x00"));
+            try writeJsonString(stdout, unityz.streams.trimNul(nm));
         }
         try stdout.writeByte('}');
     }
@@ -6462,7 +6476,7 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             try stdout.print("\"path_id\":{d},\"hash\":\"{x:0>16}\",\"class\":{d},\"size\":{d}", .{ fp.path_id, fp.hash, fp.class_id, fp.size });
             if (fp.name.len != 0) {
                 try stdout.writeAll(",\"name\":");
-                try writeJsonString(stdout, std.mem.trimEnd(u8, fp.name, "\x00"));
+                try writeJsonString(stdout, unityz.streams.trimNul(fp.name));
             }
             try stdout.writeByte('}');
         }
@@ -7835,7 +7849,7 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                 try stdout.writeByte(',');
             }
             try stdout.print("\"path_id\":{d},\"class\":{d},\"name\":", .{ m.path_id, m.class_id });
-            try writeJsonString(stdout, std.mem.trimEnd(u8, m.name, "\x00"));
+            try writeJsonString(stdout, unityz.streams.trimNul(m.name));
             try stdout.print("}}", .{});
         }
         try stdout.print("]\n", .{});
@@ -7870,7 +7884,7 @@ fn anyStringContains(v: unityz.value.Value, needle: []const u8) bool {
 /// Like `anyStringContains`, but exact whole-string equality.
 fn anyStringEquals(v: unityz.value.Value, needle: []const u8) bool {
     return switch (v) {
-        .string => |s| std.mem.eql(u8, std.mem.trimEnd(u8, s, "\x00"), needle),
+        .string => |s| std.mem.eql(u8, unityz.streams.trimNul(s), needle),
         .array => |arr| blk: {
             for (arr) |item| {
                 if (anyStringEquals(item, needle)) break :blk true;
@@ -7926,7 +7940,7 @@ fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
                 // exact, case-sensitive whole-name match (names may carry
                 // trailing NULs); --any extends the match to every string
                 // value in the tree
-                const name_eq = std.mem.eql(u8, std.mem.trimEnd(u8, name, "\x00"), needle);
+                const name_eq = std.mem.eql(u8, unityz.streams.trimNul(name), needle);
                 if (!name_eq and !(any and anyStringEquals(v, needle))) continue;
             } else {
                 const name_has = std.ascii.indexOfIgnoreCase(name, needle) != null;
@@ -7942,9 +7956,9 @@ fn findSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
         } else {
             const cname = className(o.class_id) orelse "Class";
             if (node) |nd| {
-                try stdout.print("  object {d}  {s} (class {d})  \"{s}\"  in {s}\n", .{ o.path_id, cname, o.class_id, std.mem.trimEnd(u8, name, "\x00"), nd });
+                try stdout.print("  object {d}  {s} (class {d})  \"{s}\"  in {s}\n", .{ o.path_id, cname, o.class_id, unityz.streams.trimNul(name), nd });
             } else {
-                try stdout.print("  object {d}  {s} (class {d})  \"{s}\"\n", .{ o.path_id, cname, o.class_id, std.mem.trimEnd(u8, name, "\x00") });
+                try stdout.print("  object {d}  {s} (class {d})  \"{s}\"\n", .{ o.path_id, cname, o.class_id, unityz.streams.trimNul(name) });
             }
         }
         matches += 1;

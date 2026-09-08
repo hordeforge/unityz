@@ -27,22 +27,39 @@ pub fn pcm16LeBytes(allocator: std.mem.Allocator, pcm: []const i16) Error![]u8 {
 /// Wraps interleaved little-endian PCM in a WAV container. `bits` is the
 /// source sample width (16 for decoded FSB5 samples; the raw AudioClip
 /// path passes its own width).
+///
+/// Every header field this writes is a fixed-width RIFF field, so the
+/// caller owes it arguments whose derived products still fit: `36 +
+/// pcm.len` and the byte rate in u32, the block align in u16. Those are
+/// clip-supplied values upstream, and the caller that reads them from a
+/// file (`wavPcm16` in the CLI) rejects the out-of-range ones as an
+/// operating error. Reaching here with one is therefore a caller bug, and
+/// the products are computed in u64 and asserted rather than left to wrap
+/// a u32 into a plausible-looking but wrong header.
 pub fn encode(allocator: std.mem.Allocator, pcm: []const u8, channels: u16, rate: u32, bits: u16) Error![]u8 {
-    var wav_buf: std.ArrayList(u8) = .empty;
+    const riff_size = 36 + @as(u64, pcm.len);
+    const byte_rate = @as(u64, rate) * channels * bits / 8;
+    const block_align = @as(u64, channels) * bits / 8;
+    std.debug.assert(riff_size <= std.math.maxInt(u32));
+    std.debug.assert(byte_rate <= std.math.maxInt(u32));
+    std.debug.assert(block_align <= std.math.maxInt(u16));
+
     var hdr: [header_len]u8 = undefined;
     @memcpy(hdr[0..4], "RIFF");
-    std.mem.writeInt(u32, hdr[4..8], @as(u32, @intCast(36 + pcm.len)), .little);
+    std.mem.writeInt(u32, hdr[4..8], @intCast(riff_size), .little);
     @memcpy(hdr[8..12], "WAVE");
     @memcpy(hdr[12..16], "fmt ");
     std.mem.writeInt(u32, hdr[16..20], 16, .little);
     std.mem.writeInt(u16, hdr[20..22], 1, .little); // PCM
     std.mem.writeInt(u16, hdr[22..24], channels, .little);
     std.mem.writeInt(u32, hdr[24..28], rate, .little);
-    std.mem.writeInt(u32, hdr[28..32], rate * @as(u32, channels) * @as(u32, bits) / 8, .little);
-    std.mem.writeInt(u16, hdr[32..34], @intCast(@as(u32, channels) * @as(u32, bits) / 8), .little);
+    std.mem.writeInt(u32, hdr[28..32], @intCast(byte_rate), .little);
+    std.mem.writeInt(u16, hdr[32..34], @intCast(block_align), .little);
     std.mem.writeInt(u16, hdr[34..36], bits, .little);
     @memcpy(hdr[36..40], "data");
-    std.mem.writeInt(u32, hdr[40..44], @as(u32, @intCast(pcm.len)), .little);
+    std.mem.writeInt(u32, hdr[40..44], @intCast(pcm.len), .little);
+
+    var wav_buf: std.ArrayList(u8) = .empty;
     try wav_buf.appendSlice(allocator, &hdr);
     try wav_buf.appendSlice(allocator, pcm);
     return wav_buf.items;
