@@ -8120,8 +8120,13 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, in
         },
         .serialized => {
             try collectStats(arena, bytes, own_basename, class_filter, &classes, &total_objects, &total_bytes, &entries);
-            if (injected) |inj| {
-                const ssf = unityz.serialized.parse(arena, bytes) catch return;
+            // `collectStats` above already reported a parse failure through
+            // `failure`. Returning here as well threw the whole JSON document
+            // away - so `stats --json` on an unparseable file printed nothing
+            // with `--trees` and a zeroed document without it, and the bundle
+            // and webfile branches keep emitting theirs either way.
+            if (injected) |inj| scripts_blk: {
+                const ssf = unityz.serialized.parse(arena, bytes) catch break :scripts_blk;
                 statsScripts(arena, &ssf, inj, own_basename, &scripts);
             }
         },
@@ -9276,7 +9281,13 @@ fn cmdCreate(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
         } else if (std.mem.eql(u8, f.name, "cab")) {
             if (f.value == .string) cab = f.value.string;
         } else if (std.mem.eql(u8, f.name, "platform")) {
-            platform = f.value.asInt() orelse platform;
+            // Falling back to the default here built a bundle for
+            // StandaloneWindows64 and reported success, so a spec that
+            // named its platform as a string got a silently wrong target.
+            platform = f.value.asInt() orelse {
+                failure("unityz: {s}: \"platform\" must be an integer target id\n", .{path});
+                return;
+            };
         } else if (std.mem.eql(u8, f.name, "compression")) {
             const s = if (f.value == .string) f.value.string else "";
             if (std.mem.eql(u8, s, "none")) {
@@ -10084,13 +10095,16 @@ fn buildManagedTrees(arena: std.mem.Allocator, path: []const u8, files: *const M
                 std.mem.startsWith(u8, ename, "level");
             if (!is_serialized) continue;
             const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ scan_dir, ename });
+            // A data file that cannot be read or scanned contributes no
+            // MonoScript mappings, so the trees file silently omits every
+            // script it names. Fail the run, as the assembly loop above does.
             const data = std.Io.Dir.cwd().readFileAlloc(io, full, arena, .unlimited) catch |err| {
-                try stdout.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
+                failure("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 continue;
             };
             if (unityz.container.sniff(data).container != .serialized) continue;
             const found = unityz.managed_trees.scanMonoScripts(arena, data, try arena.dupe(u8, ename)) catch |err| {
-                try stdout.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
+                failure("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 continue;
             };
             for (found) |r| try refs.append(arena, r);

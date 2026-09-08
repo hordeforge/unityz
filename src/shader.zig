@@ -390,15 +390,18 @@ pub fn skinInfo(arena: std.mem.Allocator, v: value.Value) !?SkinInfo {
         const raw = if (off <= data.len) data[off..@min(rec_end, data.len)] else continue;
         if (raw.len < 8) continue;
         const param_blob = parseParameterBlob(arena, data, off) catch continue;
-        // top-level bindings first
+        // Swallowing an append failure here dropped a bone binding, which
+        // flips `skins` to false and reports the shader as non-skinning -
+        // an allocation failure must not read back as a fact about the file.
+        // Top-level bindings first.
         for (param_blob.bindings) |b| {
-            if (isBoneMatrixName(b.name)) appendUniqueStr(arena, &bone_bindings, b.name) catch {};
+            if (isBoneMatrixName(b.name)) try appendUniqueStr(arena, &bone_bindings, b.name);
         }
         for (param_blob.cbuffer_names) |cb| {
-            if (isBoneMatrixName(cb)) appendUniqueStr(arena, &bone_bindings, cb) catch {};
+            if (isBoneMatrixName(cb)) try appendUniqueStr(arena, &bone_bindings, cb);
         }
         for (param_blob.members) |m| {
-            if (isBoneMatrixName(m.name)) appendUniqueStr(arena, &bone_bindings, m.name) catch {};
+            if (isBoneMatrixName(m.name)) try appendUniqueStr(arena, &bone_bindings, m.name);
         }
     }
 
