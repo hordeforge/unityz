@@ -1520,9 +1520,14 @@ fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.Serial
 /// field), so each is range-checked in u64 here rather than cast blind on
 /// the way into the encoder.
 fn wavPcm16(arena: std.mem.Allocator, pcm: []const u8, channels: u32, rate: u32, bits: u32) ![]u8 {
+    // `channels` and `bits` are bounded first: `rate * channels * bits`
+    // overruns even u64 when all three are near 0xffffffff (a clip claiming
+    // 0xffffffff channels at 0xffffffff bits and 0xffffffff Hz), which traps
+    // in a safe build before either check below can reject it. Once both are
+    // u16-sized the u64 product cannot overflow.
+    if (channels > std.math.maxInt(u16) or bits > std.math.maxInt(u16)) return error.WavFieldOverflow;
     const block_align = @as(u64, channels) * bits / 8;
     const byte_rate = @as(u64, rate) * channels * bits / 8;
-    if (channels > std.math.maxInt(u16) or bits > std.math.maxInt(u16)) return error.WavFieldOverflow;
     if (block_align > std.math.maxInt(u16) or byte_rate > std.math.maxInt(u32)) return error.WavFieldOverflow;
     if (pcm.len > std.math.maxInt(u32) - 36) return error.WavFieldOverflow;
     return unityz.wav.encode(arena, pcm, @intCast(channels), rate, @intCast(bits));
