@@ -1474,25 +1474,26 @@ const AtlasHit = struct {
     settings_raw: u32 = 0,
 };
 
-/// Compares two m_RenderDataKey values: `[Hash128, int]` where Hash128 is
-/// an object with `data[0..3]` u32 fields.
-fn renderDataKeyEq(a: unityz.value.Value, b: unityz.value.Value) bool {
-    if (a != .array or b != .array) return false;
-    if (a.array.len != 2 or b.array.len != 2) return false;
-    const ha = a.array[0];
-    const hb = b.array[0];
-    if (ha != .obj or hb != .obj) return false;
-    // This runs once per m_RenderDataMap entry per sprite, so the field
-    // names are spelled out rather than formatted on each comparison.
+/// An m_RenderDataKey reduced to a hashable tuple: `[Hash128, int]` where
+/// Hash128 is an object with `data[0..3]` u32 fields. Two keys match
+/// exactly when their tuples compare equal.
+const RenderDataKey = struct { data: [4]?i64, index: ?i64 };
+
+/// The tuple form of one m_RenderDataKey value, or null when the value does
+/// not have that shape (which never matches another key).
+fn renderDataKeyOf(v: unityz.value.Value) ?RenderDataKey {
+    if (v != .array or v.array.len != 2) return null;
+    const h = v.array[0];
+    if (h != .obj) return null;
+    // The field names are spelled out rather than formatted, so building a
+    // key costs no allocation.
     const data_fields = [_][]const u8{ "data[0]", "data[1]", "data[2]", "data[3]" };
-    for (data_fields) |fname| {
-        const fa = unityz.classes.fieldOf(ha, fname) orelse return false;
-        const fb = unityz.classes.fieldOf(hb, fname) orelse return false;
-        if (fa.asInt() != fb.asInt()) return false;
+    var key = RenderDataKey{ .data = @splat(null), .index = v.array[1].asInt() };
+    for (data_fields, 0..) |fname, i| {
+        const f = unityz.classes.fieldOf(h, fname) orelse return null;
+        key.data[i] = f.asInt();
     }
-    const ia = a.array[1];
-    const ib = b.array[1];
-    return ia.asInt() == ib.asInt();
+    return key;
 }
 
 /// Reads the `texture` PPtr (and its textureRect) out of one
@@ -1529,6 +1530,19 @@ fn atlasEntryHit(entry: unityz.value.Value) ?AtlasHit {
 const SpriteCache = struct {
     textures: std.AutoHashMapUnmanaged(i64, ?DecodedTexture) = .empty,
     atlases: ?[]const unityz.value.Value = null,
+    indexes: ?[]const AtlasIndex = null,
+    index_failed: bool = false,
+};
+
+/// One SpriteAtlas's m_RenderDataMap, indexed both ways a sprite can be
+/// resolved against it. Built once per atlas instead of rescanned per
+/// sprite: an atlas packs one map entry per sprite it holds, so the linear
+/// scans this replaces made resolving a whole atlas quadratic in its
+/// sprite count, with four name-keyed field lookups per pair.
+const AtlasIndex = struct {
+    rdm: []const unityz.value.Value,
+    by_key: std.AutoHashMapUnmanaged(RenderDataKey, usize) = .empty,
+    by_packed: std.AutoHashMapUnmanaged(i64, usize) = .empty,
 };
 
 /// Parses the file's SpriteAtlas objects once, memoized in `cache`.
@@ -1557,24 +1571,58 @@ fn atlasValues(arena: std.mem.Allocator, sf: *const unityz.serialized.Serialized
 /// m_PackedSprites with m_RenderDataMap by position.
 fn atlasTextureFor(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, cache: *SpriteCache, sprite_value: unityz.value.Value, sprite_path_id: i64) ?AtlasHit {
     const sprite_key = unityz.classes.fieldOf(sprite_value, "m_RenderDataKey");
-    for (atlasValues(arena, sf, cache)) |v| {
-        const rdm = unityz.classes.fieldOf(v, "m_RenderDataMap") orelse continue;
-        if (rdm != .array) continue;
-        if (sprite_key) |sk| {
-            for (rdm.array) |entry| {
-                if (entry != .array or entry.array.len < 2) continue;
-                if (renderDataKeyEq(sk, entry.array[0])) return atlasEntryHit(entry);
-            }
+    const wanted: ?RenderDataKey = if (sprite_key) |sk| renderDataKeyOf(sk) else null;
+    for (atlasIndexes(arena, sf, cache)) |*ix| {
+        if (wanted) |k| {
+            if (ix.by_key.get(k)) |i| return atlasEntryHit(ix.rdm[i]);
         }
         // key mismatch or absent: fall back to positional alignment
-        const packed_sprites = unityz.classes.fieldOf(v, "m_PackedSprites") orelse continue;
-        if (packed_sprites != .array or packed_sprites.array.len != rdm.array.len) continue;
-        for (packed_sprites.array, 0..) |item, i| {
-            if (item != .pptr or item.pptr.path_id != sprite_path_id) continue;
-            return atlasEntryHit(rdm.array[i]);
-        }
+        if (ix.by_packed.get(sprite_path_id)) |i| return atlasEntryHit(ix.rdm[i]);
     }
     return null;
+}
+
+/// Indexes every SpriteAtlas's m_RenderDataMap once, memoized in `cache`.
+/// Empty when the index cannot be built, which leaves the sprite
+/// unresolved rather than resolving it against a half-filled index.
+fn atlasIndexes(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, cache: *SpriteCache) []const AtlasIndex {
+    if (cache.indexes) |ix| return ix;
+    if (cache.index_failed) return &.{};
+    var list: std.ArrayList(AtlasIndex) = .empty;
+    buildAtlasIndexes(arena, atlasValues(arena, sf, cache), &list) catch {
+        cache.index_failed = true;
+        return &.{};
+    };
+    cache.indexes = list.items;
+    return list.items;
+}
+
+/// Fills `list` with one index per SpriteAtlas that carries an
+/// m_RenderDataMap, in the order the atlases were parsed.
+fn buildAtlasIndexes(arena: std.mem.Allocator, values: []const unityz.value.Value, list: *std.ArrayList(AtlasIndex)) !void {
+    for (values) |v| {
+        const rdm = unityz.classes.fieldOf(v, "m_RenderDataMap") orelse continue;
+        if (rdm != .array) continue;
+        var ix = AtlasIndex{ .rdm = rdm.array };
+        for (rdm.array, 0..) |entry, i| {
+            if (entry != .array or entry.array.len < 2) continue;
+            const k = renderDataKeyOf(entry.array[0]) orelse continue;
+            // First entry wins, matching the scan that stopped at the
+            // first match.
+            const slot = try ix.by_key.getOrPut(arena, k);
+            if (!slot.found_existing) slot.value_ptr.* = i;
+        }
+        blk: {
+            const packed_sprites = unityz.classes.fieldOf(v, "m_PackedSprites") orelse break :blk;
+            if (packed_sprites != .array or packed_sprites.array.len != rdm.array.len) break :blk;
+            for (packed_sprites.array, 0..) |item, i| {
+                if (item != .pptr) continue;
+                const slot = try ix.by_packed.getOrPut(arena, item.pptr.path_id);
+                if (!slot.found_existing) slot.value_ptr.* = i;
+            }
+        }
+        try list.append(arena, ix);
+    }
 }
 
 /// Range-checks a clip's own header fields, then wraps interleaved

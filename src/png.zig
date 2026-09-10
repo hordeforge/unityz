@@ -107,27 +107,47 @@ fn filterRow(f: u8, cur: []const u8, prev: []const u8, out: []u8) void {
 }
 
 fn filterRowWith(comptime f: u8, cur: []const u8, prev: []const u8, out: []u8) void {
-    const stride = cur.len;
-    std.debug.assert(out.len >= stride);
+    std.debug.assert(out.len >= cur.len);
     if (f == 0) {
-        @memcpy(out[0..stride], cur);
+        @memcpy(out[0..cur.len], cur);
         return;
     }
     // Row 0 has no row above it; PNG defines the missing bytes as zero.
-    const has_prev = prev.len != 0;
+    // Whether there is one is fixed for the whole row, so it is resolved
+    // here instead of being retested per byte.
+    if (prev.len != 0) filterRowKnown(f, true, cur, prev, out) else filterRowKnown(f, false, cur, prev, out);
+}
+
+/// One filter over one scanline with both row-invariant conditions - the
+/// filter and whether a previous row exists - known at compile time. The
+/// leading pixel, whose left and upper-left neighbours are the zeroes PNG
+/// defines off the row's start, is peeled off so the body carries no
+/// per-byte branch at all and the compiler can vectorize it.
+fn filterRowKnown(comptime f: u8, comptime has_prev: bool, cur: []const u8, prev: []const u8, out: []u8) void {
+    const stride = cur.len;
+    const head = @min(stride, 4);
     var i: usize = 0;
-    while (i < stride) : (i += 1) {
-        const x = cur[i];
-        const a: i32 = if (i >= 4) cur[i - 4] else 0; // left
+    while (i < head) : (i += 1) {
         const b: i32 = if (has_prev) prev[i] else 0; // above
-        const c: i32 = if (has_prev and i >= 4) prev[i - 4] else 0; // upper-left
+        const pred: i32 = switch (f) {
+            1 => 0, // Sub, left is off the row
+            2 => b, // Up
+            3 => @divTrunc(b, 2), // Average
+            else => paeth(0, b, 0), // Paeth
+        };
+        out[i] = cur[i] -% @as(u8, @truncate(@as(u32, @bitCast(pred))));
+    }
+    while (i < stride) : (i += 1) {
+        const a: i32 = cur[i - 4]; // left
+        const b: i32 = if (has_prev) prev[i] else 0; // above
+        const c: i32 = if (has_prev) prev[i - 4] else 0; // upper-left
         const pred: i32 = switch (f) {
             1 => a, // Sub
             2 => b, // Up
             3 => @divTrunc(a + b, 2), // Average
             else => paeth(a, b, c), // Paeth
         };
-        out[i] = x -% @as(u8, @truncate(@as(u32, @bitCast(pred))));
+        out[i] = cur[i] -% @as(u8, @truncate(@as(u32, @bitCast(pred))));
     }
 }
 
