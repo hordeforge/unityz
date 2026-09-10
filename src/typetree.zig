@@ -355,14 +355,24 @@ pub fn getCommonString(offset: u32) ?[]const u8 {
     return null;
 }
 
-/// Inverse of `getCommonString`: the offset of `name` in the common table.
-pub fn commonStringOffset(name: []const u8) ?u32 {
+/// Name -> offset over `common_strings`, built at compile time. The table
+/// has ~180 entries and both blob writing and legacy parsing ask it twice
+/// per node, so the linear `mem.eql` walk it replaces was the dominant
+/// cost of emitting a large tree.
+const common_string_offsets = std.StaticStringMap(u32).initComptime(blk: {
+    @setEvalBranchQuota(20000);
+    var pairs: [common_strings.len]struct { []const u8, u32 } = undefined;
     var cum: u32 = 0;
-    for (common_strings) |s| {
-        if (std.mem.eql(u8, s, name)) return cum;
+    for (common_strings, 0..) |s, i| {
+        pairs[i] = .{ s, cum };
         cum += @as(u32, @intCast(s.len)) + 1;
     }
-    return null;
+    break :blk pairs;
+});
+
+/// Inverse of `getCommonString`: the offset of `name` in the common table.
+pub fn commonStringOffset(name: []const u8) ?u32 {
+    return common_string_offsets.get(name);
 }
 
 test "common string offsets are cumulative and resolvable" {
@@ -651,17 +661,17 @@ pub fn writeBlob(w: *streams.Writer, tree: *const TypeTree, format_version: u32)
     var nodes: streams.Writer = .init(w.allocator);
     defer nodes.deinit();
     nodes.endian = w.endian;
-    var strings: streams.Writer = .init(w.allocator);
+    var strings: BlobStrings = .{ .buf = .init(w.allocator) };
     defer strings.deinit();
     var count: usize = 0;
     for (tree.roots) |*root| try writeBlobNodeRec(&nodes, &strings, root, 0, with_hash, &count);
     try w.writeInt(i32, @intCast(count));
-    try w.writeInt(i32, @intCast(strings.getWritten().len));
+    try w.writeInt(i32, @intCast(strings.buf.getWritten().len));
     try w.writeBytes(nodes.getWritten());
-    try w.writeBytes(strings.getWritten());
+    try w.writeBytes(strings.buf.getWritten());
 }
 
-fn writeBlobNodeRec(nodes: *streams.Writer, strings: *streams.Writer, node: *const Node, level: u32, with_hash: bool, count: *usize) WriteError!void {
+fn writeBlobNodeRec(nodes: *streams.Writer, strings: *BlobStrings, node: *const Node, level: u32, with_hash: bool, count: *usize) WriteError!void {
     if (level > max_depth) return error.TooDeep;
     try nodes.writeInt(i16, @intCast(node.version));
     try nodes.writeByte(@intCast(level));
@@ -677,20 +687,30 @@ fn writeBlobNodeRec(nodes: *streams.Writer, strings: *streams.Writer, node: *con
     for (node.children) |*c| try writeBlobNodeRec(nodes, strings, c, level + 1, with_hash, count);
 }
 
+/// The blob's local NUL-separated string buffer, plus the offset each
+/// string already occupies in it. Without the map, deduplicating a name
+/// meant rescanning the whole buffer, so emitting a tree cost
+/// O(nodes x buffer bytes) - a few thousand nodes over a few kilobytes of
+/// names is millions of byte comparisons per tree, once per type.
+const BlobStrings = struct {
+    buf: streams.Writer,
+    offsets: std.StringHashMapUnmanaged(u32) = .empty,
+
+    fn deinit(self: *BlobStrings) void {
+        self.offsets.deinit(self.buf.allocator);
+        self.buf.deinit();
+    }
+};
+
 /// The common-table offset when `s` is a common string, else its offset in
 /// the local buffer (appended on first use; duplicates are reused).
-fn blobStringOffset(strings: *streams.Writer, s: []const u8) WriteError!u32 {
+fn blobStringOffset(strings: *BlobStrings, s: []const u8) WriteError!u32 {
     if (commonStringOffset(s)) |off| return common_string_flag | off;
-    const buf = strings.getWritten();
-    var pos: usize = 0;
-    while (pos < buf.len) {
-        const end = std.mem.indexOfScalarPos(u8, buf, pos, 0) orelse buf.len;
-        if (std.mem.eql(u8, buf[pos..end], s)) return @intCast(pos);
-        pos = end + 1;
-    }
-    const off: u32 = @intCast(buf.len);
-    try strings.writeBytes(s);
-    try strings.writeByte(0);
+    if (strings.offsets.get(s)) |off| return off;
+    const off: u32 = @intCast(strings.buf.getWritten().len);
+    try strings.buf.writeBytes(s);
+    try strings.buf.writeByte(0);
+    strings.offsets.put(strings.buf.allocator, s, off) catch return error.OutOfMemory;
     return off;
 }
 

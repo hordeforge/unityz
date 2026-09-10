@@ -389,8 +389,21 @@ pub fn className(class_id: i32) ?[]const u8 {
         .{ .id = 2083778819, .name = "LocalizationAsset" },
         .{ .id = 2089858483, .name = "ScriptedImporter" },
     };
-    for (names) |n| {
-        if (n.id == class_id) return n.name;
+    // The table is kept in ascending id order (asserted at compile time),
+    // so the lookup binary-searches it. The linear walk it replaces read
+    // half of an 8 KB table on average, and extract/stats/diff ask for a
+    // name once per object - tens of thousands of times over one file.
+    comptime {
+        for (names[1..], 1..) |n, i| {
+            if (n.id <= names[i - 1].id) @compileError("class name table must be sorted by ascending id: " ++ n.name);
+        }
+    }
+    var lo: usize = 0;
+    var hi: usize = names.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (names[mid].id == class_id) return names[mid].name;
+        if (names[mid].id < class_id) lo = mid + 1 else hi = mid;
     }
     return null;
 }

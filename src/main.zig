@@ -9623,6 +9623,28 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     for (members.items) |m| {
         const sf = &m.sf;
         if (unity_version.len == 0) unity_version = sf.unity_version;
+        // Objects bucketed by type index, as a singly linked chain per
+        // type. The MonoBehaviour lookup below wants the objects of one
+        // type, and scanning the whole object table for each of them is
+        // quadratic: a player build declares one type per script, so a
+        // file with hundreds of scripts and tens of thousands of objects
+        // walked the table hundreds of times. Built back-to-front so each
+        // chain comes out in ascending object order, keeping the
+        // first-match-wins result the scan produced.
+        const no_object = sf.objects.len;
+        const type_first = try arena.alloc(usize, sf.types.len);
+        @memset(type_first, no_object);
+        const type_next = try arena.alloc(usize, sf.objects.len);
+        {
+            var oi = sf.objects.len;
+            while (oi > 0) {
+                oi -= 1;
+                const oti = sf.objects[oi].type_index orelse continue;
+                if (oti >= sf.types.len) continue;
+                type_next[oi] = type_first[oti];
+                type_first[oti] = oi;
+            }
+        }
         for (sf.types, 0..) |t, ti| {
             if (t.type_tree.roots.len == 0) continue;
             // Flatten only once the tree is known to be new. Every member
@@ -9638,18 +9660,21 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
                 continue;
             }
             // A script tree: find an object using it and follow m_Script.
-            const cls = for (sf.objects) |*o| {
-                if (o.class_id != 114 or (o.type_index orelse continue) != ti) continue;
-                const data = sf.objectData(o) orelse continue;
-                var r = unityz.streams.Reader.init(data);
-                r.endian = sf.endian;
-                const v = unityz.object_reader.readObject(arena, &r, &t.type_tree.roots[0]) catch continue;
-                const ptr = unityz.classes.pptrField(v, "m_Script") orelse continue;
-                const fname = if (ptr.file_id == 0) m.name else if (ptr.file_id > 0 and @as(usize, @intCast(ptr.file_id - 1)) < sf.externals.len) basename(sf.externals[@intCast(ptr.file_id - 1)].path) else continue;
-                var key_buf: [1024]u8 = undefined;
-                const key = std.fmt.bufPrint(&key_buf, "{s}:{d}", .{ fname, ptr.path_id }) catch continue;
-                if (scripts.get(key)) |c| break Mono{ .class = c, .file = fname, .path_id = ptr.path_id };
-            } else {
+            const cls = found: {
+                var oi = type_first[ti];
+                while (oi != no_object) : (oi = type_next[oi]) {
+                    const o = &sf.objects[oi];
+                    if (o.class_id != 114) continue;
+                    const data = sf.objectData(o) orelse continue;
+                    var r = unityz.streams.Reader.init(data);
+                    r.endian = sf.endian;
+                    const v = unityz.object_reader.readObject(arena, &r, &t.type_tree.roots[0]) catch continue;
+                    const ptr = unityz.classes.pptrField(v, "m_Script") orelse continue;
+                    const fname = if (ptr.file_id == 0) m.name else if (ptr.file_id > 0 and @as(usize, @intCast(ptr.file_id - 1)) < sf.externals.len) basename(sf.externals[@intCast(ptr.file_id - 1)].path) else continue;
+                    var key_buf: [1024]u8 = undefined;
+                    const key = std.fmt.bufPrint(&key_buf, "{s}:{d}", .{ fname, ptr.path_id }) catch continue;
+                    if (scripts.get(key)) |c| break :found Mono{ .class = c, .file = fname, .path_id = ptr.path_id };
+                }
                 unresolved += 1;
                 continue;
             };

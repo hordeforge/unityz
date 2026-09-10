@@ -250,8 +250,13 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!Serial
     var legacy_types: LegacyTypeIndex = .empty;
     defer legacy_types.deinit(allocator);
     if (version < 16) legacy_types = try buildLegacyTypeIndex(allocator, types);
+    // Format 16 falls back to a `(class_id, stripped)` lookup whenever an
+    // object's stored type index is out of range; index that table too.
+    var stripped_types: StrippedTypeIndex = .empty;
+    defer stripped_types.deinit(allocator);
+    if (version == 16) stripped_types = try buildStrippedTypeIndex(allocator, types);
     for (objects) |*o| {
-        o.* = try readObjectInfo(&mr, version, uses_big_ids, data_offset, file_size, types, &legacy_types);
+        o.* = try readObjectInfo(&mr, version, uses_big_ids, data_offset, file_size, types, &legacy_types, &stripped_types);
     }
     const after_objects_offset = mr.position();
 
@@ -388,6 +393,7 @@ fn readObjectInfo(
     file_size: u64,
     types: []SerializedType,
     legacy_types: *const LegacyTypeIndex,
+    stripped_types: *const StrippedTypeIndex,
 ) ParseError!ObjectInfo {
     const path_id: i64 = switch (version) {
         2...6 => try r.readInt(i32),
@@ -426,17 +432,11 @@ fn readObjectInfo(
             class_id = types[@intCast(raw)].class_id;
             type_index = @intCast(raw);
         } else {
-            // fall back to a type-ID lookup keyed by (class_id, stripped)
-            var match: ?usize = null;
-            for (types, 0..) |*t, i| {
-                if (t.class_id == raw and t.is_stripped == stripped) {
-                    if (match != null) return error.Corrupt; // ambiguous
-                    match = i;
-                }
-            }
-            const idx = match orelse return error.Corrupt;
+            // fall back to a type-ID lookup keyed by (class_id, stripped),
+            // through the index built once per file
+            const idx = try resolveStrippedTypeIndex(stripped_types, raw, stripped);
             class_id = types[idx].class_id;
-            type_index = @intCast(idx);
+            type_index = idx;
         }
     } else {
         const index = try r.readInt(u32);
@@ -506,6 +506,39 @@ fn buildLegacyTypeIndex(allocator: std.mem.Allocator, types: []SerializedType) e
 /// type matches; ambiguous matches are an error.
 fn resolveLegacyTypeIndex(index: *const LegacyTypeIndex, type_id: i32) ParseError!?u32 {
     const slot = index.get(type_id) orelse return null;
+    if (slot.count != 1) return error.Corrupt;
+    return slot.index;
+}
+
+/// Format 16's fallback lookup key: an out-of-range type index there names
+/// a type by class ID *and* stripped flag, not by class ID alone.
+const StrippedTypeKey = struct { class_id: i32, stripped: bool };
+const StrippedTypeIndex = std.AutoHashMapUnmanaged(StrippedTypeKey, LegacyTypeSlot);
+
+/// Indexes the type table by `(class_id, is_stripped)`, for the same
+/// reason `buildLegacyTypeIndex` exists: both tables are bounded only by
+/// the metadata size, so a per-object scan is quadratic in the file's own
+/// declared counts, and a crafted format-16 file whose object type indices
+/// are all out of range takes that scan on every object.
+fn buildStrippedTypeIndex(allocator: std.mem.Allocator, types: []SerializedType) error{OutOfMemory}!StrippedTypeIndex {
+    var map: StrippedTypeIndex = .empty;
+    errdefer map.deinit(allocator);
+    try map.ensureTotalCapacity(allocator, @intCast(types.len));
+    for (types, 0..) |*t, i| {
+        const gop = map.getOrPutAssumeCapacity(.{ .class_id = t.class_id, .stripped = t.is_stripped });
+        if (gop.found_existing) {
+            gop.value_ptr.count += 1;
+        } else {
+            gop.value_ptr.* = .{ .index = @intCast(i), .count = 1 };
+        }
+    }
+    return map;
+}
+
+/// The unique type matching `(class_id, stripped)`. Absent and ambiguous
+/// both stay `Corrupt`, as the linear scan reported them.
+fn resolveStrippedTypeIndex(index: *const StrippedTypeIndex, class_id: i32, stripped: bool) ParseError!u32 {
+    const slot = index.get(.{ .class_id = class_id, .stripped = stripped }) orelse return error.Corrupt;
     if (slot.count != 1) return error.Corrupt;
     return slot.index;
 }

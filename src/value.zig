@@ -170,23 +170,30 @@ pub fn jsonWrite(v: Value, writer: anytype) !void {
 /// of that round trip.
 pub fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
+    // Bytes needing no escape go out as whole runs. A JSON export writes
+    // every string of every object, and the byte-at-a-time loop this
+    // replaces made that one writer call per character where a run is one
+    // copy - the difference shows on the long ones (shader source, a
+    // TextAsset body), which are exactly the strings with no escapes.
+    var run_start: usize = 0;
+    var hex_buf: [8]u8 = undefined;
+    for (s, 0..) |c, i| {
+        const esc: []const u8 = switch (c) {
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            '\n' => "\\n",
+            '\r' => "\\r",
+            '\t' => "\\t",
             // remaining C0 controls and DEL: \uXXXX (Unity strings often
             // carry trailing NULs, e.g. MonoScript class names)
-            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => {
-                var buf: [8]u8 = undefined;
-                const hex = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c}) catch unreachable;
-                try writer.writeAll(hex);
-            },
-            else => try writer.writeByte(c),
-        }
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{c}) catch unreachable,
+            else => continue,
+        };
+        if (i > run_start) try writer.writeAll(s[run_start..i]);
+        try writer.writeAll(esc);
+        run_start = i + 1;
     }
+    if (run_start < s.len) try writer.writeAll(s[run_start..]);
     try writer.writeByte('"');
 }
 
@@ -236,7 +243,19 @@ fn jsonParseValue(text: []const u8, pos: *usize, depth: u32, allocator: std.mem.
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(allocator);
         while (pos.* < text.len and text[pos.*] != '"') {
-            if (text[pos.*] == '\\') {
+            if (text[pos.*] != '\\') {
+                // Copy the whole unescaped run in one go. A spec's string
+                // values carry whole assets (shader source, a TextAsset's
+                // body), and appending those a byte at a time made parsing
+                // them a per-byte capacity check instead of a memcpy.
+                const start = pos.*;
+                var end = start;
+                while (end < text.len and text[end] != '"' and text[end] != '\\') end += 1;
+                try out.appendSlice(allocator, text[start..end]);
+                pos.* = end;
+                continue;
+            }
+            {
                 pos.* += 1;
                 if (pos.* >= text.len) return error.BadEscape;
                 // Decode the escape rather than keeping the escaped byte:
@@ -271,8 +290,6 @@ fn jsonParseValue(text: []const u8, pos: *usize, depth: u32, allocator: std.mem.
                     },
                     else => return error.BadEscape,
                 }
-            } else {
-                try out.append(allocator, text[pos.*]);
             }
             pos.* += 1;
         }

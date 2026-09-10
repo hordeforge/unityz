@@ -55,20 +55,39 @@ pub const Primitive = enum {
     f64,
 };
 
+/// Wire type name -> primitive kind. Every node the reader touches asks
+/// this question, and array elements ask it once per element, so the walk
+/// of 22 sequential name comparisons it replaces - with "float" near the
+/// end and a record's type name falling off the end entirely - was paid
+/// hundreds of thousands of times on one mesh.
+const primitive_names = std.StaticStringMap(Primitive).initComptime(.{
+    .{ "bool", .bool },
+    .{ "SInt8", .i8 },
+    .{ "UInt8", .u8 },
+    .{ "char", .u8 },
+    .{ "SInt16", .i16 },
+    .{ "short", .i16 },
+    .{ "UInt16", .u16 },
+    .{ "unsigned short", .u16 },
+    .{ "ushort", .u16 },
+    .{ "SInt32", .i32 },
+    .{ "int", .i32 },
+    .{ "EntityId", .i32 },
+    .{ "UInt32", .u32 },
+    .{ "unsigned int", .u32 },
+    .{ "uint", .u32 },
+    .{ "Type*", .u32 },
+    .{ "SInt64", .i64 },
+    .{ "long long", .i64 },
+    .{ "UInt64", .u64 },
+    .{ "unsigned long long", .u64 },
+    .{ "FileSize", .u64 },
+    .{ "float", .f32 },
+    .{ "double", .f64 },
+});
+
 pub fn primitiveKind(type_name: []const u8) ?Primitive {
-    const eql = std.mem.eql;
-    if (eql(u8, type_name, "bool")) return .bool;
-    if (eql(u8, type_name, "SInt8")) return .i8;
-    if (eql(u8, type_name, "UInt8") or eql(u8, type_name, "char")) return .u8;
-    if (eql(u8, type_name, "SInt16") or eql(u8, type_name, "short")) return .i16;
-    if (eql(u8, type_name, "UInt16") or eql(u8, type_name, "unsigned short") or eql(u8, type_name, "ushort")) return .u16;
-    if (eql(u8, type_name, "SInt32") or eql(u8, type_name, "int") or eql(u8, type_name, "EntityId")) return .i32;
-    if (eql(u8, type_name, "UInt32") or eql(u8, type_name, "unsigned int") or eql(u8, type_name, "uint") or eql(u8, type_name, "Type*")) return .u32;
-    if (eql(u8, type_name, "SInt64") or eql(u8, type_name, "long long")) return .i64;
-    if (eql(u8, type_name, "UInt64") or eql(u8, type_name, "unsigned long long") or eql(u8, type_name, "FileSize")) return .u64;
-    if (eql(u8, type_name, "float")) return .f32;
-    if (eql(u8, type_name, "double")) return .f64;
-    return null;
+    return primitive_names.get(type_name);
 }
 
 pub fn isPPtrType(type_name: []const u8) bool {
