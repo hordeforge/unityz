@@ -643,28 +643,31 @@ fn loadTrees(arena: std.mem.Allocator, trees_path: ?[]const u8, stdout: *Io.Writ
 }
 
 /// Reads and parses a `--trees` file into an InjectedTrees table (arena
-/// owned). Prints a diagnostic and returns null when the file is unreadable
-/// or contains no class trees.
+/// owned). Prints a diagnostic, marks the run failed and returns null when the
+/// file is unreadable or contains no class trees: the caller asked for those
+/// trees, so decoding without them is not the success it would otherwise look
+/// like on stdout. `create` already fails the same way on the same file, and
+/// the run keeps going so a directory batch still reports its other files.
 fn parseInjectedTrees(arena: std.mem.Allocator, path: []const u8, stdout: *Io.Writer) !?*const InjectedTrees {
     const io = io_global.io;
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch |err| {
-        diagnostic("unityz: {s}: cannot read trees file: {s}\n", .{ path, @errorName(err) });
+        failure("unityz: {s}: cannot read trees file: {s}\n", .{ path, @errorName(err) });
         return null;
     };
     const v = parseJsonLiteralAlloc(arena, text) catch |err| {
-        diagnostic("unityz: {s}: bad trees JSON: {s}\n", .{ path, @errorName(err) });
+        failure("unityz: {s}: bad trees JSON: {s}\n", .{ path, @errorName(err) });
         return null;
     };
     const fields = switch (v) {
         .obj => |f| f,
         else => {
-            diagnostic("unityz: {s}: trees file must be a JSON object\n", .{path});
+            failure("unityz: {s}: trees file must be a JSON object\n", .{path});
             return null;
         },
     };
     const out = try buildInjectedTrees(arena, fields, stdout);
     if (out.trees.count() == 0 and out.script_trees.count() == 0) {
-        diagnostic("unityz: {s}: trees file has no class trees\n", .{path});
+        failure("unityz: {s}: trees file has no class trees\n", .{path});
         return null;
     }
     const tp = try arena.create(InjectedTrees);
@@ -7643,6 +7646,10 @@ fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64
     };
     for (sf.objects) |*o| {
         if (o.path_id != path_id) continue;
+        // `shader` selects Shaders only, `--raw` included: a hex dump of some
+        // other class is not "a Shader's blob table", and reporting it as one
+        // would make `shader <id> --raw` succeed on any object.
+        if (shader_only and o.class_id != 48) return .not_found;
         if (raw) {
             const data = sf.objectData(o) orelse {
                 try stdout.print("object {d}: serialized data range is invalid\n", .{o.path_id});
@@ -7652,7 +7659,6 @@ fn showSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, path_id: i64
             try dumpHex(data, stdout);
             return .shown;
         }
-        if (shader_only and o.class_id != 48) return .not_found;
         const type_index = o.type_index orelse {
             try stdout.print("object {d}: missing type index\n", .{o.path_id});
             return .failed;
