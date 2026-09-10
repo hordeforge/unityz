@@ -400,7 +400,18 @@ pub fn main(init: std.process.Init) !void {
         } else false;
         var it = dir.iterate();
         while (try it.next(io)) |entry| {
-            defer _ = batch_arena_state.reset(.retain_capacity);
+            defer {
+                // Every arena the memoizing lookups parse into is created
+                // and destroyed inside `runCommand`, at the same stack
+                // address on every iteration, so the arena half of a cache
+                // key repeats across files. A slot left behind would match
+                // the next file whose parse lands at the same address with
+                // the same length and hand it the previous file's output,
+                // already freed. `dropCachedFor` cannot do it here: the
+                // arenas to name are gone by the time control returns.
+                dropAllCached();
+                _ = batch_arena_state.reset(.retain_capacity);
+            }
             if (entry.kind != .file) continue;
             const full = try std.fmt.allocPrint(batch_arena, "{s}/{s}", .{ path, entry.name });
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, full, batch_arena, .unlimited) catch |err| {
@@ -6652,6 +6663,17 @@ fn dropCachedFor(allocator: std.mem.Allocator) void {
         const a = slot.allocator orelse continue;
         if (a.ptr == allocator.ptr and a.vtable == allocator.vtable) slot.* = .{};
     }
+}
+
+/// Forgets every cache slot regardless of which arena it was keyed to,
+/// for the caller that cannot name the arenas because they are already
+/// destroyed - batch mode, where each file's `runCommand` builds and
+/// tears down its own arenas. Nothing legitimately carries over between
+/// two files, so the only cost is re-parsing the next one.
+fn dropAllCached() void {
+    for (&container_cache) |*slot| slot.* = .{};
+    for (&serialized_cache) |*slot| slot.* = .{};
+    for (&object_index_cache) |*slot| slot.* = .{};
 }
 
 /// Resolves an AudioClip object's stream data from a file (container-aware,

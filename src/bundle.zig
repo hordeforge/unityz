@@ -349,7 +349,18 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
 
     // Concatenate the decompressed blocks into one stream.
     var total: usize = 0;
-    for (blocks) |b| total += b.uncompressed_size;
+    var compressed_total: usize = 0;
+    for (blocks) |b| {
+        total += b.uncompressed_size;
+        compressed_total += b.compressed_size;
+    }
+    // The per-block bounds check below only runs once `stream` is already
+    // sized, so a truncated file declaring a million gigabyte-sized blocks
+    // would reserve the whole declared size before the first block is
+    // rejected. Every block's compressed bytes have to be present in the
+    // file, so require that first and keep the allocation proportional to
+    // the input, the way `readCount` bounds the serialized-file tables.
+    if (compressed_total > data.len - block_data_offset) return error.ShortData;
     const stream = try allocator.alloc(u8, total);
     errdefer allocator.free(stream);
 
