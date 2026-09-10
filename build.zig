@@ -85,8 +85,11 @@ pub fn build(b: *std.Build) void {
     // The single exclusion covers one vendored construct: the prefix-coding
     // table copy in `lzham_prefix_coding.h` memcpies a non-trivially
     // copyable type, which clang's `-Wnontrivial-memcall` (on via `-Wall`)
-    // rejects. It is scoped to the vendored translation units; the
-    // hand-written `lzham_shim.cpp` below compiles with no exclusion at all.
+    // rejects. It is scoped to the three translation units that instantiate
+    // that copy rather than applied across the vendored set: the other nine
+    // compile clean with no exclusion at all, and blanketing them would
+    // silence a future `nontrivial-memcall` introduced anywhere in the
+    // decoder. The hand-written `lzham_shim.cpp` below is likewise unexcluded.
     lzham_lib.root_module.addIncludePath(b.path("src/vendor/lzham"));
     const lzham_flags = [_][]const u8{
         "-DNDEBUG",
@@ -99,25 +102,30 @@ pub fn build(b: *std.Build) void {
         "src/vendor/lzham/lzham_assert.cpp",
         "src/vendor/lzham/lzham_checksum.cpp",
         "src/vendor/lzham/lzham_huffman_codes.cpp",
-        "src/vendor/lzham/lzham_lzdecomp.cpp",
         "src/vendor/lzham/lzham_lzdecompbase.cpp",
         "src/vendor/lzham/lzham_mem.cpp",
         "src/vendor/lzham/lzham_platform.cpp",
         "src/vendor/lzham/lzham_polar_codes.cpp",
-        "src/vendor/lzham/lzham_prefix_coding.cpp",
-        "src/vendor/lzham/lzham_symbol_codec.cpp",
         "src/vendor/lzham/lzham_timer.cpp",
         "src/vendor/lzham/lzham_vector.cpp",
+        "src/vendor/lzham/lzham_shim.cpp",
+    }) |src| {
+        lzham_lib.root_module.addCSourceFile(.{
+            .file = b.path(src),
+            .flags = &lzham_flags,
+        });
+    }
+    // The three that instantiate the prefix-coding table copy.
+    for ([_][]const u8{
+        "src/vendor/lzham/lzham_lzdecomp.cpp",
+        "src/vendor/lzham/lzham_prefix_coding.cpp",
+        "src/vendor/lzham/lzham_symbol_codec.cpp",
     }) |src| {
         lzham_lib.root_module.addCSourceFile(.{
             .file = b.path(src),
             .flags = &(lzham_flags ++ [_][]const u8{"-Wno-nontrivial-memcall"}),
         });
     }
-    lzham_lib.root_module.addCSourceFile(.{
-        .file = b.path("src/vendor/lzham/lzham_shim.cpp"),
-        .flags = &lzham_flags,
-    });
     lib.linkLibrary(lzham_lib);
 
     // CLI, linking the library module.
