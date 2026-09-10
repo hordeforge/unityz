@@ -43,6 +43,11 @@ Objects reserialize byte-exactly (formats 2-22) and can be edited in
 place. All parsers are fuzz-clean across thousands of mutated inputs;
 crashes found by fuzzing were real and shipped with regression tests.
 
+Float fields are bit-cast straight out of the file, so any bit pattern
+reaches the output. A non-finite one (NaN, +/-Inf) is written as JSON
+`null`, because no conforming parser accepts the bare words `nan` and
+`inf`.
+
 `hierarchy --json` returns one object per SerializedFile with `node`,
 `hierarchy`, and `skipped_children`. A Transform child whose Transform or
 GameObject cannot be decoded is counted and omitted; it cannot leave a
@@ -269,9 +274,11 @@ game's own data). Verified on Raft (Unity 2021.3.45f2): 280 of its
 resources.assets meshes decode, 33 of them skinned, and the skinned GLB
 export's rest pose round-trips to ~1e-7 on 100-bone characters.
 
-A missing or malformed trees file prints a diagnostic and continues
-without the trees; a typeless file without `--trees` reports how many
-objects were skipped and why.
+A missing or malformed trees file prints a diagnostic and keeps going
+without the trees, but the run exits 1: the caller asked for those trees,
+so decoding without them is not the success stdout would otherwise
+suggest. A typeless file without `--trees` reports how many objects were
+skipped and why.
 
 ## Built-in engine-class trees (`--builtin`)
 
