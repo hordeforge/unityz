@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+# /// script
+# # Unlike the two generators, nothing here is 3.10-only syntax today, so
+# # this is the linted floor rather than an import-time one: ruff checks
+# # scripts/ at target-version py310 (ruff.toml), so a modernization it
+# # applies to this file may become one. Declared here so `uv run`, which
+# # the usage below calls for, picks an interpreter that satisfies it
+# # instead of whatever it happens to find.
+# requires-python = ">=3.10"
+# ///
 """Merge two unityz --trees JSON files into one, for full typeless coverage.
 
 A Mono build strips the class type trees from its serialized files. unityz
