@@ -661,8 +661,17 @@ pub fn expectedSize(tex_format: i32, width: u32, height: u32) ?usize {
         format.rgba_float => w * h * 16,
         format.bgr24, format.rgb24_signed => w * h * 3,
         format.argb_float => w * h * 16,
-        format.r16, format.r_half, format.r_float, format.r16_signed => w * h * 2,
-        format.rg_half, format.rg_float, format.rg16, format.rg16_signed => w * h * 4,
+        format.r16, format.r_half, format.r16_signed => w * h * 2,
+        // The float pair is 32 bits per channel, not 16: grouping them with
+        // the half/16-bit formats under-reserved them by half, and this size
+        // is the only bound `decode` puts on the input slice before
+        // `copyPixels` reads `stride` bytes per pixel (4 for r_float, 8 for
+        // rg_float). A texture declaring one of them with a payload cut to
+        // the understated size read past the end of the buffer and copied
+        // whatever followed it into the exported image.
+        format.r_float => w * h * 4,
+        format.rg_half, format.rg16, format.rg16_signed => w * h * 4,
+        format.rg_float => w * h * 8,
         format.rgba_half => w * h * 8,
         format.rgb9e5 => w * h * 4,
         format.rg32, format.rg32_signed => w * h * 8,
@@ -3461,6 +3470,18 @@ test "unsupported format and bad size" {
     try std.testing.expectError(error.BadSize, decode(a, format.rgba32, 0xffff_ffff, 0xffff_ffff, "abcdefgh"));
     // Just under the stride bound the size is still computed, not rejected.
     try std.testing.expectEqual(@as(?usize, 4096 * 4096 * 16), expectedSize(format.rgba_float, 4096, 4096));
+
+    // `expectedSize` is the only bound `decode` puts on the input before
+    // `copyPixels` reads `stride` bytes per pixel, so the two must agree
+    // exactly. The 32-bit float pair reads 4 and 8 bytes per pixel; sized
+    // as their 16-bit namesakes they would accept half a payload and read
+    // the rest off the end of the buffer into the exported image.
+    try std.testing.expectEqual(@as(?usize, 8 * 8 * 4), expectedSize(format.r_float, 8, 8));
+    try std.testing.expectEqual(@as(?usize, 8 * 8 * 8), expectedSize(format.rg_float, 8, 8));
+    const half_r_float = [_]u8{0} ** (8 * 8 * 2);
+    try std.testing.expectError(error.BadSize, decode(a, format.r_float, 8, 8, &half_r_float));
+    const half_rg_float = [_]u8{0} ** (8 * 8 * 4);
+    try std.testing.expectError(error.BadSize, decode(a, format.rg_float, 8, 8, &half_rg_float));
 }
 
 const A1Vector = struct {
