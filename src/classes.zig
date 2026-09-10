@@ -408,6 +408,24 @@ pub fn className(class_id: i32) ?[]const u8 {
     return null;
 }
 
+/// Numeric component `index` of a Unity version string, counting from 0:
+/// `unityVersionPart("2022.3.62f2", 0)` is 2022 and `…, 1)` is 3.
+///
+/// Null when the component is absent or is not a plain number — bundles
+/// carry placeholders like `"5.x.x"`, and a serialized file older than
+/// format 7 carries no version at all — so every caller states its own
+/// fallback for an unreadable version instead of inheriting one. This is
+/// the single owner of that parse: the layout predicates below and the
+/// CLI's exporters all read the version through it.
+pub fn unityVersionPart(unity_version: []const u8, index: usize) ?u32 {
+    var parts = std.mem.splitScalar(u8, unity_version, '.');
+    var i: usize = 0;
+    while (parts.next()) |part| : (i += 1) {
+        if (i == index) return std.fmt.parseInt(u32, part, 10) catch null;
+    }
+    return null;
+}
+
 /// The generic variant accessors are owned by `value`; re-exported here so
 /// callers of the typed views keep reaching for one name per field kind.
 pub const fieldOf = value.fieldOf;
@@ -843,8 +861,7 @@ fn skipStringVector(r: *streams.Reader) !void {
 /// ComputeShader gained its variants/kernels layout with Unity 2017;
 /// earlier versions use an older shape we do not attempt.
 fn computeShaderLayoutIsModern(unity_version: []const u8) bool {
-    var parts = std.mem.splitScalar(u8, unity_version, '.');
-    const major = std.fmt.parseInt(u32, parts.next() orelse return true, 10) catch return true;
+    const major = unityVersionPart(unity_version, 0) orelse return true;
     return major >= 2017;
 }
 
@@ -976,8 +993,7 @@ pub const Font = struct {
         // (absent in 5.x and 2017 dumps, present from 2018.4 on); 5.x-era
         // fonts end after m_UseLegacyBoundsCalculation, so reading it
         // unconditionally runs one byte past the object.
-        var parts = std.mem.splitScalar(u8, unity_version, '.');
-        const vmaj = std.fmt.parseInt(u32, parts.next() orelse "2018", 10) catch 2018;
+        const vmaj = unityVersionPart(unity_version, 0) orelse 2018;
         if (vmaj >= 2018) {
             self.should_round_advance_value = (try r.readByte()) != 0;
         }
@@ -1030,11 +1046,10 @@ fn readPPtrArray(allocator: std.mem.Allocator, r: *streams.Reader) ![]const valu
 /// Font layout above applies. Unknown strings (e.g. a bundle's "5.x.x"
 /// placeholder) are treated as modern rather than rejected.
 fn fontLayoutIsModern(unity_version: []const u8) bool {
-    var parts = std.mem.splitScalar(u8, unity_version, '.');
-    const major = std.fmt.parseInt(u32, parts.next() orelse return true, 10) catch return true;
+    const major = unityVersionPart(unity_version, 0) orelse return true;
     if (major > 5) return true;
     if (major < 5) return false;
-    const minor = std.fmt.parseInt(u32, parts.next() orelse return true, 10) catch return true;
+    const minor = unityVersionPart(unity_version, 1) orelse return true;
     return minor >= 5;
 }
 
@@ -2128,30 +2143,43 @@ pub const Mesh = struct {
         return (max_end +| 3) / 4 * 4;
     }
 
-    pub fn fromValue(v: value.Value) Mesh {
-        var m = Mesh{ .name = stringField(v, "m_Name") orelse "" };
-        if (intField(v, "m_IndexFormat")) |f| m.index_format = narrow(i32, f);
-        m.index_buffer = bytesField(v, "m_IndexBuffer") orelse "";
-
-        const vd = fieldOf(v, "m_VertexData") orelse return m;
-        if (intField(vd, "m_VertexCount")) |n| m.vertex_count = narrow(u32, n);
-        m.vertex_data = bytesField(vd, "m_DataSize") orelse "";
+    /// Fills the vertex-buffer half of the view from an `m_VertexData`
+    /// value: the vertex count, the interleaved buffer and the channel
+    /// table. Counts and descriptors come straight off the wire, so a
+    /// negative or oversized one narrows to 0 the way a missing field does
+    /// rather than making the cast illegal behaviour.
+    ///
+    /// Separate from [`fromValue`] because a Sprite's tight mesh carries
+    /// the same `m_VertexData` shape under its own `m_RD`, with no
+    /// enclosing Mesh object to read the name and index buffer from.
+    pub fn readVertexData(self: *Mesh, vd: value.Value) void {
+        if (intField(vd, "m_VertexCount")) |n| self.vertex_count = narrow(u32, n);
+        self.vertex_data = bytesField(vd, "m_DataSize") orelse "";
 
         if (fieldOf(vd, "m_Channels")) |chans| {
             if (chans == .array) {
                 const arr = chans.array;
-                const n = @min(arr.len, m.channels.len);
+                const n = @min(arr.len, self.channels.len);
                 for (arr[0..n], 0..) |c, i| {
-                    m.channels[i] = .{
+                    self.channels[i] = .{
                         .stream = narrow(u32, intField(c, "stream") orelse 0),
                         .offset = narrow(u32, intField(c, "offset") orelse 0),
                         .format = narrow(i32, intField(c, "format") orelse 0),
                         .dimension = narrow(u32, intField(c, "dimension") orelse 0),
                     };
                 }
-                m.channel_count = n;
+                self.channel_count = n;
             }
         }
+    }
+
+    pub fn fromValue(v: value.Value) Mesh {
+        var m = Mesh{ .name = stringField(v, "m_Name") orelse "" };
+        if (intField(v, "m_IndexFormat")) |f| m.index_format = narrow(i32, f);
+        m.index_buffer = bytesField(v, "m_IndexBuffer") orelse "";
+
+        const vd = fieldOf(v, "m_VertexData") orelse return m;
+        m.readVertexData(vd);
         return m;
     }
 };

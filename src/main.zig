@@ -536,14 +536,6 @@ var batch_mode: bool = false;
 /// trees shipped for the file's own Unity release (see `builtin_trees`).
 var builtin_mode: bool = false;
 
-/// `extract <path> [--raw] [--json]` — write embedded assets (to the
-/// current directory or `--outdir <dir>`): bundle/webfile nodes as files,
-/// serialized-file textures as PNG, meshes as OBJ, text assets, sprites,
-/// materials, shaders, and MonoBehaviour payloads (raw `.bin` plus a decoded
-/// `.json` of the managed .NET object graph). With `--raw`, every
-/// object's serialized bytes are written as-is; with `--json`, every
-/// object with a type tree is exported as its value tree JSON instead.
-/// `--outdir` is created if missing.
 /// Image output format for `extract` textures and sprites. UnityPy only
 /// writes PNG; TGA and BMP cover legacy pipelines, and `raw` dumps the
 /// RGBA8 bytes for external tools.
@@ -3479,26 +3471,11 @@ fn readChannelMesh(
     vd: unityz.value.Value,
     sf: *const unityz.serialized.SerializedFile,
 ) ?ChannelMesh {
+    // The channel table decode is the library's (`Mesh.fromValue` reads the
+    // same `m_VertexData` shape off a Mesh object); only the position/UV
+    // gather below is the exporter's own.
     var m = unityz.classes.Mesh{};
-    // The counts and channel descriptors come straight off the wire, so a
-    // negative or oversized value must degrade to 0 the way a missing
-    // field does; a bare @intCast on one is illegal behaviour.
-    m.vertex_count = narrowField(u32, unityz.classes.intField(vd, "m_VertexCount"));
-    m.vertex_data = unityz.classes.bytesField(vd, "m_DataSize") orelse "";
-    if (unityz.classes.fieldOf(vd, "m_Channels")) |chans| {
-        if (chans == .array) {
-            const n = @min(chans.array.len, m.channels.len);
-            for (chans.array[0..n], 0..) |c, i| {
-                m.channels[i] = .{
-                    .stream = narrowField(u32, unityz.classes.intField(c, "stream")),
-                    .offset = narrowField(u32, unityz.classes.intField(c, "offset")),
-                    .format = narrowField(i32, unityz.classes.intField(c, "format")),
-                    .dimension = narrowField(u32, unityz.classes.intField(c, "dimension")),
-                };
-            }
-            m.channel_count = n;
-        }
-    }
+    m.readVertexData(vd);
     const pos = m.channel(0) orelse return null;
     if (pos.format != 0 or pos.dimension < 3) return null;
     const stride = m.stride() orelse return null;
@@ -3873,10 +3850,12 @@ fn writeValueJson(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u8 {
     return aw.toArrayList().items;
 }
 
-/// Major component of a Unity version string like "2022.3.62f2".
+/// Major component of a Unity version string like "2022.3.62f2", or 0 when
+/// the file carries no readable version. The parse itself belongs to the
+/// library (`classes.unityVersionPart`), which the class decoders read the
+/// same version through; this only pins the exporters' fallback.
 fn unityMajor(version: []const u8) u32 {
-    const dot = std.mem.indexOfScalar(u8, version, '.') orelse return 0;
-    return std.fmt.parseInt(u32, version[0..dot], 10) catch 0;
+    return unityz.classes.unityVersionPart(version, 0) orelse 0;
 }
 
 /// Wavefront OBJ export for a Mesh: vertices, normals, UVs, and triangle
