@@ -1345,7 +1345,7 @@ fn finalizeSidecar(
     var name_buf: [160]u8 = undefined;
     const name = sanitizeComponent(if (object_name) |n| blk: {
         const base = unityz.streams.trimNul(n);
-        if (base.len != 0) break :blk try std.fmt.bufPrint(&name_buf, "{s}_{d}_{s}.json", .{ prefix, path_id, base });
+        if (base.len != 0) break :blk try std.fmt.bufPrint(&name_buf, "{s}_{d}_{s}.json", .{ prefix, path_id, clipName(base) });
         break :blk try std.fmt.bufPrint(&name_buf, "{s}_{d}.json", .{ prefix, path_id });
     } else try std.fmt.bufPrint(&name_buf, "{s}_{d}.json", .{ prefix, path_id }));
     try extractFile(subdir, name, contents);
@@ -1636,10 +1636,10 @@ fn fsbSampleDecodes(audio: []const u8, bank: unityz.fsb5.Bank, sample: unityz.fs
 fn fsbSampleFileName(buf: []u8, path_id: i64, clip_name: []const u8, index: ?usize, ext: []const u8) ![]u8 {
     if (index) |si| {
         if (clip_name.len == 0) return std.fmt.bufPrint(buf, "audio_{d}_s{d}.{s}", .{ path_id, si, ext });
-        return std.fmt.bufPrint(buf, "audio_{d}_{s}_s{d}.{s}", .{ path_id, clip_name, si, ext });
+        return std.fmt.bufPrint(buf, "audio_{d}_{s}_s{d}.{s}", .{ path_id, clipName(clip_name), si, ext });
     }
     if (clip_name.len == 0) return std.fmt.bufPrint(buf, "audio_{d}.{s}", .{ path_id, ext });
-    return std.fmt.bufPrint(buf, "audio_{d}_{s}.{s}", .{ path_id, clip_name, ext });
+    return std.fmt.bufPrint(buf, "audio_{d}_{s}.{s}", .{ path_id, clipName(clip_name), ext });
 }
 
 /// FSB5 bank metadata as a JSON document, or null when the data is not a
@@ -1752,9 +1752,9 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
             };
             var name_buf: [192]u8 = undefined;
             const name = if (bank.samples.len == 1)
-                try std.fmt.bufPrint(&name_buf, "audio_{s}.wav", .{if (s.name.len != 0) sanitizeComponent(try arena.dupe(u8, s.name)) else "sample"})
+                try std.fmt.bufPrint(&name_buf, "audio_{s}.wav", .{if (s.name.len != 0) sanitizeComponent(try arena.dupe(u8, clipName(s.name))) else "sample"})
             else
-                try std.fmt.bufPrint(&name_buf, "audio_{d:0>4}_{s}.wav", .{ si, if (s.name.len != 0) sanitizeComponent(try arena.dupe(u8, s.name)) else "sample" });
+                try std.fmt.bufPrint(&name_buf, "audio_{d:0>4}_{s}.wav", .{ si, if (s.name.len != 0) sanitizeComponent(try arena.dupe(u8, clipName(s.name))) else "sample" });
             try extractFile(null, name, wav);
             decoded += 1;
         }
@@ -1775,9 +1775,9 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
             };
             var name_buf: [192]u8 = undefined;
             const name = if (bank.samples.len == 1)
-                try std.fmt.bufPrint(&name_buf, "audio_{s}.ogg", .{if (s.name.len != 0) sanitizeComponent(try arena.dupe(u8, s.name)) else "sample"})
+                try std.fmt.bufPrint(&name_buf, "audio_{s}.ogg", .{if (s.name.len != 0) sanitizeComponent(try arena.dupe(u8, clipName(s.name))) else "sample"})
             else
-                try std.fmt.bufPrint(&name_buf, "audio_{d:0>4}_{s}.ogg", .{ si, if (s.name.len != 0) sanitizeComponent(try arena.dupe(u8, s.name)) else "sample" });
+                try std.fmt.bufPrint(&name_buf, "audio_{d:0>4}_{s}.ogg", .{ si, if (s.name.len != 0) sanitizeComponent(try arena.dupe(u8, clipName(s.name))) else "sample" });
             try extractFile(null, name, ogg);
             oggd += 1;
         }
@@ -1810,7 +1810,7 @@ fn writeFontFiles(
     const base_name = unityz.streams.trimNul(f.name);
     var name_buf: [160]u8 = undefined;
     const name = sanitizeComponent(if (base_name.len != 0)
-        try std.fmt.bufPrint(&name_buf, "font_{d}_{s}.{s}", .{ path_id, base_name, ext })
+        try std.fmt.bufPrint(&name_buf, "font_{d}_{s}.{s}", .{ path_id, clipName(base_name), ext })
     else
         try std.fmt.bufPrint(&name_buf, "font_{d}.{s}", .{ path_id, ext }));
     if (f.font_data.len != 0) {
@@ -1885,7 +1885,7 @@ fn writeComputeShaderFiles(
     const base_name = unityz.streams.trimNul(cs.name);
     var cs_name_buf: [160]u8 = undefined;
     const cs_base = if (base_name.len != 0)
-        try std.fmt.bufPrint(&cs_name_buf, "compute_{d}_{s}", .{ path_id, base_name })
+        try std.fmt.bufPrint(&cs_name_buf, "compute_{d}_{s}", .{ path_id, clipName(base_name) })
     else
         try std.fmt.bufPrint(&cs_name_buf, "compute_{d}", .{path_id});
 
@@ -1893,7 +1893,7 @@ fn writeComputeShaderFiles(
         for (v.kernels) |k| {
             if (k.code.len == 0) continue;
             var name_buf: [192]u8 = undefined;
-            const name = sanitizeComponent(try std.fmt.bufPrint(&name_buf, "{s}_{s}_v{d}.{s}", .{ cs_base, k.name, vi, computeCodeExt(k.code) }));
+            const name = sanitizeComponent(try std.fmt.bufPrint(&name_buf, "{s}_{s}_v{d}.{s}", .{ cs_base, clipName(k.name), vi, computeCodeExt(k.code) }));
             try extractFile(subdir, name, k.code);
             try stdout.print("extracted {s} ({d} bytes, {s})\n", .{ name, k.code.len, computeCodeExt(k.code) });
             extracted.* += 1;
@@ -2200,7 +2200,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 }
                 var name_buf: [192]u8 = undefined;
                 const base_name = if (clip_name.len != 0)
-                    try std.fmt.bufPrint(&name_buf, "video_{d}_{s}.{s}", .{ o.path_id, clip_name, ext })
+                    try std.fmt.bufPrint(&name_buf, "video_{d}_{s}.{s}", .{ o.path_id, clipName(clip_name), ext })
                 else
                     try std.fmt.bufPrint(&name_buf, "video_{d}.{s}", .{ o.path_id, ext });
                 const fname = sanitizeComponent(base_name);
@@ -2266,7 +2266,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 }
                 var name_buf: [192]u8 = undefined;
                 const base_name = if (td_name.len != 0)
-                    try std.fmt.bufPrint(&name_buf, "terrain_{d}_{s}.pgm", .{ o.path_id, td_name })
+                    try std.fmt.bufPrint(&name_buf, "terrain_{d}_{s}.pgm", .{ o.path_id, clipName(td_name) })
                 else
                     try std.fmt.bufPrint(&name_buf, "terrain_{d}.pgm", .{o.path_id});
                 const fname = sanitizeComponent(base_name);
@@ -2330,7 +2330,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 var name_buf: [128]u8 = undefined;
                 const base_name = unityz.streams.trimNul(ac.name);
                 const name = sanitizeComponent(if (base_name.len != 0)
-                    try std.fmt.bufPrint(&name_buf, "audio_{d}_{s}.{s}", .{ o.path_id, base_name, ext })
+                    try std.fmt.bufPrint(&name_buf, "audio_{d}_{s}.{s}", .{ o.path_id, clipName(base_name), ext })
                 else
                     try std.fmt.bufPrint(&name_buf, "audio_{d}.{s}", .{ o.path_id, ext }));
                 try extractFile(subdir, name, audio);
@@ -2428,7 +2428,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const base_name = unityz.streams.trimNul(unityz.classes.stringField(v, "m_Name") orelse "");
                 var name_buf: [96]u8 = undefined;
                 const base = sanitizeComponent(if (base_name.len != 0)
-                    try std.fmt.bufPrint(&name_buf, "cubemap_{d}_{s}", .{ o.path_id, base_name })
+                    try std.fmt.bufPrint(&name_buf, "cubemap_{d}_{s}", .{ o.path_id, clipName(base_name) })
                 else
                     try std.fmt.bufPrint(&name_buf, "cubemap_{d}", .{o.path_id}));
                 // Serialized face order matches Unity's CubemapFace enum:
@@ -2506,7 +2506,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 var name_buf: [160]u8 = undefined;
                 const mesh_name = unityz.streams.trimNul(mesh.name);
                 const name = sanitizeComponent(if (mesh_name.len != 0)
-                    try std.fmt.bufPrint(&name_buf, "mesh_{d}_{s}.obj", .{ o.path_id, mesh_name })
+                    try std.fmt.bufPrint(&name_buf, "mesh_{d}_{s}.obj", .{ o.path_id, clipName(mesh_name) })
                 else
                     try std.fmt.bufPrint(&name_buf, "mesh_{d}.obj", .{o.path_id}));
                 try extractFile(subdir, name, obj);
@@ -2570,7 +2570,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 if (g.len != 0) {
                     var name_buf: [192]u8 = undefined;
                     const base = if (renderer_name.len != 0) renderer_name else unityz.streams.trimNul(mesh.name);
-                    const clipped = if (base.len > 140) base[0..140] else base;
+                    const clipped = clipName(base);
                     const full = if (clipped.len != 0)
                         try std.fmt.bufPrint(&name_buf, "character_{d}_{s}.glb", .{ o.path_id, clipped })
                     else
@@ -2675,7 +2675,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const out = aw.toArrayList();
                 var clean_buf: [192]u8 = undefined;
                 const clean_name = if (clip_name.len != 0)
-                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{clip_name}))
+                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{clipName(clip_name)}))
                 else
                     "";
                 var name_buf: [192]u8 = undefined;
@@ -2717,7 +2717,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                     }
                 }
                 var name_buf: [192]u8 = undefined;
-                const base = if (pf_name.len != 0) try std.fmt.bufPrint(&name_buf, "{s}", .{pf_name}) else "";
+                const base = if (pf_name.len != 0) try std.fmt.bufPrint(&name_buf, "{s}", .{clipName(pf_name)}) else "";
                 var fname_buf: [256]u8 = undefined;
                 const name = sanitizeComponent(try std.fmt.bufPrint(&fname_buf, "shader_{d}_{s}.shader", .{ o.path_id, if (base.len != 0) base else "unnamed" }));
                 try extractFile(subdir, name, shd);
@@ -2754,11 +2754,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 // raw RGBA has no header, so the name carries the dimensions
                 const name = sanitizeComponent(if (format == .raw)
                     if (sprite_name.len != 0)
-                        try std.fmt.bufPrint(&name_buf, "sprite_{d}_{d}x{d}_{s}.{s}", .{ o.path_id, rr.w, rr.h, sprite_name, formatExtension(format) })
+                        try std.fmt.bufPrint(&name_buf, "sprite_{d}_{d}x{d}_{s}.{s}", .{ o.path_id, rr.w, rr.h, clipName(sprite_name), formatExtension(format) })
                     else
                         try std.fmt.bufPrint(&name_buf, "sprite_{d}_{d}x{d}.{s}", .{ o.path_id, rr.w, rr.h, formatExtension(format) })
                 else if (sprite_name.len != 0)
-                    try std.fmt.bufPrint(&name_buf, "sprite_{d}_{s}.{s}", .{ o.path_id, sprite_name, formatExtension(format) })
+                    try std.fmt.bufPrint(&name_buf, "sprite_{d}_{s}.{s}", .{ o.path_id, clipName(sprite_name), formatExtension(format) })
                 else
                     try std.fmt.bufPrint(&name_buf, "sprite_{d}.{s}", .{ o.path_id, formatExtension(format) }));
                 try extractFile(subdir, name, image);
@@ -2791,7 +2791,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 // file-owned name first so it cannot steer the output path.
                 var clean_buf: [192]u8 = undefined;
                 const clean_name = if (atlas_name.len != 0)
-                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{atlas_name}))
+                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{clipName(atlas_name)}))
                 else
                     "";
                 var name_buf: [192]u8 = undefined;
@@ -2836,7 +2836,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const out = aw.toArrayList();
                 var clean_buf: [192]u8 = undefined;
                 const clean_name = if (ab_name.len != 0)
-                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{ab_name}))
+                    sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{clipName(ab_name)}))
                 else
                     "";
                 var name_buf: [192]u8 = undefined;
@@ -2857,8 +2857,8 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 // filename uses the qualified name (namespace.class) so
                 // scripts sharing a namespace do not collide; the label
                 // adds the assembly
-                const ms_ns = unityz.streams.trimNul(ms.namespace);
-                const ms_cn = unityz.streams.trimNul(ms.class_name);
+                const ms_ns = clipName(unityz.streams.trimNul(ms.namespace));
+                const ms_cn = clipName(unityz.streams.trimNul(ms.class_name));
                 var qual_buf: [192]u8 = undefined;
                 const qual = if (ms_ns.len != 0)
                     try std.fmt.bufPrint(&qual_buf, "{s}.{s}", .{ ms_ns, ms_cn })
@@ -2870,10 +2870,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 var fname_buf: [192]u8 = undefined;
                 const fname = try std.fmt.bufPrint(&fname_buf, "script_{d}_{s}.bin", .{ o.path_id, if (qual.len != 0) qual else "unnamed" });
                 try extractFile(subdir, fname, payload);
-                var label_buf: [192]u8 = undefined;
+                var label_buf: [256]u8 = undefined;
                 const label = try std.fmt.bufPrint(&label_buf, "{s} ({s})", .{
                     qual,
-                    unityz.streams.trimNul(ms.assembly),
+                    clipName(unityz.streams.trimNul(ms.assembly)),
                 });
                 try stdout.print("extracted {s} ({d} bytes) [{s}]\n", .{ fname, payload.len, label });
                 // The decoded managed object graph (the type-tree fields plus
@@ -2900,6 +2900,25 @@ fn basename(path: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| return path[i + 1 ..];
     if (std.mem.lastIndexOfScalar(u8, path, '\\')) |i| return path[i + 1 ..];
     return path;
+}
+
+/// Longest file-supplied segment an extract filename may carry. An asset's
+/// `m_Name` (or a MonoScript's namespace-qualified class name) is read
+/// straight out of the file and has no length bound, while the extract
+/// filenames are built in fixed stack buffers: an over-long name made
+/// `bufPrint` return `error.NoSpaceLeft`, which propagated all the way out
+/// and aborted the whole extract - reporting `NoSpaceLeft` on a file the
+/// operator reads as a full disk. Every name also carries its path id, so
+/// clipping cannot make two outputs collide.
+const max_name_component: usize = 64;
+
+/// `name` clipped to `max_name_component` bytes, backing off a partial
+/// UTF-8 sequence so the filename stays valid text.
+fn clipName(name: []const u8) []const u8 {
+    if (name.len <= max_name_component) return name;
+    var end: usize = max_name_component;
+    while (end > 0 and name[end] & 0xc0 == 0x80) end -= 1;
+    return name[0..end];
 }
 
 /// Forces a file-supplied name to stay one path component: an asset's
@@ -8383,10 +8402,22 @@ fn editSerializedObject(arena: std.mem.Allocator, bytes: []const u8, path_id: i6
 
     var pair: usize = 0;
     while (pair + 1 < pairs.len) : (pair += 2) {
-        const new_value = try parseJsonLiteralAlloc(arena, pairs[pair + 1]);
-        const segs = try parseFieldPath(pairs[pair]);
+        // Name the pair that failed. These three failures used to leave the
+        // container path reporting a bare error name ("edit failed:
+        // InvalidCharacter"), while the same edit against a bare serialized
+        // file names the field and the value - so the operator's diagnostic
+        // depended on which container the object happened to live in.
+        const new_value = parseJsonLiteralAlloc(arena, pairs[pair + 1]) catch |err| {
+            diagnostic("unityz: bad value '{s}': {s}\n", .{ pairs[pair + 1], @errorName(err) });
+            return err;
+        };
+        const segs = parseFieldPath(pairs[pair]) catch |err| {
+            diagnostic("unityz: bad field path '{s}'\n", .{pairs[pair]});
+            return err;
+        };
         edited = setFieldPath(arena, edited, segs, 0, new_value) catch |err| {
             std.heap.page_allocator.free(segs);
+            diagnostic("unityz: object {d} has no field '{s}'\n", .{ path_id, pairs[pair] });
             return err;
         };
         std.heap.page_allocator.free(segs);
