@@ -3025,8 +3025,17 @@ fn readObjectValue(
 }
 
 /// Recursively writes an AudioMixerGroup subtree: the object's name plus its
-/// resolved children. The depth cap stops a corrupt cycle from recursing
-/// forever; mixer hierarchies are trees in practice.
+/// resolved children. Mixer hierarchies are trees in practice, but the
+/// children lists come out of the file, so the walk has to bound itself on
+/// input that is not one.
+///
+/// `expanded` carries the groups whose children have already been written.
+/// The depth cap alone does not bound the walk: a group listing the same
+/// child twice doubles the work at every level, so a cycle 32 levels deep
+/// is 2^32 subtrees and an object decode for each. Expanding each group
+/// once bounds it by the mixer's edge count, and a repeat still prints its
+/// own `path_id`/`name` entry so the JSON array keeps one element per
+/// child.
 fn writeMixerGroupJson(
     w: *Io.Writer,
     arena: std.mem.Allocator,
@@ -3035,17 +3044,19 @@ fn writeMixerGroupJson(
     injected: ?*const InjectedTrees,
     path_id: i64,
     depth: u32,
+    expanded: *std.AutoHashMapUnmanaged(i64, void),
 ) !void {
     try w.print("{{\"path_id\":{d}", .{path_id});
+    const first_visit = (try expanded.getOrPut(arena, path_id)).found_existing == false;
     if (readObjectValue(arena, sf, path_id, own_basename, injected)) |obj| {
         const g = try unityz.classes.AudioMixerGroup.fromValue(arena, obj);
         try w.writeAll(",\"name\":");
         try writeJsonString(w, g.name);
-        if (g.children.len != 0 and depth < 32) {
+        if (first_visit and g.children.len != 0 and depth < 32) {
             try w.writeAll(",\"children\":[");
             for (g.children, 0..) |c, i| {
                 if (i != 0) try w.writeByte(',');
-                try writeMixerGroupJson(w, arena, sf, own_basename, injected, c.path_id, depth + 1);
+                try writeMixerGroupJson(w, arena, sf, own_basename, injected, c.path_id, depth + 1, expanded);
             }
             try w.writeByte(']');
         }
@@ -3077,7 +3088,8 @@ fn writeMixerFiles(
     try writeJsonString(w, ac.name);
     try w.writeAll(",\"masterGroup\":");
     if (ac.master_group) |mg| {
-        try writeMixerGroupJson(w, arena, sf, own_basename, injected, mg.path_id, 0);
+        var expanded: std.AutoHashMapUnmanaged(i64, void) = .empty;
+        try writeMixerGroupJson(w, arena, sf, own_basename, injected, mg.path_id, 0, &expanded);
     } else {
         try w.writeAll("null");
     }
@@ -10288,9 +10300,12 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
 
     var roots_printed: usize = 0;
     var skipped_children: usize = 0;
-    const index = try HierarchyIndex.build(arena, nodes.items, gos.items);
+    var index = try HierarchyIndex.build(arena, nodes.items, gos.items);
     for (nodes.items) |*e| {
-        if (e.node.father == 0 and index.readable(e.path_id)) {
+        // A fatherless transform that an earlier root already reached is
+        // only possible in a malformed children list; skip it before the
+        // separator so the JSON array does not gain an empty element.
+        if (e.node.father == 0 and index.readable(e.path_id) and !index.isPrinted(e.path_id)) {
             if (json and roots_printed != 0) try stdout.writeByte(',');
             roots_printed += 1;
             try printHierarchyNode(
@@ -10316,13 +10331,16 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
 /// more per child readability check; the linear scans this replaces made
 /// that quadratic in the object count of the file.
 const HierarchyIndex = struct {
+    arena: std.mem.Allocator,
     nodes: []const TEntry,
     gos: []const GoInfo,
     node_by_id: std.AutoHashMapUnmanaged(i64, u32) = .empty,
     go_by_id: std.AutoHashMapUnmanaged(i64, u32) = .empty,
+    /// Transforms already emitted by the walk; see `markPrinted`.
+    printed: std.AutoHashMapUnmanaged(i64, void) = .empty,
 
     fn build(arena: std.mem.Allocator, nodes: []const TEntry, gos: []const GoInfo) !HierarchyIndex {
-        var self: HierarchyIndex = .{ .nodes = nodes, .gos = gos };
+        var self: HierarchyIndex = .{ .arena = arena, .nodes = nodes, .gos = gos };
         try self.node_by_id.ensureTotalCapacity(arena, @intCast(nodes.len));
         // First entry wins, matching the first-match semantics of the scans.
         for (nodes, 0..) |*e, i| {
@@ -10351,6 +10369,27 @@ const HierarchyIndex = struct {
         const node = self.findNode(path_id) orelse return false;
         return self.findGo(node.go) != null;
     }
+
+    /// True once the walk has emitted this transform.
+    ///
+    /// A well-formed hierarchy is a tree - each transform names one father
+    /// and appears in one children list - so every node is reached exactly
+    /// once and this never fires. Children lists come from the file,
+    /// though, and nothing in the format stops one from repeating a node
+    /// or pointing back up. Two entries for the same child double the work
+    /// at every level, so `max_hierarchy_depth` alone bounds the walk at
+    /// 2^512 calls, not at anything a run can finish: a transform whose
+    /// children list holds itself twice hangs `hierarchy` outright.
+    /// Emitting each transform at most once bounds the walk by the file's
+    /// transform count instead, and leaves the output of a tree-shaped
+    /// hierarchy unchanged.
+    fn isPrinted(self: *const HierarchyIndex, path_id: i64) bool {
+        return self.printed.contains(path_id);
+    }
+
+    fn markPrinted(self: *HierarchyIndex, path_id: i64) !void {
+        try self.printed.put(self.arena, path_id, {});
+    }
 };
 
 /// Traversal depth limit for `printHierarchyNode`. Children lists are
@@ -10360,7 +10399,7 @@ const HierarchyIndex = struct {
 const max_hierarchy_depth: usize = 512;
 
 fn printHierarchyNode(
-    index: *const HierarchyIndex,
+    index: *HierarchyIndex,
     bones: []const i64,
     path_id: i64,
     depth: usize,
@@ -10371,6 +10410,7 @@ fn printHierarchyNode(
     if (depth > max_hierarchy_depth) return error.TooDeep;
     const skipped_before = skipped_children.*;
     const tn = index.findNode(path_id) orelse return;
+    try index.markPrinted(path_id);
     const go = index.findGo(tn.go);
     const bone = std.mem.indexOfScalar(i64, bones, path_id) != null;
     if (json) {
@@ -10387,7 +10427,7 @@ fn printHierarchyNode(
         try stdout.writeAll(",\"children\":[");
         var printed: usize = 0;
         for (tn.children.items) |c| {
-            if (!index.readable(c)) {
+            if (!index.readable(c) or index.isPrinted(c)) {
                 skipped_children.* += 1;
                 continue;
             }
@@ -10413,7 +10453,7 @@ fn printHierarchyNode(
     }
     try stdout.print("  pos({d}, {d}, {d})\n", .{ tn.pos[0], tn.pos[1], tn.pos[2] });
     for (tn.children.items) |c| {
-        if (!index.readable(c)) {
+        if (!index.readable(c) or index.isPrinted(c)) {
             skipped_children.* += 1;
             continue;
         }
@@ -10432,7 +10472,7 @@ test "hierarchy JSON counts an unreadable child without leaving a dangling comma
     var writer = std.Io.Writer.Allocating.init(arena);
     var skipped: usize = 0;
 
-    const index = try HierarchyIndex.build(arena, &nodes, &gos);
+    var index = try HierarchyIndex.build(arena, &nodes, &gos);
     try printHierarchyNode(&index, &.{}, 10, 0, true, &skipped, &writer.writer);
     try writer.writer.flush();
     const rendered = writer.toArrayList();
@@ -10463,7 +10503,7 @@ test "hierarchy JSON reports subtree skips on the affected branch" {
     var writer = std.Io.Writer.Allocating.init(arena);
     var skipped: usize = 0;
 
-    const index = try HierarchyIndex.build(arena, &nodes, &gos);
+    var index = try HierarchyIndex.build(arena, &nodes, &gos);
     try printHierarchyNode(&index, &.{}, 10, 0, true, &skipped, &writer.writer);
     try writer.writer.flush();
     const rendered = writer.toArrayList();
@@ -10473,6 +10513,45 @@ test "hierarchy JSON reports subtree skips on the affected branch" {
         rendered.items,
     );
     try std.testing.expectEqual(1, skipped);
+}
+
+test "hierarchy walk emits a repeated child once instead of branching" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A children list that names the same transform twice, and a child
+    // that points back at its own parent. Both are impossible in a scene
+    // Unity wrote and both are expressible in the file format; with only
+    // the depth bound to stop it the walk branches twice per level, so
+    // this input never finishes rather than reporting anything.
+    var root_children: std.ArrayList(i64) = .empty;
+    try root_children.append(arena, 11);
+    try root_children.append(arena, 11);
+    var child_children: std.ArrayList(i64) = .empty;
+    try child_children.append(arena, 10);
+    const nodes = [_]TEntry{
+        .{ .path_id = 10, .node = .{ .go = 20, .children = root_children } },
+        .{ .path_id = 11, .node = .{ .go = 21, .children = child_children } },
+    };
+    const gos = [_]GoInfo{
+        .{ .path_id = 20, .name = "root" },
+        .{ .path_id = 21, .name = "child" },
+    };
+    var writer = std.Io.Writer.Allocating.init(arena);
+    var skipped: usize = 0;
+
+    var index = try HierarchyIndex.build(arena, &nodes, &gos);
+    try printHierarchyNode(&index, &.{}, 10, 0, true, &skipped, &writer.writer);
+    try writer.writer.flush();
+
+    // The duplicate sibling and the back-edge to the root are both counted
+    // as skipped children, exactly as an unreadable child would be.
+    try std.testing.expectEqualStrings(
+        "{\"name\":\"root\",\"transform\":10,\"gameObject\":20,\"position\":[0,0,0],\"components\":[],\"bone\":false,\"children\":[{\"name\":\"child\",\"transform\":11,\"gameObject\":21,\"position\":[0,0,0],\"components\":[],\"bone\":false,\"children\":[],\"skipped_children\":1}],\"skipped_children\":2}",
+        writer.toArrayList().items,
+    );
+    try std.testing.expectEqual(2, skipped);
 }
 
 test "emitVerifyReport JSON carries checked, failed, and skipped" {
