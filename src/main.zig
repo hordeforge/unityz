@@ -5403,14 +5403,15 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
     const injected = try loadTrees(arena, trees_path, stdout);
 
     var report: VerifyReport = .{};
-    switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = unityz.bundle.parse(arena, bytes) catch |err| {
+    const kind = unityz.container.sniff(bytes).container;
+    switch (kind) {
+        .bundle, .webfile => {
+            const nodes = containerEntries(arena, bytes) catch |err| {
                 if (json) {
-                    try recordFailure(&report, arena, null, -1, "bundle parse failed: {s}", .{@errorName(err)});
+                    try recordFailure(&report, arena, null, -1, "{s} parse failed: {s}", .{ @tagName(kind), @errorName(err) });
                     try emitVerifyReport(json, &report, stdout);
                 } else {
-                    failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                    failure("{s}: {s} parse failed: {s}\n", .{ path, @tagName(kind), @errorName(err) });
                 }
                 verify_failed_flag = true;
                 return;
@@ -5418,50 +5419,18 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
             // Non-serialized sibling nodes are the sidecar data streamed
             // references point into (mirrors extract's resolution domain).
             var sidecars: std.ArrayList(Sidecar) = .empty;
-            for (b.nodes) |n| {
-                if (unityz.container.sniff(n.data).container != .serialized) {
-                    try sidecars.append(arena, .{ .path = n.path, .data = n.data });
-                }
-            }
+            try sidecars.appendSlice(arena, try containerSidecars(arena, nodes));
             for (try diskSidecars(arena, path)) |sc| try sidecars.append(arena, sc);
-            for (b.nodes) |n| {
+            const entry_label: []const u8 = if (kind == .bundle) "node" else "entry";
+            for (nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 if (path_filter) |pf| {
                     if (pf.node) |sn| {
                         if (!std.mem.eql(u8, n.path, sn)) continue;
                     }
                 }
-                if (!json) try stdout.print("node {s}:\n", .{n.path});
+                if (!json) try stdout.print("{s} {s}:\n", .{ entry_label, n.path });
                 _ = try verifySerializedBytes(arena, n.data, n.path, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars.items, basename(n.path), injected);
-            }
-        },
-        .webfile => {
-            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                if (json) {
-                    try recordFailure(&report, arena, null, -1, "webfile parse failed: {s}", .{@errorName(err)});
-                    try emitVerifyReport(json, &report, stdout);
-                } else {
-                    failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-                }
-                verify_failed_flag = true;
-                return;
-            };
-            var sidecars: std.ArrayList(Sidecar) = .empty;
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) {
-                    try sidecars.append(arena, .{ .path = e.path, .data = e.data });
-                }
-            }
-            for (try diskSidecars(arena, path)) |sc| try sidecars.append(arena, sc);
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                if (path_filter) |pf| {
-                    if (pf.node) |sn| {
-                        if (!std.mem.eql(u8, e.path, sn)) continue;
-                    }
-                }
-                if (!json) try stdout.print("entry {s}:\n", .{e.path});
-                _ = try verifySerializedBytes(arena, e.data, e.path, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars.items, basename(e.path), injected);
             }
         },
         .serialized => {
@@ -6074,28 +6043,18 @@ fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var failures: std.ArrayList(SkinFailure) = .empty;
     defer failures.deinit(arena);
 
-    switch (unityz.container.sniff(bytes).container) {
+    const kind = unityz.container.sniff(bytes).container;
+    switch (kind) {
         .serialized => try skinSerializedBytes(arena, bytes, null, &shaders, &failures, basename(path), injected),
-        .bundle => {
-            const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+        .bundle, .webfile => {
+            const entries = containerEntries(arena, bytes) catch |err| {
+                failure("{s}: {s} parse failed: {s}\n", .{ path, @tagName(kind), @errorName(err) });
                 if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
                 return;
             };
-            for (b.nodes) |n| {
+            for (entries) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 try skinSerializedBytes(arena, n.data, n.path, &shaders, &failures, basename(n.path), injected);
-            }
-        },
-        .webfile => {
-            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-                if (json) try stdout.print("{{\"shaders\":[],\"failures\":[]}}\n", .{});
-                return;
-            };
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try skinSerializedBytes(arena, e.data, e.path, &shaders, &failures, basename(e.path), injected);
             }
         },
         .archive => {
@@ -6424,14 +6383,15 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     const arena = arena_state.allocator();
     var entries: std.ArrayList(Fp) = .empty;
 
-    switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+    const kind = unityz.container.sniff(bytes).container;
+    switch (kind) {
+        .bundle, .webfile => {
+            const nodes = containerEntries(arena, bytes) catch |err| {
+                failure("{s}: {s} parse failed: {s}\n", .{ path, @tagName(kind), @errorName(err) });
                 if (json) try stdout.print("[]\n", .{});
                 return;
             };
-            for (b.nodes) |n| {
+            for (nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 if (path_filter) |pf| {
                     if (pf.node) |sn| {
@@ -6439,22 +6399,6 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                     }
                 }
                 try hashSerializedBytes(arena, n.data, n.path, if (path_filter) |pf| pf.path_id else null, class_filter, json, &entries, stdout);
-            }
-        },
-        .webfile => {
-            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-                if (json) try stdout.print("[]\n", .{});
-                return;
-            };
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                if (path_filter) |pf| {
-                    if (pf.node) |sn| {
-                        if (!std.mem.eql(u8, e.path, sn)) continue;
-                    }
-                }
-                try hashSerializedBytes(arena, e.data, e.path, if (path_filter) |pf| pf.path_id else null, class_filter, json, &entries, stdout);
             }
         },
         .serialized => {
@@ -7616,31 +7560,19 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
 
     var found = false;
     var failed = false;
-    switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+    const kind = unityz.container.sniff(bytes).container;
+    switch (kind) {
+        .bundle, .webfile => {
+            const entries = containerEntries(arena, bytes) catch |err| {
+                failure("{s}: {s} parse failed: {s}\n", .{ path, @tagName(kind), @errorName(err) });
                 return false;
             };
-            for (b.nodes) |n| {
+            for (entries) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 if (sel.node) |sn| {
                     if (!std.mem.eql(u8, n.path, sn)) continue;
                 }
                 mergeShowResult(try showSerializedBytes(arena, n.data, sel.path_id, raw, shader_only, stdout, basename(n.path), injected), &found, &failed);
-            }
-        },
-        .webfile => {
-            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-                return false;
-            };
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                if (sel.node) |sn| {
-                    if (!std.mem.eql(u8, e.path, sn)) continue;
-                }
-                mergeShowResult(try showSerializedBytes(arena, e.data, sel.path_id, raw, shader_only, stdout, basename(e.path), injected), &found, &failed);
             }
         },
         .serialized => {
@@ -7817,27 +7749,17 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     const injected = try loadTrees(arena, trees_path, stdout);
     var found: std.ArrayList(FindMatch) = .empty;
 
-    switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+    const kind = unityz.container.sniff(bytes).container;
+    switch (kind) {
+        .bundle, .webfile => {
+            const entries = containerEntries(arena, bytes) catch |err| {
+                failure("{s}: {s} parse failed: {s}\n", .{ path, @tagName(kind), @errorName(err) });
                 if (json) try stdout.print("[]\n", .{});
                 return;
             };
-            for (b.nodes) |n| {
+            for (entries) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 try findSerializedBytes(arena, n.data, n.path, needle, class_filter, exact, any, json, &found, basename(n.path), injected, stdout);
-            }
-        },
-        .webfile => {
-            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-                if (json) try stdout.print("[]\n", .{});
-                return;
-            };
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try findSerializedBytes(arena, e.data, e.path, needle, class_filter, exact, any, json, &found, basename(e.path), injected, stdout);
             }
         },
         .serialized => try findSerializedBytes(arena, bytes, null, needle, class_filter, exact, any, json, &found, basename(path), injected, stdout),
@@ -8012,27 +7934,18 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
         try statsJson(arena, bytes, class_filter, injected, basename(path), stdout);
         return;
     }
-    switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                failure("{s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+    const kind = unityz.container.sniff(bytes).container;
+    switch (kind) {
+        .bundle, .webfile => {
+            const nodes = containerEntries(arena, bytes) catch |err| {
+                failure("{s}: {s} parse failed: {s}\n", .{ path, @tagName(kind), @errorName(err) });
                 return;
             };
-            for (b.nodes) |n| {
+            const entry_label: []const u8 = if (kind == .bundle) "node" else "entry";
+            for (nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                if (!dups_only) try stdout.print("node {s}:\n", .{n.path});
+                if (!dups_only) try stdout.print("{s} {s}:\n", .{ entry_label, n.path });
                 try statsSerializedBytes(arena, n.data, class_filter, dups_only, injected, basename(n.path), stdout);
-            }
-        },
-        .webfile => {
-            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                failure("{s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-                return;
-            };
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                if (!dups_only) try stdout.print("entry {s}:\n", .{e.path});
-                try statsSerializedBytes(arena, e.data, class_filter, dups_only, injected, basename(e.path), stdout);
             }
         },
         .serialized => try statsSerializedBytes(arena, bytes, class_filter, dups_only, injected, basename(path), stdout),
@@ -8102,32 +8015,19 @@ fn statsJson(arena: std.mem.Allocator, bytes: []const u8, class_filter: ?i32, in
     var total_objects: usize = 0;
     var total_bytes: u64 = 0;
     var scripts: std.StringHashMapUnmanaged(usize) = .empty;
-    switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                failure("  bundle parse failed: {s}\n", .{@errorName(err)});
+    const kind = unityz.container.sniff(bytes).container;
+    switch (kind) {
+        .bundle, .webfile => {
+            const nodes = containerEntries(arena, bytes) catch |err| {
+                failure("  {s} parse failed: {s}\n", .{ @tagName(kind), @errorName(err) });
                 return;
             };
-            for (b.nodes) |n| {
+            for (nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 try collectStats(arena, n.data, n.path, class_filter, &classes, &total_objects, &total_bytes, &entries);
                 if (injected) |inj| {
                     const nsf = unityz.serialized.parse(arena, n.data) catch continue;
                     statsScripts(arena, &nsf, inj, basename(n.path), &scripts);
-                }
-            }
-        },
-        .webfile => {
-            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                failure("  webfile parse failed: {s}\n", .{@errorName(err)});
-                return;
-            };
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try collectStats(arena, e.data, e.path, class_filter, &classes, &total_objects, &total_bytes, &entries);
-                if (injected) |inj| {
-                    const esf = unityz.serialized.parse(arena, e.data) catch continue;
-                    statsScripts(arena, &esf, inj, basename(e.path), &scripts);
                 }
             }
         },
@@ -9583,31 +9483,21 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     // MonoBehaviour's m_Script can be followed into a sibling node.
     const Member = struct { name: []const u8, sf: unityz.serialized.SerializedFile };
     var members: std.ArrayList(Member) = .empty;
-    switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = try unityz.bundle.parse(arena, bytes);
-            for (b.nodes) |n| {
+    const kind = unityz.container.sniff(bytes).container;
+    switch (kind) {
+        .bundle, .webfile => {
+            const entry_label: []const u8 = if (kind == .bundle) "node" else "entry";
+            for (try containerEntries(arena, bytes)) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 const sf = unityz.serialized.parse(arena, n.data) catch |err| {
                     // The generated trees file silently omits every type of a
                     // node that did not parse, and the MonoBehaviours needing
                     // them then read as typeless. Fail the run, as the
                     // assembly path does.
-                    failure("unityz: {s}: node parse failed: {s}; its type trees are missing from the output\n", .{ n.path, @errorName(err) });
+                    failure("unityz: {s}: {s} parse failed: {s}; its type trees are missing from the output\n", .{ n.path, entry_label, @errorName(err) });
                     continue;
                 };
                 try members.append(arena, .{ .name = basename(n.path), .sf = sf });
-            }
-        },
-        .webfile => {
-            const wf = try unityz.webfile.parse(arena, bytes);
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                const sf = unityz.serialized.parse(arena, e.data) catch |err| {
-                    failure("unityz: {s}: entry parse failed: {s}; its type trees are missing from the output\n", .{ e.path, @errorName(err) });
-                    continue;
-                };
-                try members.append(arena, .{ .name = basename(e.path), .sf = sf });
             }
         },
         .serialized => try members.append(arena, .{ .name = basename(path), .sf = try unityz.serialized.parse(arena, bytes) }),
@@ -9876,18 +9766,10 @@ fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, s
     const arena = arena_state.allocator();
     const injected = try loadTrees(arena, trees_path, stdout);
     switch (unityz.container.sniff(bytes).container) {
-        .bundle => {
-            const b = try unityz.bundle.parse(arena, bytes);
-            for (b.nodes) |n| {
+        .bundle, .webfile => {
+            for (try containerEntries(arena, bytes)) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
                 try printHierarchy(arena, n.data, n.path, json, injected, stdout);
-            }
-        },
-        .webfile => {
-            const wf = try unityz.webfile.parse(arena, bytes);
-            for (wf.entries) |e| {
-                if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try printHierarchy(arena, e.data, e.path, json, injected, stdout);
             }
         },
         .serialized => try printHierarchy(arena, bytes, null, json, injected, stdout),
