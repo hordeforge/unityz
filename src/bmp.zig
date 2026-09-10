@@ -40,7 +40,6 @@ pub fn encode(allocator: std.mem.Allocator, width: u32, height: u32, rgba: []con
     if (rgba.len != w * h * 4) return error.SizeMismatch;
     if (rgba.len > max_pixel_bytes) return error.SizeMismatch;
 
-    var out: std.ArrayList(u8) = .empty;
     const pixel_bytes: u32 = @intCast(rgba.len);
     var fh: [file_header_len]u8 = undefined;
     fh[0] = 'B';
@@ -64,9 +63,15 @@ pub fn encode(allocator: std.mem.Allocator, width: u32, height: u32, rgba: []con
     std.mem.writeInt(u32, ih[48..52], 0x000000ff, .little);
     std.mem.writeInt(u32, ih[52..56], 0xff000000, .little);
 
+    // One exact-sized buffer for the whole file: the headers, then the
+    // pixels channel-flipped straight into place. Growing an ArrayList
+    // instead would hold a second full-image copy at peak.
+    const out = allocator.alloc(u8, data_offset + rgba.len) catch return error.OutOfMemory;
+    @memcpy(out[0..file_header_len], &fh);
+    @memcpy(out[file_header_len..data_offset], &ih);
+
     // BMP stores BGR(A); flip each pixel's channels.
-    const px = allocator.alloc(u8, rgba.len) catch return error.OutOfMemory;
-    defer allocator.free(px);
+    const px = out[data_offset..];
     var i: usize = 0;
     while (i < rgba.len) : (i += 4) {
         px[i + 0] = rgba[i + 2];
@@ -74,10 +79,7 @@ pub fn encode(allocator: std.mem.Allocator, width: u32, height: u32, rgba: []con
         px[i + 2] = rgba[i + 0];
         px[i + 3] = rgba[i + 3];
     }
-    out.appendSlice(allocator, &fh) catch return error.OutOfMemory;
-    out.appendSlice(allocator, &ih) catch return error.OutOfMemory;
-    out.appendSlice(allocator, px) catch return error.OutOfMemory;
-    return out.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    return out;
 }
 
 // ---------------------------------------------------------------------------

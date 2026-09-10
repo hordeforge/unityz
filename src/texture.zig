@@ -3794,19 +3794,25 @@ fn decodeEtc2Rgba1Block(out: []u8, w: usize, h: usize, bx: usize, by: usize, bit
     }
 
     // differential
-    const c1 = [3]u8{
-        @as(u8, @intCast(r)) | @as(u8, @intCast(r >> 5)),
-        @as(u8, @intCast(g)) | @as(u8, @intCast(g >> 5)),
-        @as(u8, @intCast(b)) | @as(u8, @intCast(b >> 5)),
-    };
-    var c2r: u8 = @intCast(@mod(r + dr, 256));
-    var c2g: u8 = @intCast(@mod(g + dg, 256));
-    var c2b: u8 = @intCast(@mod(b + db, 256));
-    c2r |= c2r >> 5;
-    c2g |= c2g >> 5;
-    c2b |= c2b >> 5;
-    const c2 = [3]u8{ c2r, c2g, c2b };
-    paintSubblocksDiffA1(out, w, h, bx, by, bits, flip, c1, c2, @intCast(d[3] >> 5), @intCast((d[3] >> 2) & 7), obaq);
+    const c = etcDifferentialColors(.{ r, g, b }, .{ dr, dg, db });
+    paintSubblocksDiffA1(out, w, h, bx, by, bits, flip, c[0], c[1], @intCast(d[3] >> 5), @intCast((d[3] >> 2) & 7), obaq);
+}
+
+/// The two subblock colors of an ETC differential-mode block: the 5-bit
+/// base extended to 8 bits, and the base plus its signed 3-bit delta. Both
+/// arrive here in the base*8 domain the reference computes in. The spec
+/// leaves out-of-range sums undefined; the reference wraps them in u8 and
+/// extends, so do the same.
+fn etcDifferentialColors(base: [3]i32, delta: [3]i32) [2][3]u8 {
+    var c1: [3]u8 = undefined;
+    var c2: [3]u8 = undefined;
+    for (0..3) |i| {
+        const v1: u8 = @intCast(base[i]);
+        c1[i] = v1 | (v1 >> 5);
+        const v2: u8 = @intCast(@mod(base[i] + delta[i], 256));
+        c2[i] = v2 | (v2 >> 5);
+    }
+    return .{ c1, c2 };
 }
 
 /// EAC alpha channel value for a pixel index (ETC2 RGBA8 alpha block).
@@ -3874,21 +3880,9 @@ fn decodeEtcBlock(out: []u8, w: usize, h: usize, bx: usize, by: usize, bits: u64
         }
     }
 
-    // differential mode. The spec leaves out-of-range sums undefined; the
-    // reference wraps them in u8 and extends, so do the same.
-    const c1 = [3]u8{
-        @as(u8, @intCast(r)) | @as(u8, @intCast(r >> 5)),
-        @as(u8, @intCast(g)) | @as(u8, @intCast(g >> 5)),
-        @as(u8, @intCast(b)) | @as(u8, @intCast(b >> 5)),
-    };
-    var c2r: u8 = @intCast(@mod(r + dr, 256));
-    var c2g: u8 = @intCast(@mod(g + dg, 256));
-    var c2b: u8 = @intCast(@mod(b + db, 256));
-    c2r |= c2r >> 5;
-    c2g |= c2g >> 5;
-    c2b |= c2b >> 5;
-    const c2 = [3]u8{ c2r, c2g, c2b };
-    paintSubblocks(out, w, h, bx, by, bits, flip, c1, c2, @intCast(d[3] >> 5), @intCast((d[3] >> 2) & 7));
+    // differential mode
+    const c = etcDifferentialColors(.{ r, g, b }, .{ dr, dg, db });
+    paintSubblocks(out, w, h, bx, by, bits, flip, c[0], c[1], @intCast(d[3] >> 5), @intCast((d[3] >> 2) & 7));
 }
 
 /// ETC1/ETC2 modifier tables, ordered [-b, -a, +a, +b] per table codeword.

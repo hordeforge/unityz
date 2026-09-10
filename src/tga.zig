@@ -27,7 +27,6 @@ pub fn encode(allocator: std.mem.Allocator, width: u32, height: u32, rgba: []con
     const h: usize = @intCast(height);
     if (rgba.len != w * h * 4) return error.SizeMismatch;
 
-    var out: std.ArrayList(u8) = .empty;
     var hdr: [header_len]u8 = undefined;
     hdr[0] = 0; // id length
     hdr[1] = 0; // color map type
@@ -40,9 +39,14 @@ pub fn encode(allocator: std.mem.Allocator, width: u32, height: u32, rgba: []con
     hdr[16] = 32; // bits per pixel
     hdr[17] = 0x28; // top-left origin + 8 alpha bits
 
+    // One exact-sized buffer for the whole file: the header, then the
+    // pixels channel-flipped straight into place. Growing an ArrayList
+    // instead would hold a second full-image copy at peak.
+    const out = allocator.alloc(u8, header_len + rgba.len) catch return error.OutOfMemory;
+    @memcpy(out[0..header_len], &hdr);
+
     // TGA stores BGR(A); flip each pixel's channels.
-    const px = allocator.alloc(u8, rgba.len) catch return error.OutOfMemory;
-    defer allocator.free(px);
+    const px = out[header_len..];
     var i: usize = 0;
     while (i < rgba.len) : (i += 4) {
         px[i + 0] = rgba[i + 2];
@@ -50,9 +54,7 @@ pub fn encode(allocator: std.mem.Allocator, width: u32, height: u32, rgba: []con
         px[i + 2] = rgba[i + 0];
         px[i + 3] = rgba[i + 3];
     }
-    out.appendSlice(allocator, &hdr) catch return error.OutOfMemory;
-    out.appendSlice(allocator, px) catch return error.OutOfMemory;
-    return out.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    return out;
 }
 
 // ---------------------------------------------------------------------------
