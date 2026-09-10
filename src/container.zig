@@ -130,11 +130,10 @@ pub fn sniff(data: []const u8) SniffResult {
     return .{ .container = .unknown };
 }
 
-/// Returns true when a serialized file of format `version` embeds type
-/// trees (version >= 13, per the format docs; older files have none).
-pub fn serializedHasTypeTree(version: u32) bool {
-    return version >= 13;
-}
+/// Re-exported from `serialized`, which owns the format's version rules
+/// (`supportedVersion`, `headerSize`) and is the one module that acts on
+/// this one, so the sniffer and the parser cannot disagree.
+pub const serializedHasTypeTree = serialized.serializedHasTypeTree;
 
 /// File extensions of Unity asset files this project intends to support.
 /// Note that some serialized files (e.g. `globalgamemanagers`, `level0`)

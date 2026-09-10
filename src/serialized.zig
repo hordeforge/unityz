@@ -165,6 +165,15 @@ pub fn headerSize(version: u32) u64 {
     };
 }
 
+/// Returns true when a serialized file of format `version` carries an
+/// explicit `enable_type_tree` byte in its metadata. Formats 2-12 have no
+/// such byte and always embed a tree per type, so `parse` reads them as
+/// enabled. Like `headerSize`, the sniffer and the parser have to agree on
+/// this, so it lives here rather than in the sniffer.
+pub fn serializedHasTypeTree(version: u32) bool {
+    return version >= 13;
+}
+
 pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!SerializedFile {
     if (source.len < 16) return error.ShortData;
 
@@ -230,7 +239,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!Serial
     if (version >= 8) target_platform = try mr.readInt(i32);
 
     var enable_type_tree = true; // implicit before format 13
-    if (version >= 13) enable_type_tree = try mr.readByte() != 0;
+    if (serializedHasTypeTree(version)) enable_type_tree = try mr.readByte() != 0;
 
     const type_count = try readCount(&mr);
     const types = try allocator.alloc(SerializedType, type_count);
