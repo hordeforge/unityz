@@ -207,10 +207,21 @@ test "encode produces a decodable png" {
     // signature
     try std.testing.expectEqualStrings(signature, png[0..8]);
 
-    // decode: parse chunks, decompress IDAT, strip filter bytes
+    // decode: validate the chunk framing and CRCs, decompress IDAT, strip
+    // filter bytes
     const decoded = try decodePng(a, png);
     defer a.free(decoded);
     try std.testing.expectEqualSlices(u8, &rgba, decoded);
+
+    // The framing checks in `decodePng` are what makes the round trip above
+    // evidence of a real PNG rather than of matching pixels, so pin that
+    // they bite: flipping a byte of the IHDR payload must be caught by its
+    // CRC, and truncating the IEND chunk must be caught as a missing one.
+    const torn = try a.dupe(u8, png);
+    defer a.free(torn);
+    torn[16] ^= 1; // IHDR width, covered by the chunk CRC at offset 29
+    try std.testing.expectError(error.BadChunkCrc, decodePng(a, torn));
+    try std.testing.expectError(error.MissingChunk, decodePng(a, png[0 .. png.len - 12]));
 }
 
 test "encode rejects size mismatch" {
@@ -218,25 +229,62 @@ test "encode rejects size mismatch" {
 }
 
 /// Test-only PNG reader: returns the raw RGBA8 pixels.
+///
+/// It validates the framing as well as the pixels, because the pixels
+/// alone do not make a file a real decoder will open. The chunk CRCs, the
+/// IHDR/IEND bookends and the declared bit depth and color type are all
+/// written by `encode` and are all invisible to a round-trip that only
+/// compares the decompressed scanlines back to the input.
 fn decodePng(allocator: std.mem.Allocator, png: []const u8) ![]u8 {
+    if (!std.mem.startsWith(u8, png, signature)) return error.BadSignature;
     var pos: usize = 8; // skip signature
     var width: u32 = 0;
     var height: u32 = 0;
+    var seen_ihdr = false;
+    var seen_iend = false;
     var idat: std.ArrayList(u8) = .empty;
     defer idat.deinit(allocator);
 
     while (pos + 8 <= png.len) {
+        if (seen_iend) return error.ChunkAfterIend;
         const len: usize = @intCast(std.mem.readInt(u32, png[pos..][0..4], .big));
+        if (pos + 12 + len > png.len) return error.TruncatedChunk;
         const kind = png[pos + 4 .. pos + 8];
         const data = png[pos + 8 .. pos + 8 + len];
+
+        var crc = std.hash.Crc32.init();
+        crc.update(kind);
+        crc.update(data);
+        const want = std.mem.readInt(u32, png[pos + 8 + len ..][0..4], .big);
+        if (crc.final() != want) return error.BadChunkCrc;
+
         if (std.mem.eql(u8, kind, "IHDR")) {
+            if (seen_ihdr or pos != 8) return error.IhdrNotFirst;
+            if (len != 13) return error.BadIhdrLength;
+            seen_ihdr = true;
             width = std.mem.readInt(u32, data[0..4], .big);
             height = std.mem.readInt(u32, data[4..8], .big);
-        } else if (std.mem.eql(u8, kind, "IDAT")) {
-            try idat.appendSlice(allocator, data);
+            if (data[8] != 8) return error.UnexpectedBitDepth;
+            if (data[9] != 6) return error.UnexpectedColorType;
+            // compression, filter and interlace methods have exactly one
+            // legal value each, and a nonzero interlace would silently
+            // change how the scanlines below must be read
+            if (data[10] != 0 or data[11] != 0 or data[12] != 0) return error.UnexpectedIhdrMethod;
+        } else {
+            if (!seen_ihdr) return error.IhdrNotFirst;
+            if (std.mem.eql(u8, kind, "IDAT")) {
+                try idat.appendSlice(allocator, data);
+            } else if (std.mem.eql(u8, kind, "IEND")) {
+                if (len != 0) return error.NonEmptyIend;
+                seen_iend = true;
+            }
         }
         pos += 12 + len;
     }
+    if (!seen_ihdr or !seen_iend) return error.MissingChunk;
+    // no dangling bytes: a stray tail would mean a bad length field above
+    if (pos != png.len) return error.TrailingBytes;
+    if (idat.items.len == 0) return error.NoIdat;
 
     // zlib-decompress
     var input = std.Io.Reader.fixed(idat.items);

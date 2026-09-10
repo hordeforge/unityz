@@ -213,7 +213,10 @@ test "sniff serialized file by header heuristic" {
 test "sniff v22 serialized file via the 64-bit extension" {
     // v22: base header fields are placeholders; the real metadata size is
     // re-read at offset 20.
-    var buf: [100]u8 = undefined;
+    // zeroed, not `undefined`: the base metadata_size and file_size at
+    // offsets 0 and 8 must be visibly ignored on this path rather than
+    // read out of whatever the stack held.
+    var buf: [100]u8 = .{0} ** 100;
     std.mem.writeInt(u32, buf[8..12], 22, .big); // version
     std.mem.writeInt(u32, buf[20..24], 40, .big); // extension metadata_size
     const r = sniff(&buf);
@@ -222,39 +225,55 @@ test "sniff v22 serialized file via the 64-bit extension" {
 }
 
 test "sniff rejects implausible serialized headers" {
-    // metadata size larger than the file
-    var buf: [8]u8 = undefined;
-    std.mem.writeInt(u32, buf[0..4], 100, .big);
-    std.mem.writeInt(u32, buf[4..8], 19, .big);
-    try std.testing.expectEqual(ContainerType.unknown, sniff(&buf).container);
+    // `sniff` reads metadata_size at offset 0, file_size at 4 and version
+    // at 8, and rejects anything under 16 bytes before looking at any of
+    // them. Every case here writes a complete header and breaks exactly
+    // one field, so a rejection is attributable to that field rather than
+    // to a short buffer or to a version left in uninitialized memory.
+    const H = struct {
+        fn make(meta: u32, file_size: u32, version: u32) [40]u8 {
+            var buf: [40]u8 = .{0} ** 40;
+            std.mem.writeInt(u32, buf[0..4], meta, .big);
+            std.mem.writeInt(u32, buf[4..8], file_size, .big);
+            std.mem.writeInt(u32, buf[8..12], version, .big);
+            return buf;
+        }
+    };
+
+    // control: this header shape is accepted, so each rejection below is
+    // caused by the one field that case changes
+    const ok = H.make(20, 40, 19);
+    try std.testing.expectEqual(ContainerType.serialized, sniff(&ok).container);
+
+    // too short to hold a header at all
+    try std.testing.expectEqual(ContainerType.unknown, sniff(ok[0..15]).container);
+
+    // metadata size larger than the data
+    const big_meta = H.make(1000, 1020, 19);
+    try std.testing.expectEqual(ContainerType.unknown, sniff(&big_meta).container);
 
     // absurd version
-    var buf2: [16]u8 = undefined;
-    std.mem.writeInt(u32, buf2[0..4], 8, .big);
-    std.mem.writeInt(u32, buf2[4..8], 0xffffffff, .big);
-    try std.testing.expectEqual(ContainerType.unknown, sniff(&buf2).container);
+    const bad_version = H.make(20, 40, 0xffffffff);
+    try std.testing.expectEqual(ContainerType.unknown, sniff(&bad_version).container);
+
+    // one past the supported range, so the bound itself is pinned
+    const past_max = H.make(20, 40, 23);
+    try std.testing.expectEqual(ContainerType.unknown, sniff(&past_max).container);
 
     // zero metadata size
-    var buf3: [16]u8 = undefined;
-    std.mem.writeInt(u32, buf3[0..4], 0, .big);
-    std.mem.writeInt(u32, buf3[4..8], 19, .big);
-    try std.testing.expectEqual(ContainerType.unknown, sniff(&buf3).container);
+    const zero_meta = H.make(0, 40, 19);
+    try std.testing.expectEqual(ContainerType.unknown, sniff(&zero_meta).container);
 
     // legacy version 4 sniffs as serialized like every supported version
-    var buf4: [40]u8 = undefined;
-    std.mem.writeInt(u32, buf4[0..4], 8, .big);
-    std.mem.writeInt(u32, buf4[4..8], 28, .big);
-    std.mem.writeInt(u32, buf4[8..12], 4, .big);
-    const r4 = sniff(&buf4);
+    const v4 = H.make(8, 28, 4);
+    const r4 = sniff(&v4);
     try std.testing.expectEqual(ContainerType.serialized, r4.container);
     try std.testing.expectEqual(@as(?u32, 4), r4.serialized_version);
 
-    // ...but an implausible v4 header is still rejected
-    var buf5: [40]u8 = undefined;
-    std.mem.writeInt(u32, buf5[0..4], 8, .big); // metadata larger than the file
-    std.mem.writeInt(u32, buf5[4..8], 4, .big);
-    std.mem.writeInt(u32, buf5[8..12], 4, .big);
-    try std.testing.expectEqual(ContainerType.unknown, sniff(&buf5).container);
+    // ...but a v4 header whose metadata outruns its own file_size is
+    // rejected by the legacy-only check, even though it would fit the data
+    const v4_bad = H.make(8, 4, 4);
+    try std.testing.expectEqual(ContainerType.unknown, sniff(&v4_bad).container);
 }
 
 test "sniff empty and garbage" {
