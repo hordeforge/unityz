@@ -353,6 +353,20 @@ test "IMA decode matches a hand-computed block" {
     try std.testing.expectEqual(@as(i16, 1000), pcm[0]);
     try std.testing.expectEqual(@as(i16, 1013), pcm[1]);
     try std.testing.expectEqual(@as(i16, 1012), pcm[2]);
+
+    // The same block with a negative step index: the header byte is signed,
+    // so 0xff is -1 and clamps to 0 (step 7). Read unsigned it would be
+    // 255, clamp to 88, and step 32767 would push the first delta past the
+    // i16 range - the whole block clipping instead of tracking.
+    var neg: [36]u8 = [_]u8{0} ** 36;
+    std.mem.writeInt(i16, neg[0..2], 1000, .little);
+    neg[2] = 0xff;
+    neg[4] = 0x84;
+    const npcm = try decodeSample(a, &neg, 0, s, 7);
+    defer a.free(npcm);
+    // step table[0] = 7; code 4 -> delta = 7>>3 + 7 = 7; the index then
+    // moves to 2 (step 9), code 8 -> delta = -(9>>3) = -1
+    try std.testing.expectEqualSlices(i16, &.{ 1000, 1007, 1006 }, npcm);
 }
 
 test "GCADPCM decode matches a hand-computed block" {

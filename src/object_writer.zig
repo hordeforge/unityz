@@ -547,6 +547,35 @@ test "write rejects type-confused, out-of-range and unwritable nodes" {
     try std.testing.expectEqualSlices(u8, &[_]u8{0xff} ** 8, try run(a, u64_node, .{ .uint = std.math.maxInt(u64) }));
     try std.testing.expectError(error.TypeMismatch, run(a, u64_node, .{ .int = -1 }));
 
+    // Float narrowing: a `float` node holds f32, so a magnitude past its
+    // range is a value the field cannot carry and must be reported, not
+    // turned into an infinity. Ordinary precision loss is kept, and a
+    // non-finite input passes through so a field that already held one
+    // still round-trips.
+    const f32_node = try allocNode(a, "float", "v", 0, &.{});
+    try std.testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0xff, 0xff, 0x7f, 0x7f },
+        try run(a, f32_node, .{ .float = std.math.floatMax(f32) }),
+    );
+    try std.testing.expectError(error.TypeMismatch, run(a, f32_node, .{ .float = 1e300 }));
+    try std.testing.expectError(error.TypeMismatch, run(a, f32_node, .{ .float = -1e300 }));
+    // 0.1 is not representable in f32; rounding to the nearest f32 is the
+    // expected outcome, not an error.
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xcd, 0xcc, 0xcc, 0x3d }, try run(a, f32_node, .{ .float = 0.1 }));
+    try std.testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x00, 0x00, 0x80, 0x7f },
+        try run(a, f32_node, .{ .float = std.math.inf(f64) }),
+    );
+    // An f64 node takes the same magnitude unchanged - the rejection above
+    // is the declared width, not the value.
+    try std.testing.expectEqualSlices(
+        u8,
+        &@as([8]u8, @bitCast(@as(u64, @bitCast(@as(f64, 1e300))))),
+        try run(a, try allocNode(a, "double", "v", 0, &.{}), .{ .float = 1e300 }),
+    );
+
     // Wrong value kind for the node's type.
     try std.testing.expectError(error.TypeMismatch, run(a, try allocNode(a, "string", "v", 0, &.{}), .{ .int = 5 }));
     try std.testing.expectError(error.TypeMismatch, run(a, try allocNode(a, "bool", "v", 0, &.{}), .{ .int = 1 }));

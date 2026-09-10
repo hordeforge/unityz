@@ -10753,6 +10753,33 @@ test "sanitizeComponent confines a file-supplied name to one path component" {
     try std.testing.expectEqualStrings("", sanitizeComponent(&empty));
 }
 
+test "clipName bounds a file-supplied name at a UTF-8 boundary" {
+    // The extract filenames are built in fixed stack buffers, so a name
+    // read straight out of the file has to be clipped before it reaches
+    // `bufPrint` - an unbounded one returned `error.NoSpaceLeft` and
+    // aborted the whole extract. Pin both sides of the limit.
+    try std.testing.expectEqualStrings("Player_Idle", clipName("Player_Idle"));
+    const exact = "a" ** max_name_component;
+    try std.testing.expectEqualStrings(exact, clipName(exact));
+    const over = "a" ** (max_name_component + 1);
+    try std.testing.expectEqualStrings(exact, clipName(over));
+
+    // Clipping must not cut a multi-byte sequence in half: the filename
+    // has to stay valid text. Here the limit lands inside the 3-byte
+    // U+20AC, so the whole character is dropped.
+    const split = "a" ** (max_name_component - 1) ++ "\u{20ac}" ++ "tail";
+    const clipped = clipName(split);
+    try std.testing.expectEqualStrings("a" ** (max_name_component - 1), clipped);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(clipped));
+
+    // ...but a sequence that starts exactly at the limit is simply past it,
+    // so the bytes before it are all kept.
+    const aligned = "a" ** max_name_component ++ "\u{20ac}";
+    try std.testing.expectEqualStrings(exact, clipName(aligned));
+
+    try std.testing.expectEqualStrings("", clipName(""));
+}
+
 /// Test-only field lookup on an `.obj` value.
 fn testFieldOf(v: unityz.value.Value, name: []const u8) ?unityz.value.Value {
     for (v.obj) |f| {

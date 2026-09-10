@@ -352,3 +352,49 @@ test "encode round-trips random and edge-sized images" {
         }
     }
 }
+
+test "every filter inverts itself, on the first row and the first pixel" {
+    // `bestFilter` applies all five filters to every scanline but keeps
+    // only the cheapest, so the round-trip above verifies each filter only
+    // on the rows that happened to pick it - it covers them all across
+    // enough images, but a fault is reported as a whole image mismatch
+    // with no clue which filter produced it. Check each one against the
+    // inverse directly instead, at a stride that is nothing but the
+    // leading pixel `filterRowKnown` peels off and at strides past it, and
+    // both with a row above and as row 0 where PNG defines the missing one
+    // as zeroes.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0x5f);
+    const rnd = prng.random();
+
+    for ([_]usize{ 4, 8, 12, 64 }) |stride| {
+        const cur = try a.alloc(u8, stride);
+        const prev = try a.alloc(u8, stride);
+        const work = try a.alloc(u8, stride);
+        rnd.bytes(cur);
+        rnd.bytes(prev);
+        for ([_]u8{ 0, 1, 2, 3, 4 }) |f| {
+            filterRow(f, cur, prev, work);
+            unfilterRow(f, work, prev);
+            try std.testing.expectEqualSlices(u8, cur, work);
+
+            filterRow(f, cur, &.{}, work);
+            unfilterRow(f, work, &.{});
+            try std.testing.expectEqualSlices(u8, cur, work);
+        }
+    }
+
+    // Known values, so the checks above cannot be satisfied by a filter
+    // that predicts nothing: Up against an identical row above, and Sub on
+    // a row of identical pixels, both cancel to zero past the leading
+    // pixel the predictors cannot reach.
+    const flat = [_]u8{ 9, 8, 7, 6 } ** 4;
+    var out: [flat.len]u8 = undefined;
+    filterRow(2, &flat, &flat, &out);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** flat.len, &out);
+    filterRow(1, &flat, &.{}, &out);
+    try std.testing.expectEqualSlices(u8, flat[0..4], out[0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** (flat.len - 4), out[4..]);
+}
