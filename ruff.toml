@@ -47,6 +47,9 @@ select = [
     "PERF", # performance anti-patterns
     "PGH",  # blanket `# noqa` / `# type: ignore` with no rule scope
     "PIE",  # misc lints
+    "PLC",  # pylint conventions
+    "PLE",  # pylint errors: bad string format, misplaced `raise`, bad `strip`
+    "PLW",  # pylint warnings: unchecked `subprocess.run`, rebound loop var
     "Q",    # quote style
     "RET",  # return-path simplifications
     "RSE",  # `raise X()` vs `raise X`
@@ -81,7 +84,15 @@ ignore = ["E501", "S101"]
 # Not selected, and not oversights:
 #   T20  - these are CLI scripts; `print` is their output channel, not debris.
 #   D    - the modules carry docstrings; per-function ones are not required.
-# The remaining groups (SIM, PTH, TRY, PL, COM, EM) have live findings in the
+# The remaining groups (SIM, PTH, TRY, PLR, COM, EM) have live findings in the
 # tree today. They are not enabled here because enabling a rule the tree fails
 # would make this file advisory instead of blocking; fix the findings, then add
 # the group.
+#
+# PLR is named rather than `PL` on purpose. Selecting the whole pylint prefix
+# would fail on two PLR2004 magic-value comparisons and nothing else, so the
+# prefix as a unit was left out - which also dropped PLE and PLW, the two
+# halves of it that find defects rather than style (a bad string-format char,
+# a misplaced bare `raise`, a `subprocess.run` with no `check=`, a rebound
+# loop variable). Those three subgroups pass clean today and are selected
+# above; only the refactor group waits on its findings.
