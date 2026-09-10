@@ -243,7 +243,7 @@ fn writePrimitive(w: *streams.Writer, prim: object_reader.Primitive, v: value.Va
         .u32 => try w.writeInt(u32, try narrowInt(u32, try asInt(v))),
         .i64 => try w.writeInt(i64, try asInt(v)),
         .u64 => try w.writeInt(u64, try asUint(v)),
-        .f32 => try w.writeFloat(f32, @floatCast(try asFloat(v))),
+        .f32 => try w.writeFloat(f32, try narrowFloat(try asFloat(v))),
         .f64 => try w.writeFloat(f64, try asFloat(v)),
     }
 }
@@ -258,6 +258,20 @@ fn asInt(v: value.Value) Error!i64 {
 /// `@intCast` the compiler is allowed to turn into a crash.
 fn narrowInt(comptime T: type, v: i64) Error!T {
     return std.math.cast(T, v) orelse error.TypeMismatch;
+}
+
+/// Narrows an edited float to the `float` width its type tree node
+/// declares, the way `narrowInt` narrows an integer. A magnitude past f32's
+/// range (`unityz edit ... m_Radius 1e300`) is a value the field cannot
+/// hold, but `@floatCast` turns it into +/-Inf instead of failing, so the
+/// edit landed as a corrupt float in the rewritten asset rather than as the
+/// operating error the integer path already reports. Ordinary precision
+/// loss is expected and kept, and a non-finite input passes through so a
+/// field that already held one still round-trips.
+fn narrowFloat(v: f64) Error!f32 {
+    const narrowed: f32 = @floatCast(v);
+    if (std.math.isFinite(v) and !std.math.isFinite(narrowed)) return error.TypeMismatch;
+    return narrowed;
 }
 
 fn asUint(v: value.Value) Error!u64 {

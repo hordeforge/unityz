@@ -2251,7 +2251,14 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 var haw = std.Io.Writer.Allocating.init(arena);
                 const hw = &haw.writer;
                 try hw.print("P5\n{d} {d}\n65535\n", .{ side, side });
-                for (hv.array) |h| {
+                // Exactly the `side * side` samples the header just
+                // declared. `side` is the *floored* integer square root, so
+                // an `m_Heights` whose length is not a perfect square - a
+                // truncated or hand-edited asset, since Unity itself always
+                // writes (res+1)^2 - left the extra elements in the payload
+                // and produced a PGM longer than its own dimensions.
+                const written_samples: usize = @as(usize, side) * side;
+                for (hv.array[0..written_samples]) |h| {
                     const hv_i = h.asInt() orelse 0;
                     const v16: u16 = if (range == 0) 0 else @intCast(@divTrunc((@as(i128, hv_i) - min_h) * 65535, @as(i128, range)));
                     try hw.writeByte(@intCast(v16 >> 8));

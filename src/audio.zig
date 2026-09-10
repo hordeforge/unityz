@@ -198,7 +198,12 @@ fn decodeXboxIma(out: []i16, data: []const u8, channels: usize, sample_count: u3
             const header_off = frame_off + 4 * ch;
             if (header_off + 4 > data.len) return error.Corrupt;
             var hist1: i32 = std.mem.readInt(i16, data[header_off..][0..2], .little);
-            var step_index: i32 = data[header_off + 2];
+            // The step index is signed (vgmstream reads it with `read_8bit`),
+            // so read it as an i8: taken unsigned, a byte of 0xff means 255
+            // and clamps to 88 - step 32767 instead of the intended 7 - and
+            // the whole 64-sample block decodes to clipped noise. Reading it
+            // unsigned also made the `< 0` clamp below unreachable.
+            var step_index: i32 = @as(i8, @bitCast(data[header_off + 2]));
             if (step_index < 0) step_index = 0;
             if (step_index > 88) step_index = 88;
             var i: usize = 0;
