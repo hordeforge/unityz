@@ -1033,7 +1033,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
         }
     }
     switch (sniff.container) {
-        .webfile => {
+        .webfile, .bundle => {
             var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena_state.deinit();
             const arena = arena_state.allocator();
@@ -1043,16 +1043,32 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             const summary_ptr: ?*ExtractSummary = if (summary_mode) &summary else null;
             var sidecars: std.ArrayList(Sidecar) = .empty;
             const injected = try loadTrees(arena, trees_path, stdout);
-            const wf = unityz.webfile.parse(arena, bytes) catch |err| {
-                failure("unityz: {s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
-                return;
+            // A WebFile entry and a UnityFS node are the same (path, bytes)
+            // pair to everything below, so both containers extract through
+            // one loop once the container-specific parse has run.
+            const entries: []const Sidecar = if (sniff.container == .webfile) blk: {
+                const wf = unityz.webfile.parse(arena, bytes) catch |err| {
+                    failure("unityz: {s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
+                    return;
+                };
+                const list = try arena.alloc(Sidecar, wf.entries.len);
+                for (wf.entries, list) |e, *slot| slot.* = .{ .path = e.path, .data = e.data };
+                break :blk list;
+            } else blk: {
+                const b = unityz.bundle.parse(arena, bytes) catch |err| {
+                    failure("unityz: {s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
+                    return;
+                };
+                const list = try arena.alloc(Sidecar, b.nodes.len);
+                for (b.nodes, list) |n, *slot| slot.* = .{ .path = n.path, .data = n.data };
+                break :blk list;
             };
-            for (wf.entries) |e| {
+            for (entries) |e| {
                 if (unityz.container.sniff(e.data).container == .serialized) continue;
-                try sidecars.append(arena, .{ .path = e.path, .data = e.data });
+                try sidecars.append(arena, e);
             }
             for (try diskSidecars(arena, path)) |sc| try sidecars.append(arena, sc);
-            for (wf.entries) |e| {
+            for (entries) |e| {
                 if (path_filter) |pf| {
                     if (pf.node) |sn| {
                         if (!std.mem.eql(u8, e.path, sn)) continue;
@@ -1068,50 +1084,6 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 }
                 if ((recursive or summary_mode) and unityz.container.sniff(e.data).container == .serialized) {
                     try extractSerialized(arena, e.path, e.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, injected, summary_ptr, &scripts, stdout);
-                }
-            }
-            if (summary_mode) {
-                try printExtractSummary(arena, &summary, json_mode, stdout);
-            } else {
-                if (scripts.items.len != 0) try writeScriptsJson(arena, scripts.items, stdout);
-                if (json_mode) try writeManifest(arena, manifest.items, stdout);
-            }
-        },
-        .bundle => {
-            var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-            defer arena_state.deinit();
-            const arena = arena_state.allocator();
-            var manifest: std.ArrayList(ManifestEntry) = .empty;
-            var summary: ExtractSummary = .{};
-            var scripts: std.ArrayList(ScriptEntry) = .empty;
-            const summary_ptr: ?*ExtractSummary = if (summary_mode) &summary else null;
-            var sidecars: std.ArrayList(Sidecar) = .empty;
-            const injected = try loadTrees(arena, trees_path, stdout);
-            const b = unityz.bundle.parse(arena, bytes) catch |err| {
-                failure("unityz: {s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
-                return;
-            };
-            for (b.nodes) |n| {
-                if (unityz.container.sniff(n.data).container == .serialized) continue;
-                try sidecars.append(arena, .{ .path = n.path, .data = n.data });
-            }
-            for (try diskSidecars(arena, path)) |sc| try sidecars.append(arena, sc);
-            for (b.nodes) |n| {
-                if (path_filter) |pf| {
-                    if (pf.node) |sn| {
-                        if (!std.mem.eql(u8, n.path, sn)) continue;
-                    }
-                }
-                // Node paths are file-supplied; confine the written name to
-                // one component so a crafted path cannot steer the write
-                // outside the extract directory.
-                const base_name = sanitizeComponent(try arena.dupe(u8, basename(n.path)));
-                if (!summary_mode) {
-                    try writeFileToCwd(base_name, n.data);
-                    try stdout.print("extracted {s} ({d} bytes)\n", .{ base_name, n.data.len });
-                }
-                if ((recursive or summary_mode) and unityz.container.sniff(n.data).container == .serialized) {
-                    try extractSerialized(arena, n.path, n.data, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, try std.fmt.allocPrint(arena, "objects/{s}", .{base_name}), sidecars.items, &manifest, format, name_filter, injected, summary_ptr, &scripts, stdout);
                 }
             }
             if (summary_mode) {

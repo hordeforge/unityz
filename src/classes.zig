@@ -438,6 +438,22 @@ pub fn pptrField(v: value.Value, name: []const u8) ?value.PPtr {
     };
 }
 
+/// Collects the PPtrs of an array field into an owned slice. A missing
+/// field, a non-array value, and elements that are not PPtrs each
+/// contribute nothing, so a stripped or renamed field yields an empty
+/// list rather than failing.
+fn pptrArrayField(allocator: std.mem.Allocator, v: value.Value, name: []const u8) std.mem.Allocator.Error![]const value.PPtr {
+    const f = fieldOf(v, name) orelse return &.{};
+    if (f != .array) return &.{};
+    var list: std.ArrayList(value.PPtr) = .empty;
+    for (f.array) |item| {
+        if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
+            try list.append(allocator, p);
+        }
+    }
+    return try list.toOwnedSlice(allocator);
+}
+
 /// A `Vector3f`/`Quaternionf`-style struct of floats.
 pub fn vec3Field(v: value.Value, name: []const u8) ?[3]f32 {
     const f = fieldOf(v, name) orelse return null;
@@ -906,17 +922,7 @@ pub const Font = struct {
                 self.font_names = try names.toOwnedSlice(allocator);
             }
         }
-        if (fieldOf(v, "m_FallbackFonts")) |f| {
-            if (f == .array) {
-                var fonts: std.ArrayList(value.PPtr) = .empty;
-                for (f.array) |item| {
-                    if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
-                        try fonts.append(allocator, p);
-                    }
-                }
-                self.fallback_fonts = try fonts.toOwnedSlice(allocator);
-            }
-        }
+        self.fallback_fonts = try pptrArrayField(allocator, v, "m_FallbackFonts");
         return self;
     }
 
@@ -1050,17 +1056,7 @@ pub const AudioMixerController = struct {
             .start_snapshot = pptrField(v, "m_StartSnapshot"),
             .update_mode = intField(v, "m_UpdateMode") orelse 0,
         };
-        if (fieldOf(v, "m_Snapshots")) |f| {
-            if (f == .array) {
-                var list: std.ArrayList(value.PPtr) = .empty;
-                for (f.array) |item| {
-                    if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
-                        try list.append(allocator, p);
-                    }
-                }
-                self.snapshots = try list.toOwnedSlice(allocator);
-            }
-        }
+        self.snapshots = try pptrArrayField(allocator, v, "m_Snapshots");
         return self;
     }
 };
@@ -1077,17 +1073,7 @@ pub const AudioMixerGroup = struct {
             .name = stringField(v, "m_Name") orelse "",
             .audio_mixer = pptrField(v, "m_AudioMixer"),
         };
-        if (fieldOf(v, "m_Children")) |f| {
-            if (f == .array) {
-                var list: std.ArrayList(value.PPtr) = .empty;
-                for (f.array) |item| {
-                    if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
-                        try list.append(allocator, p);
-                    }
-                }
-                self.children = try list.toOwnedSlice(allocator);
-            }
-        }
+        self.children = try pptrArrayField(allocator, v, "m_Children");
         return self;
     }
 };
@@ -1275,17 +1261,7 @@ pub const AnimatorController = struct {
                 self.tos = try list.toOwnedSlice(allocator);
             }
         }
-        if (fieldOf(v, "m_AnimationClips")) |f| {
-            if (f == .array) {
-                var list: std.ArrayList(value.PPtr) = .empty;
-                for (f.array) |item| {
-                    if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
-                        try list.append(allocator, p);
-                    }
-                }
-                self.clips = try list.toOwnedSlice(allocator);
-            }
-        }
+        self.clips = try pptrArrayField(allocator, v, "m_AnimationClips");
         const controller = fieldOf(v, "m_Controller") orelse return self;
         if (fieldOf(controller, "m_LayerArray")) |f| {
             if (f == .array) {
@@ -1432,18 +1408,7 @@ pub const GameObject = struct {
             .is_active = boolField(v, "m_IsActive") orelse true,
             .tag = stringField(v, "m_TagString") orelse "",
         };
-        const comps = fieldOf(v, "m_Components") orelse return self;
-        const arr = switch (comps) {
-            .array => |a| a,
-            else => return self,
-        };
-        var list: std.ArrayList(value.PPtr) = .empty;
-        for (arr) |item| {
-            if (pptrField(.{ .obj = &.{.{ .name = "x", .value = item }} }, "x")) |p| {
-                try list.append(allocator, p);
-            }
-        }
-        self.components = try list.toOwnedSlice(allocator);
+        self.components = try pptrArrayField(allocator, v, "m_Components");
         return self;
     }
 };

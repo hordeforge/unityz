@@ -155,8 +155,8 @@ test "BMP encode rejects mismatched input" {
 
 test "encode round-trips random and edge-sized images" {
     // The encoder must round-trip arbitrary RGBA buffers through the
-    // test-only decoder: random pixels at edge widths (1, 2, 3, 15, 16,
-    // 17, 255, 256, 257, 1024) and heights exercise stride/row handling.
+    // test-only decoder: random pixels at the edge widths and heights
+    // below exercise stride/row handling.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
