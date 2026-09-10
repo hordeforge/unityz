@@ -39,6 +39,39 @@ const readSpriteTriangles = unityz.classes.readSpriteTriangles;
 /// CLI prints agrees byte for byte with the library's own.
 const writeJsonString = unityz.value.writeJsonString;
 
+/// Renders a float the way `unityz.value.jsonWrite` does when printed with
+/// `{f}`: the number when finite, `null` otherwise. Float fields are
+/// bit-cast straight out of the file, so any bit pattern - NaN, +/-Inf -
+/// reaches the hand-written JSON documents below, and `{d}` spells those as
+/// the bare words `nan` / `inf`, which no conforming JSON parser accepts.
+/// The library's own value-tree writer already emits `null` for them; this
+/// keeps the CLI's own documents agreeing with it.
+const JsonFloat = struct {
+    v: f64,
+
+    pub fn format(self: JsonFloat, w: *Io.Writer) Io.Writer.Error!void {
+        if (std.math.isFinite(self.v)) return w.print("{d}", .{self.v});
+        return w.writeAll("null");
+    }
+};
+
+/// `JsonFloat` shorthand for the print sites; pair it with `{f}`.
+fn jsonFloat(v: f64) JsonFloat {
+    return .{ .v = v };
+}
+
+test "jsonFloat spells non-finite floats null and leaves finite ones alone" {
+    var buf: [64]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try w.print("[{f},{f},{f},{f}]", .{
+        jsonFloat(1.5),
+        jsonFloat(std.math.nan(f64)),
+        jsonFloat(std.math.inf(f64)),
+        jsonFloat(-std.math.inf(f64)),
+    });
+    try std.testing.expectEqualStrings("[1.5,null,null,null]", w.buffered());
+}
+
 const usage =
     \\unityz — read, extract, and edit Unity assets
     \\
@@ -1825,8 +1858,8 @@ fn fontMetadataJson(arena: std.mem.Allocator, path_id: i64, class_id: i32, f: un
         if (i != 0) try w.writeByte(',');
         try writeJsonString(w, n);
     }
-    try w.print("],\"font_size\":{d},\"line_spacing\":{d},\"tracking\":{d},\"pixel_scale\":{d}", .{ f.font_size, f.line_spacing, f.tracking, f.pixel_scale });
-    try w.print(",\"ascent\":{d},\"descent\":{d},\"ascii_start_offset\":{d},\"character_spacing\":{d},\"character_padding\":{d},\"convert_case\":{d}", .{ f.ascent, f.descent, f.ascii_start_offset, f.character_spacing, f.character_padding, f.convert_case });
+    try w.print("],\"font_size\":{f},\"line_spacing\":{f},\"tracking\":{f},\"pixel_scale\":{f}", .{ jsonFloat(f.font_size), jsonFloat(f.line_spacing), jsonFloat(f.tracking), jsonFloat(f.pixel_scale) });
+    try w.print(",\"ascent\":{f},\"descent\":{f},\"ascii_start_offset\":{d},\"character_spacing\":{d},\"character_padding\":{d},\"convert_case\":{d}", .{ jsonFloat(f.ascent), jsonFloat(f.descent), f.ascii_start_offset, f.character_spacing, f.character_padding, f.convert_case });
     try w.print(",\"default_style\":{d},\"font_rendering_mode\":{d},\"use_legacy_bounds_calculation\":{},\"should_round_advance_value\":{}", .{ f.default_style, f.font_rendering_mode, f.use_legacy_bounds_calculation, f.should_round_advance_value });
     try w.print(",\"character_rects\":{d},\"kerning_values\":{d},\"font_data_size\":{d}", .{ f.character_rects, f.kerning_values, f.font_data.len });
     if (f.default_material) |m| try w.print(",\"default_material\":{{\"file_id\":{d},\"path_id\":{d}}}", .{ m.file_id, m.path_id });
@@ -2264,10 +2297,10 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try writeJsonString(mw, td_name);
                 try mw.print(",\"resolution\":{d},\"samples\":{d},\"heightMin\":{d},\"heightMax\":{d}", .{ resolution, hv.array.len, min_h, max_h });
                 if (unityz.classes.fieldOf(hm, "m_Scale")) |sc| {
-                    try mw.print(",\"scale\":{{\"x\":{d},\"y\":{d},\"z\":{d}}}", .{
-                        unityz.classes.floatField(sc, "x") orelse 0,
-                        unityz.classes.floatField(sc, "y") orelse 0,
-                        unityz.classes.floatField(sc, "z") orelse 0,
+                    try mw.print(",\"scale\":{{\"x\":{f},\"y\":{f},\"z\":{f}}}", .{
+                        jsonFloat(unityz.classes.floatField(sc, "x") orelse 0),
+                        jsonFloat(unityz.classes.floatField(sc, "y") orelse 0),
+                        jsonFloat(unityz.classes.floatField(sc, "z") orelse 0),
                     });
                 }
                 try mw.writeByte('}');
@@ -2574,7 +2607,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const w = &aw.writer;
                 try w.writeAll("{\"name\":");
                 try writeJsonString(w, clip_name);
-                try w.print(",\"legacy\":{},\"sample_rate\":{d},\"curves\":[", .{ legacy, sample_rate });
+                try w.print(",\"legacy\":{},\"sample_rate\":{f},\"curves\":[", .{ legacy, jsonFloat(sample_rate) });
                 const curve_fields = [_]struct { name: []const u8, default_attr: []const u8 }{
                     .{ .name = "m_EulerCurves", .default_attr = "m_LocalEulerAnglesHint" },
                     .{ .name = "m_PositionCurves", .default_attr = "m_LocalPosition" },
@@ -2609,7 +2642,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                             // weight fields are defaults and dropped here
                             try w.writeAll("{\"time\":");
                             const t = if (unityz.classes.fieldOf(k, "time")) |tv| tv.asFloat() orelse 0 else 0;
-                            try w.print("{d}", .{t});
+                            try w.print("{f}", .{jsonFloat(t)});
                             try w.writeAll(",\"value\":");
                             if (unityz.classes.fieldOf(k, "value")) |val| {
                                 try unityz.value.jsonWrite(val, w);
@@ -3161,7 +3194,7 @@ fn writeMixerSnapshotFiles(
     const w = &aw.writer;
     try w.print("{{\"path_id\":{d},\"name\":", .{path_id});
     try writeJsonString(w, s.name);
-    try w.print(",\"time\":{d},\"parameters\":{d}}}", .{ s.time, s.values });
+    try w.print(",\"time\":{f},\"parameters\":{d}}}", .{ jsonFloat(s.time), s.values });
     const meta = try aw.toOwnedSlice();
     try finalizeSidecar(arena, subdir, path_id, "mixer_snapshot", s.name, 245, "mixer snapshot", meta, manifest, extracted, stdout);
 }
@@ -3180,11 +3213,11 @@ fn writeParticleFiles(
 ) !void {
     var aw = std.Io.Writer.Allocating.init(arena);
     const w = &aw.writer;
-    try w.print("{{\"path_id\":{d},\"duration\":{d},\"looping\":{},\"prewarm\":{},\"playOnAwake\":{},\"simulationSpeed\":{d},\"scalingMode\":{d},\"stopAction\":{d},\"cullingMode\":{d}", .{ path_id, ps.duration, ps.looping, ps.prewarm, ps.play_on_awake, ps.simulation_speed, ps.scaling_mode, ps.stop_action, ps.culling_mode });
+    try w.print("{{\"path_id\":{d},\"duration\":{f},\"looping\":{},\"prewarm\":{},\"playOnAwake\":{},\"simulationSpeed\":{f},\"scalingMode\":{d},\"stopAction\":{d},\"cullingMode\":{d}", .{ path_id, jsonFloat(ps.duration), ps.looping, ps.prewarm, ps.play_on_awake, jsonFloat(ps.simulation_speed), ps.scaling_mode, ps.stop_action, ps.culling_mode });
     if (ps.game_object) |go| try w.print(",\"gameObject\":{d}", .{go.path_id});
-    try w.print(",\"main\":{{\"startLifetime\":{d},\"startSpeed\":{d},\"startSize\":{d},\"gravityModifier\":{d},\"maxParticles\":{d}}}", .{ ps.start_lifetime, ps.start_speed, ps.start_size, ps.gravity_modifier, ps.max_particles });
-    try w.print(",\"emission\":{{\"enabled\":{},\"rateOverTime\":{d},\"bursts\":{d}}}", .{ ps.emission_enabled, ps.rate_over_time, ps.burst_count });
-    try w.print(",\"shape\":{{\"enabled\":{},\"type\":{d},\"angle\":{d},\"radius\":{d}}}", .{ ps.shape_enabled, ps.shape_type, ps.shape_angle, ps.shape_radius });
+    try w.print(",\"main\":{{\"startLifetime\":{f},\"startSpeed\":{f},\"startSize\":{f},\"gravityModifier\":{f},\"maxParticles\":{d}}}", .{ jsonFloat(ps.start_lifetime), jsonFloat(ps.start_speed), jsonFloat(ps.start_size), jsonFloat(ps.gravity_modifier), ps.max_particles });
+    try w.print(",\"emission\":{{\"enabled\":{},\"rateOverTime\":{f},\"bursts\":{d}}}", .{ ps.emission_enabled, jsonFloat(ps.rate_over_time), ps.burst_count });
+    try w.print(",\"shape\":{{\"enabled\":{},\"type\":{d},\"angle\":{f},\"radius\":{f}}}", .{ ps.shape_enabled, ps.shape_type, jsonFloat(ps.shape_angle), jsonFloat(ps.shape_radius) });
     const module_names = [_][]const u8{
         "initial",       "emission", "shape",           "size",                   "rotation",     "color",
         "uv",            "velocity", "inheritVelocity", "lifetimeByEmitterSpeed", "force",        "externalForces",
@@ -3223,7 +3256,7 @@ fn writeAnimatorFiles(
         if (i != 0) try w.writeByte(',');
         try w.print("{{\"stateMachineIndex\":{d},\"name\":", .{l.state_machine_index});
         try writeJsonString(w, ac.tosPath(l.binding));
-        try w.print(",\"blendingMode\":{d},\"defaultWeight\":{d},\"ikPass\":{}}}", .{ l.blending_mode, l.default_weight, l.ik_pass });
+        try w.print(",\"blendingMode\":{d},\"defaultWeight\":{f},\"ikPass\":{}}}", .{ l.blending_mode, jsonFloat(l.default_weight), l.ik_pass });
     }
     try w.writeByte(']');
     try w.print(",\"stateMachines\":{d},\"states\":[", .{ac.state_machine_count});
@@ -3233,7 +3266,7 @@ fn writeAnimatorFiles(
         try writeJsonString(w, ac.tosPath(st.name_id));
         try w.writeAll(",\"fullPath\":");
         try writeJsonString(w, ac.tosPath(st.full_path_id));
-        try w.print(",\"speed\":{d},\"loop\":{},\"transitions\":{d},\"blendTrees\":{d}}}", .{ st.speed, st.loop, st.transition_count, st.blend_tree_count });
+        try w.print(",\"speed\":{f},\"loop\":{},\"transitions\":{d},\"blendTrees\":{d}}}", .{ jsonFloat(st.speed), st.loop, st.transition_count, st.blend_tree_count });
     }
     try w.print("],\"anyStateTransitions\":{d},\"defaultState\":{d},\"parameters\":{d},\"clips\":[", .{ ac.any_state_transitions, ac.default_state, ac.parameters });
     for (ac.clips, 0..) |c, i| {
@@ -4543,15 +4576,15 @@ fn materialJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
                 try writeJsonString(w, prop_name);
                 try w.print(",\"texture\":{d}", .{tex});
                 if (unityz.classes.fieldOf(val, "m_Scale")) |sc| {
-                    try w.print(",\"scale\":[{d},{d}]", .{
-                        if (unityz.classes.floatField(sc, "x")) |x| x else 1,
-                        if (unityz.classes.floatField(sc, "y")) |y| y else 1,
+                    try w.print(",\"scale\":[{f},{f}]", .{
+                        jsonFloat(if (unityz.classes.floatField(sc, "x")) |x| x else 1),
+                        jsonFloat(if (unityz.classes.floatField(sc, "y")) |y| y else 1),
                     });
                 }
                 if (unityz.classes.fieldOf(val, "m_Offset")) |off| {
-                    try w.print(",\"offset\":[{d},{d}]", .{
-                        unityz.classes.floatField(off, "x") orelse 0,
-                        unityz.classes.floatField(off, "y") orelse 0,
+                    try w.print(",\"offset\":[{f},{f}]", .{
+                        jsonFloat(unityz.classes.floatField(off, "x") orelse 0),
+                        jsonFloat(unityz.classes.floatField(off, "y") orelse 0),
                     });
                 }
                 try w.writeByte('}');
@@ -4572,7 +4605,7 @@ fn materialJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
                 if (count != 0) try w.writeByte(',');
                 try w.writeAll("{\"name\":");
                 try writeJsonString(w, prop_name);
-                try w.print(",\"value\":{d}}}", .{entry.array[1].asFloat() orelse 0});
+                try w.print(",\"value\":{f}}}", .{jsonFloat(entry.array[1].asFloat() orelse 0)});
                 count += 1;
             }
         }
@@ -4592,11 +4625,11 @@ fn materialJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
                 try writeJsonString(w, prop_name);
                 try w.writeAll(",\"value\":[");
                 const val = entry.array[1];
-                try w.print("{d},{d},{d},{d}]}}", .{
-                    unityz.classes.floatField(val, "r") orelse 0,
-                    unityz.classes.floatField(val, "g") orelse 0,
-                    unityz.classes.floatField(val, "b") orelse 0,
-                    unityz.classes.floatField(val, "a") orelse 1,
+                try w.print("{f},{f},{f},{f}]}}", .{
+                    jsonFloat(unityz.classes.floatField(val, "r") orelse 0),
+                    jsonFloat(unityz.classes.floatField(val, "g") orelse 0),
+                    jsonFloat(unityz.classes.floatField(val, "b") orelse 0),
+                    jsonFloat(unityz.classes.floatField(val, "a") orelse 1),
                 });
                 count += 1;
             }
@@ -10416,7 +10449,7 @@ fn printHierarchyNode(
     if (json) {
         try stdout.writeAll("{\"name\":");
         try writeJsonString(stdout, if (go) |g| g.name else "");
-        try stdout.print(",\"transform\":{d},\"gameObject\":{d},\"position\":[{d},{d},{d}],\"components\":[", .{ path_id, tn.go, tn.pos[0], tn.pos[1], tn.pos[2] });
+        try stdout.print(",\"transform\":{d},\"gameObject\":{d},\"position\":[{f},{f},{f}],\"components\":[", .{ path_id, tn.go, jsonFloat(tn.pos[0]), jsonFloat(tn.pos[1]), jsonFloat(tn.pos[2]) });
         if (go) |g| {
             for (g.components.items, 0..) |c, i| {
                 if (i != 0) try stdout.writeByte(',');
