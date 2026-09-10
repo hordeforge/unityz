@@ -628,6 +628,34 @@ fn releaseList() []const u8 {
     return list;
 }
 
+/// The `--json` / `--trees <file>` pair, the whole option set of the
+/// commands that only report.
+const JsonTreesOptions = struct {
+    json: bool = false,
+    trees_path: ?[]const u8 = null,
+};
+
+/// Parses the `--json` / `--trees` option pair, rejecting anything else as
+/// an option of `command` (the word the usage error names). Shared so the
+/// commands that take only these two cannot drift apart on either the
+/// accepted spellings or the wording of the error.
+fn parseJsonTreesOptions(rest: []const []const u8, comptime command: []const u8) error{Usage}!JsonTreesOptions {
+    var opts: JsonTreesOptions = .{};
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const arg = rest[i];
+        if (std.mem.eql(u8, arg, "--json")) {
+            opts.json = true;
+        } else if (std.mem.eql(u8, arg, "--trees") and i + 1 < rest.len) {
+            opts.trees_path = rest[i + 1];
+            i += 1;
+        } else {
+            return usageError("unityz: unknown " ++ command ++ " option '{s}'\n", .{arg});
+        }
+    }
+    return opts;
+}
+
 /// The trees table a command decodes typeless objects with: the `--trees`
 /// file when given (null on a diagnostic, as before), plus the built-in
 /// release database under `--builtin`.
@@ -6015,20 +6043,9 @@ fn skinSerializedBytes(
 /// exit non-zero when a `SkinnedMeshRenderer` references a shader that does
 /// not skin. Recurse into bundle/webfile serialized nodes.
 fn cmdSkin(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
-    var json = false;
-    var trees_path: ?[]const u8 = null;
-    var ai: usize = 0;
-    while (ai < rest.len) : (ai += 1) {
-        const arg = rest[ai];
-        if (std.mem.eql(u8, arg, "--json")) {
-            json = true;
-        } else if (std.mem.eql(u8, arg, "--trees") and ai + 1 < rest.len) {
-            trees_path = rest[ai + 1];
-            ai += 1;
-        } else {
-            return usageError("unityz: unknown skin option '{s}'\n", .{arg});
-        }
-    }
+    const opts = try parseJsonTreesOptions(rest, "skin");
+    const json = opts.json;
+    const trees_path = opts.trees_path;
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
@@ -9809,20 +9826,9 @@ fn flattenNode(arena: std.mem.Allocator, node: *const unityz.typetree.Node, out:
 /// signature to match the shared `cmd*` shape `runCommand` dispatches to.
 fn cmdHierarchy(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     _ = path;
-    var json = false;
-    var trees_path: ?[]const u8 = null;
-    var i: usize = 0;
-    while (i < rest.len) : (i += 1) {
-        const arg = rest[i];
-        if (std.mem.eql(u8, arg, "--json")) {
-            json = true;
-        } else if (std.mem.eql(u8, arg, "--trees") and i + 1 < rest.len) {
-            trees_path = rest[i + 1];
-            i += 1;
-        } else {
-            return usageError("unityz: unknown hierarchy option '{s}'\n", .{arg});
-        }
-    }
+    const opts = try parseJsonTreesOptions(rest, "hierarchy");
+    const json = opts.json;
+    const trees_path = opts.trees_path;
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -9876,20 +9882,9 @@ const ManagedFiles = struct {
 /// can only reach by loading a full .NET runtime; here it is plain metadata
 /// parsing. Accepts a directory (scans *.dll) or a single assembly path.
 fn cmdManaged(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
-    var json = false;
-    var trees_path: ?[]const u8 = null;
-    var i: usize = 0;
-    while (i < rest.len) : (i += 1) {
-        const arg = rest[i];
-        if (std.mem.eql(u8, arg, "--json")) {
-            json = true;
-        } else if (std.mem.eql(u8, arg, "--trees") and i + 1 < rest.len) {
-            trees_path = rest[i + 1];
-            i += 1;
-        } else {
-            return usageError("unityz: unknown managed option '{s}'\n", .{arg});
-        }
-    }
+    const opts = try parseJsonTreesOptions(rest, "managed");
+    const json = opts.json;
+    const trees_path = opts.trees_path;
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();

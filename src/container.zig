@@ -107,12 +107,7 @@ pub fn sniff(data: []const u8) SniffResult {
         // would reject.
         if (serialized.supportedVersion(version)) {
             var meta_size = meta0;
-            const header_size: usize = if (version <= 8)
-                16
-            else if (version <= 21)
-                20
-            else
-                48;
+            const header_size = serialized.headerSize(version);
 
             if (version >= 22) {
                 // real metadata size is re-read at offset 20 (big endian)

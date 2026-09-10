@@ -140,6 +140,9 @@ pub fn decodeSample(allocator: std.mem.Allocator, raw: []const u8, data_start: u
 /// with no sample available to verify against - report the channel
 /// count unsupported rather than guess.
 fn decodeGcadpcm(out: []i16, data: []const u8, channels: usize, sample_count: u32, coefs: []const i16) Error![]i16 {
+    // `out` is sized by the caller from the same two header fields this
+    // loop indexes it with; nothing in the types ties them together.
+    std.debug.assert(out.len == @as(usize, sample_count) * channels);
     if (channels != 1) return error.UnsupportedChannels;
     if (coefs.len < 16) return error.Corrupt;
     const block_samples: usize = 14;
@@ -183,6 +186,7 @@ fn decodeGcadpcm(out: []i16, data: []const u8, channels: usize, sample_count: u3
 /// with the state reset at each block, low nibble first, one nibble per
 /// block unused. Mirrors vgmstream's decode_xbox_ima.
 fn decodeXboxIma(out: []i16, data: []const u8, channels: usize, sample_count: u32) Error![]i16 {
+    std.debug.assert(out.len == @as(usize, sample_count) * channels);
     const block_samples: usize = 64;
     const frame_size: usize = 36 * channels;
     var frame: usize = 0;

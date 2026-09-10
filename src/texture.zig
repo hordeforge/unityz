@@ -2069,6 +2069,16 @@ const astcQuintsTable = [_][128]u64{
     .{ 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 0, 0, 0, 0, 2, 4, 0, 0, 0, 0, 0, 0, 3, 4, 1, 1, 1, 1, 1, 1, 4, 4, 1, 1, 1, 1, 1, 1, 4, 4, 1, 1, 1, 1, 1, 1, 4, 4, 1, 1, 1, 1, 1, 1, 4, 4, 2, 2, 2, 2, 2, 2, 4, 4, 2, 2, 2, 2, 2, 2, 4, 4, 2, 2, 2, 2, 2, 2, 4, 4, 2, 2, 2, 2, 2, 2, 4, 4, 3, 3, 3, 3, 3, 3, 4, 4, 3, 3, 3, 3, 3, 3, 4, 4, 3, 3, 3, 3, 3, 3, 4, 4, 3, 3, 3, 3, 3, 3, 4, 4 },
 };
 
+/// Reads the next `now_size`-bit block of a trit/quint sequence. Going
+/// backwards the block sits *before* the cursor and its bits come out in
+/// reverse order, so both the offset and the bit order flip together -
+/// keeping the pair in one place is what stops the two directions from
+/// drifting apart.
+fn astcReadSeqBlock(buf: []const u8, p: i64, now_size: i64, reverse: bool) u64 {
+    if (!reverse) return astcGetBits64(buf, p, @intCast(now_size));
+    return astcBitReverseU64(astcGetBits64(buf, p -% now_size, @intCast(now_size)), @intCast(now_size));
+}
+
 /// Decodes an integer sequence (trit/quint/binary) into `out`.
 fn astcDecodeIntseq(
     buf: []const u8,
@@ -2094,46 +2104,24 @@ fn astcDecodeIntseq(
             const block_size: i64 = 8 +% 5 * @as(i64, @intCast(b));
             const last_block_size: i64 = @divTrunc(block_size * @as(i64, @intCast(last_block_count)) +% 4, 5);
 
-            if (reverse) {
-                for (0..block_count) |i| {
-                    const now_size: i64 = if (i < block_count -% 1) block_size else last_block_size;
-                    const d = astcBitReverseU64(astcGetBits64(buf, p -% now_size, @intCast(now_size)), @intCast(now_size));
-                    const x: usize = @intCast((d >> @intCast(b) & 3) |
-                        (d >> @intCast(b *% 2) & 0xc) |
-                        (d >> @intCast(b *% 3) & 0x10) |
-                        (d >> @intCast(b *% 4) & 0x60) |
-                        (d >> @intCast(b *% 5) & 0x80));
-                    for (0..5) |j| {
-                        if (n < count) {
-                            out[n] = .{
-                                .bits = (d >> @intCast(mt[j] +% b * j)) & mask,
-                                .nonbits = astcTritsTable[j][x],
-                            };
-                            n += 1;
-                        }
+            for (0..block_count) |i| {
+                const now_size: i64 = if (i < block_count -% 1) block_size else last_block_size;
+                const d = astcReadSeqBlock(buf, p, now_size, reverse);
+                const x: usize = @intCast((d >> @intCast(b) & 3) |
+                    (d >> @intCast(b *% 2) & 0xc) |
+                    (d >> @intCast(b *% 3) & 0x10) |
+                    (d >> @intCast(b *% 4) & 0x60) |
+                    (d >> @intCast(b *% 5) & 0x80));
+                for (0..5) |j| {
+                    if (n < count) {
+                        out[n] = .{
+                            .bits = (d >> @intCast(mt[j] +% b * j)) & mask,
+                            .nonbits = astcTritsTable[j][x],
+                        };
+                        n += 1;
                     }
-                    p -%= block_size;
                 }
-            } else {
-                for (0..block_count) |i| {
-                    const now_size: i64 = if (i < block_count -% 1) block_size else last_block_size;
-                    const d = astcGetBits64(buf, p, @intCast(now_size));
-                    const x: usize = @intCast((d >> @intCast(b) & 3) |
-                        (d >> @intCast(b *% 2) & 0xc) |
-                        (d >> @intCast(b *% 3) & 0x10) |
-                        (d >> @intCast(b *% 4) & 0x60) |
-                        (d >> @intCast(b *% 5) & 0x80));
-                    for (0..5) |j| {
-                        if (n < count) {
-                            out[n] = .{
-                                .bits = (d >> @intCast(mt[j] +% b * j)) & mask,
-                                .nonbits = astcTritsTable[j][x],
-                            };
-                            n += 1;
-                        }
-                    }
-                    p += block_size;
-                }
+                if (reverse) p -%= block_size else p += block_size;
             }
         },
         5 => {
@@ -2143,42 +2131,22 @@ fn astcDecodeIntseq(
             const block_size: i64 = 7 +% 3 * @as(i64, @intCast(b));
             const last_block_size: i64 = @divTrunc(block_size * @as(i64, @intCast(last_block_count)) +% 2, 3);
 
-            if (reverse) {
-                for (0..block_count) |i| {
-                    const now_size: i64 = if (i < block_count -% 1) block_size else last_block_size;
-                    const d = astcBitReverseU64(astcGetBits64(buf, p -% now_size, @intCast(now_size)), @intCast(now_size));
-                    const x: usize = @intCast((d >> @intCast(b) & 7) |
-                        (d >> @intCast(b *% 2) & 0x18) |
-                        (d >> @intCast(b *% 3) & 0x60));
-                    for (0..3) |j| {
-                        if (n < count) {
-                            out[n] = .{
-                                .bits = (d >> @intCast(mq[j] +% b * j)) & mask,
-                                .nonbits = astcQuintsTable[j][x],
-                            };
-                            n += 1;
-                        }
+            for (0..block_count) |i| {
+                const now_size: i64 = if (i < block_count -% 1) block_size else last_block_size;
+                const d = astcReadSeqBlock(buf, p, now_size, reverse);
+                const x: usize = @intCast((d >> @intCast(b) & 7) |
+                    (d >> @intCast(b *% 2) & 0x18) |
+                    (d >> @intCast(b *% 3) & 0x60));
+                for (0..3) |j| {
+                    if (n < count) {
+                        out[n] = .{
+                            .bits = (d >> @intCast(mq[j] +% b * j)) & mask,
+                            .nonbits = astcQuintsTable[j][x],
+                        };
+                        n += 1;
                     }
-                    p -%= block_size;
                 }
-            } else {
-                for (0..block_count) |i| {
-                    const now_size: i64 = if (i < block_count -% 1) block_size else last_block_size;
-                    const d = astcGetBits64(buf, p, @intCast(now_size));
-                    const x: usize = @intCast((d >> @intCast(b) & 7) |
-                        (d >> @intCast(b *% 2) & 0x18) |
-                        (d >> @intCast(b *% 3) & 0x60));
-                    for (0..3) |j| {
-                        if (n < count) {
-                            out[n] = .{
-                                .bits = (d >> @intCast(mq[j] +% b * j)) & mask,
-                                .nonbits = astcQuintsTable[j][x],
-                            };
-                            n += 1;
-                        }
-                    }
-                    p += block_size;
-                }
+                if (reverse) p -%= block_size else p += block_size;
             }
         },
         else => {
@@ -4122,21 +4090,11 @@ fn etcHPaints(d: [8]u8) [4][3]u8 {
     };
 }
 
+/// Paints a 4x4 block fully opaque. Same texel walk as `paintFourA1`; an
+/// `obaq` of 1 is what "opaque block" means there, so the two cannot drift
+/// apart on the pixel layout.
 fn paintFour(out: []u8, w: usize, h: usize, bx: usize, by: usize, bits: u64, paints: *const [4][3]u8) void {
-    for (0..4) |y| {
-        for (0..4) |x| {
-            const letter = x * 4 + y;
-            const idx = paintIndex(bits, letter);
-            const px = bx * 4 + x;
-            const py = by * 4 + y;
-            if (px >= w or py >= h) continue;
-            const dst = out[(py * w + px) * 4 ..][0..4];
-            dst[0] = paints[idx][0];
-            dst[1] = paints[idx][1];
-            dst[2] = paints[idx][2];
-            dst[3] = 255;
-        }
-    }
+    paintFourA1(out, w, h, bx, by, bits, paints, 1);
 }
 
 /// ETC2 planar mode: three corner colors (origin, horizontal, vertical)

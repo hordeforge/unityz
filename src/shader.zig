@@ -625,17 +625,6 @@ test "parameter blob parses a bone-matrix member" {
     try std.testing.expect(isBoneMatrixName(pb.members[0].name));
 }
 
-/// Writes a blob-convention string (u32 byte length, bytes, zero padding to 4).
-fn putBlobString(w: *streams.Writer, s: []const u8) !void {
-    try w.writeInt(i32, @intCast(s.len));
-    try w.writeBytes(s);
-    const pad = (4 - ((s.len + 4) % 4)) % 4;
-    if (pad != 0) {
-        const zeros = [_]u8{0} ** 4;
-        try w.writeBytes(zeros[0..pad]);
-    }
-}
-
 test "parameter blob parses a buffer with a nameless base and re-encodes byte for byte" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -647,12 +636,12 @@ test "parameter blob parses a buffer with a nameless base and re-encodes byte fo
     defer w.deinit();
     try w.writeInt(i32, @as(i32, @intCast(blob_version)));
     try w.writeInt(i32, 1); // bufferCount
-    try putBlobString(&w, ""); // nameless base buffer
+    try writeBlobString(&w, ""); // nameless base buffer
     try w.writeInt(i32, 0); // usedSize
     try w.writeInt(i32, 0); // memberCount
     try w.writeInt(i32, 0); // structCount
     try w.writeInt(i32, 1); // entryCount
-    try putBlobString(&w, "MainTex");
+    try writeBlobString(&w, "MainTex");
     try w.writeInt(i32, 0); // kind texture
     try w.writeInt(i32, 0); // index
     try w.writeInt(i32, -1); // samplerIndex 0xffffffff

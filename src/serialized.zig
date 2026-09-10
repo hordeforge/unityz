@@ -152,6 +152,19 @@ pub fn supportedVersion(version: u32) bool {
     };
 }
 
+/// Size of the fixed header that precedes the metadata, by format
+/// version: 16 bytes for the legacy layout (2-8), 20 once the
+/// endianness byte and its reserved padding appear (9-21), and 48 for
+/// the LargeFiles64 extension (22+). The sniffer, the parser and the
+/// writer all have to agree on this, so it lives here.
+pub fn headerSize(version: u32) u64 {
+    return switch (version) {
+        2...8 => 16,
+        9...21 => 20,
+        else => 48,
+    };
+}
+
 pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!SerializedFile {
     if (source.len < 16) return error.ShortData;
 
@@ -188,11 +201,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!Serial
         else => unreachable,
     }
 
-    const header_size: u64 = switch (version) {
-        2, 3, 4, 5...8 => 16,
-        9...21 => 20,
-        else => 48,
-    };
+    const header_size = headerSize(version);
     if (file_size > source.len) return error.Corrupt;
     if (data_offset < header_size or data_offset > file_size) return error.Corrupt;
     if (metadata_size == 0) return error.Corrupt;

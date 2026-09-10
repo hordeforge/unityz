@@ -166,11 +166,11 @@ pub fn rewrite(allocator: std.mem.Allocator, sf: *const serialized.SerializedFil
     // file behind the data, preceded by the endianness byte. v22 files
     // pad the data start to the source file's object alignment.
     const data_offset: u64 = if (version < 9)
-        headerSize(version)
+        serialized.headerSize(version)
     else if (version == 22)
-        alignUp(headerSize(version) + meta_len, data_align)
+        alignUp(serialized.headerSize(version) + meta_len, data_align)
     else
-        headerSize(version) + meta_len;
+        serialized.headerSize(version) + meta_len;
     const file_size: u64 = data_offset + data_len + (if (version < 9) 1 + meta_len else 0);
 
     var out: streams.Writer = .init(allocator);
@@ -220,7 +220,7 @@ pub fn rewrite(allocator: std.mem.Allocator, sf: *const serialized.SerializedFil
         try out.writeBytes(suffix);
         if (version == 22) {
             // pad the data start to the offset declared in the header
-            const meta_end = headerSize(version) + meta_len;
+            const meta_end = serialized.headerSize(version) + meta_len;
             const pad = alignUp(meta_end, data_align) - meta_end;
             for (0..@intCast(pad)) |_| try out.writeByte(0);
         }
@@ -228,14 +228,6 @@ pub fn rewrite(allocator: std.mem.Allocator, sf: *const serialized.SerializedFil
     }
 
     return allocator.dupe(u8, out.getWritten());
-}
-
-fn headerSize(version: u32) u64 {
-    return switch (version) {
-        2, 3, 4, 5...8 => 16,
-        9...21 => 20,
-        else => 48,
-    };
 }
 
 /// The alignment of object data in the source file: the largest power of
@@ -257,7 +249,9 @@ fn deriveDataAlign(sf: *const serialized.SerializedFile) usize {
         }
         if (ok) return a;
     }
-    return 4; // unreachable: everything is 1-aligned
+    // The candidate list ends at 1, which divides every offset, so the
+    // loop always returns; falling out means the list was edited wrong.
+    unreachable;
 }
 
 fn alignTo(w: *streams.Writer, n: usize) error{OutOfMemory}!void {
@@ -914,7 +908,7 @@ pub fn create(allocator: std.mem.Allocator, spec: CreateSpec) CreateError![]u8 {
     try meta.writeInt(i32, 0); // reference types
     try meta.writeStringToNull(""); // user information
 
-    const header_size = headerSize(create_version);
+    const header_size = serialized.headerSize(create_version);
     const meta_len = meta.getWritten().len;
     const data_offset = alignUp(header_size + meta_len, create_data_align);
     const file_size = data_offset + data.getWritten().len;
