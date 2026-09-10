@@ -37,8 +37,21 @@ pub fn build(b: *std.Build) void {
         // parameter in a `scalar_type` template stub, and the sprintf /
         // vsprintf inside the decoder's own `crnd_assert` / `crnd_trace`
         // debug reporters.
+        // `-fno-strict-aliasing` is the vendored decoder's own documented
+        // build requirement, stated at the top of both crn_decomp.h and
+        // crnlib.h. It is not advice about gcc alone: `crnd_new_array<T>`
+        // stashes the element count as a `uint32` just below the `T*` it
+        // returns and `crnd_delete_array<T>` reads it back the same way, so
+        // for `crnd_new_array<uint16>` -- the huffman decode tables, on the
+        // untrusted-CRN path -- the cookie is written and read through a
+        // type unrelated to the object. clang has type-based alias analysis
+        // on by default, and is free to sink that store past the element
+        // constructors, which hands the delete a bogus count and a bogus
+        // free offset. Optimization level does not gate it, so the flag has
+        // to be here rather than tied to `optimize`.
         .flags = &.{
             "-DNDEBUG",
+            "-fno-strict-aliasing",
             "-Wall",
             "-Wextra",
             "-Werror",
