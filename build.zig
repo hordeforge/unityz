@@ -30,8 +30,9 @@ pub fn build(b: *std.Build) void {
     });
     crunch_lib.root_module.addCSourceFile(.{
         .file = b.path("src/vendor/unitycrunch_shim.cpp"),
-        // The shim is the only hand-written C++ here, so its warnings are
-        // errors. Both exclusions cover noise from the vendored
+        // This is the only translation unit in this library, and it is
+        // hand-written, so its warnings are errors. Both exclusions cover
+        // noise from the vendored
         // crn_decomp.h it includes, never the shim itself: an unused
         // parameter in a `scalar_type` template stub, and the sprintf /
         // vsprintf inside the decoder's own `crnd_assert` / `crnd_trace`

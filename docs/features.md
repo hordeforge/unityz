@@ -481,8 +481,10 @@ object hash.
 
 ## Batch mode
 
-Every command accepts a directory and runs over each regular file in it.
-Plain output streams through per file. With `--json`, each file's output
+Every command accepts a directory and runs over each regular file in it,
+except the two that consume a directory themselves: `diff` compares the
+two trees file-by-file, and `managed` reads a Mono build's assembly
+folder. Plain output streams through per file. With `--json`, each file's output
 is wrapped as one line, `{"file":"<path>","results":[<doc>, ...]}`, so a
 consumer can tell which file produced which document without depending on
 directory order. `results` holds every document the command emitted for

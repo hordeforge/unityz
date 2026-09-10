@@ -351,8 +351,9 @@ pub fn main(init: std.process.Init) !void {
         try stderr.flush();
         std.process.exit(1);
     };
-    // `diff` consumes directories itself (tree comparison); every other
-    // command batch-expands a directory argument over its files.
+    // `diff` (tree comparison) and `managed` (a Mono build's assembly
+    // folder) consume a directory themselves; every other command
+    // batch-expands a directory argument over its files.
     if (stat.kind == .directory and (command == .diff or command == .managed)) {
         if (command == .managed) {
             cmdManaged(path, rest, &.{}, stdout) catch |err| {

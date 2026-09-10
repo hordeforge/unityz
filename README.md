@@ -81,7 +81,9 @@ pipx run ruff==0.16.1 check scripts
   trees, or read the game's .NET assemblies directly to list every
   MonoBehaviour's serialized fields (`--trees`, `managed`).
 
-Every command accepts a directory and processes all files in it, and
+Every command accepts a directory and processes all files in it - except
+`diff`, which compares two trees, and `managed`, which reads a Mono
+build's assembly folder - and
 `--json` modes cover the machine-readable commands. Over a directory,
 `--json` emits one line per file: `{"file":"<path>","results":[...]}`
 holding that file's documents, plus `"error"` when it failed. Usage errors exit 2,
