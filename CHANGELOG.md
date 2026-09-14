@@ -13,6 +13,9 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ### Changed
 
+- Default `info` on a format 2-8 SerializedFile inside UnityFS decompresses
+  only the 16-byte header and the trailing metadata, not the object-data
+  hole in between. Format 9+ still uses the `[0, data_offset)` prefix.
 - Built-in tree tests walk the shipped release table instead of a
   hardcoded count, so adding a dump cannot leave the lookup coverage stale.
 

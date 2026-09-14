@@ -253,9 +253,11 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
 
 /// Like `parse`, but decompresses only the UnityFS blocks that cover each
 /// serialized node's metadata (format 9+: `[0, data_offset)` of the node;
-/// format 2-8: the whole node). Later blocks — a `.resS` sidecar, object
+/// format 2-8: the 16-byte header plus the trailing metadata). Later blocks — a `.resS` sidecar, object
 /// payloads past `data_offset` — stay compressed. `Node.data` for a format
-/// 9+ SerializedFile is that prefix, which `serialized.parse` accepts.
+/// 9+ SerializedFile is that prefix; for format 2-8 it is the 16-byte
+/// header concatenated with the trailing metadata. `serialized.parse`
+/// accepts both.
 pub fn parseMetadata(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
     return parseWithMode(allocator, data, .serialized_metadata);
 }
@@ -540,10 +542,14 @@ fn decompressMetadata(
     defer allocator.free(want);
     @memset(want, false);
 
-    const peek_len: usize = 48;
+    // 16 bytes is the format 2-8 header and is enough to read the version
+    // of a format 9+ file. Asking for 48 here would pull in the next block
+    // of a format 2-8 node whose object-data hole starts immediately after
+    // the header.
+    const header_min: usize = 16;
     for (nodes) |n| {
         const span = nodeByteSpan(n, total) orelse continue;
-        markCovering(want, starts, blocks, span.off, span.off + @min(span.len, peek_len));
+        markCovering(want, starts, blocks, span.off, span.off + @min(span.len, header_min));
     }
 
     const payloads = allocator.alloc(?[]u8, blocks.len) catch return error.OutOfMemory;
@@ -559,44 +565,71 @@ fn decompressMetadata(
     defer allocator.free(keep_off);
     const keep_len = allocator.alloc(usize, nodes.len) catch return error.OutOfMemory;
     defer allocator.free(keep_len);
+    const keep_tail_off = allocator.alloc(usize, nodes.len) catch return error.OutOfMemory;
+    defer allocator.free(keep_tail_off);
+    const keep_tail_len = allocator.alloc(usize, nodes.len) catch return error.OutOfMemory;
+    defer allocator.free(keep_tail_len);
     @memset(keep_off, 0);
     @memset(keep_len, 0);
+    @memset(keep_tail_off, 0);
+    @memset(keep_tail_len, 0);
 
     for (nodes, 0..) |n, ni| {
         const span = nodeByteSpan(n, total) orelse continue;
         var peek_buf: [48]u8 = undefined;
-        const want_peek = @min(peek_len, span.len);
-        const got = copyFromBlocks(payloads, starts, blocks, span.off, peek_buf[0..want_peek]);
+        var got = copyFromBlocks(payloads, starts, blocks, span.off, peek_buf[0..@min(header_min, span.len)]);
         if (got < 16) continue;
-        // `container.sniff` also wants the metadata body in `data`, so a
-        // 48-byte header peek of a v22 file is `.unknown`. `readHeader`
-        // only needs the fixed header.
+        const version = std.mem.readInt(u32, peek_buf[8..][0..4], .big);
+        const header_need: usize = if (version >= 22) 48 else if (version >= 9) 20 else 16;
+        if (header_need > got and span.len >= header_need) {
+            markCovering(want, starts, blocks, span.off, span.off + header_need);
+            try decompressWanted(allocator, data, block_data_offset, blocks, want, payloads);
+            got = copyFromBlocks(payloads, starts, blocks, span.off, peek_buf[0..header_need]);
+        }
+        if (got < header_need and version >= 9) continue;
         const hdr = serialized.readHeader(peek_buf[0..got]) catch continue;
-        const prefix: usize = if (hdr.version < 9)
-            span.len
-        else
-            @min(span.len, std.math.cast(usize, hdr.data_offset) orelse span.len);
-        keep_off[ni] = span.off;
-        keep_len[ni] = prefix;
-        markCovering(want, starts, blocks, span.off, span.off + prefix);
+        if (hdr.version < 9) {
+            const head_len: usize = 16;
+            const tail_len = std.math.cast(usize, hdr.metadata_size) orelse continue;
+            const file_len = std.math.cast(usize, hdr.file_size) orelse continue;
+            if (tail_len == 0 or file_len < head_len + tail_len or file_len > span.len) continue;
+            keep_off[ni] = span.off;
+            keep_len[ni] = head_len;
+            keep_tail_off[ni] = span.off + file_len - tail_len;
+            keep_tail_len[ni] = tail_len;
+            markCovering(want, starts, blocks, span.off, span.off + head_len);
+            markCovering(want, starts, blocks, keep_tail_off[ni], keep_tail_off[ni] + tail_len);
+        } else {
+            const prefix = @min(span.len, std.math.cast(usize, hdr.data_offset) orelse span.len);
+            keep_off[ni] = span.off;
+            keep_len[ni] = prefix;
+            markCovering(want, starts, blocks, span.off, span.off + prefix);
+        }
     }
 
     try decompressWanted(allocator, data, block_data_offset, blocks, want, payloads);
 
     var packed_len: usize = 0;
-    for (keep_len) |nlen| packed_len += nlen;
+    for (keep_len, keep_tail_len) |nlen, tlen| packed_len += nlen + tlen;
     const stream = allocator.alloc(u8, packed_len) catch return error.OutOfMemory;
     errdefer allocator.free(stream);
 
     var cursor: usize = 0;
     for (nodes, 0..) |*n, ni| {
         const nlen = keep_len[ni];
-        if (nlen == 0) continue;
-        const dest = stream[cursor..][0..nlen];
-        const copied = copyFromBlocks(payloads, starts, blocks, keep_off[ni], dest);
-        if (copied != nlen) return error.ShortData;
+        const tlen = keep_tail_len[ni];
+        if (nlen == 0 and tlen == 0) continue;
+        const dest = stream[cursor..][0 .. nlen + tlen];
+        if (nlen != 0) {
+            const copied = copyFromBlocks(payloads, starts, blocks, keep_off[ni], dest[0..nlen]);
+            if (copied != nlen) return error.ShortData;
+        }
+        if (tlen != 0) {
+            const copied = copyFromBlocks(payloads, starts, blocks, keep_tail_off[ni], dest[nlen..][0..tlen]);
+            if (copied != tlen) return error.ShortData;
+        }
         n.data = dest;
-        cursor += nlen;
+        cursor += dest.len;
     }
     return stream;
 }
@@ -1785,6 +1818,57 @@ test "parseMetadata skips a poisoned later block that full parse rejects" {
     try std.testing.expectEqual(@as(usize, 2), sf.objects.len);
     const ids = try classIdsOf(sf, aa);
     try std.testing.expectEqualSlices(i32, &.{ 4, 28 }, ids);
+}
+
+test "parseMetadata skips a poisoned middle block of a format-4 SerializedFile" {
+    const a = std.testing.allocator;
+    const hole = [_]u8{0xAA} ** 1024;
+    const tail = [_]u8{
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    };
+    const metadata_size: u32 = tail.len;
+    const file_size: u32 = 16 + hole.len + metadata_size;
+    var header: [16]u8 = undefined;
+    std.mem.writeInt(u32, header[0..4], metadata_size, .big);
+    std.mem.writeInt(u32, header[4..8], file_size, .big);
+    std.mem.writeInt(u32, header[8..12], 4, .big);
+    std.mem.writeInt(u32, header[12..16], 16, .big);
+
+    const poison_raw = [_]u8{0xFF} ** 16;
+    const bundle_bytes = try buildMultiBlockFixture(a, &.{
+        .{ .uncompressed = &header },
+        .{ .uncompressed = &hole, .raw = &poison_raw, .flags = 2 },
+        .{ .uncompressed = &tail },
+    }, "CAB-v4");
+    defer a.free(bundle_bytes);
+
+    try std.testing.expectError(error.DecompressFailed, parse(a, bundle_bytes));
+
+    var meta = try parseMetadata(a, bundle_bytes);
+    defer meta.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), meta.nodes.len);
+    try std.testing.expectEqual(@as(i64, file_size), meta.nodes[0].size);
+    try std.testing.expectEqual(@as(usize, 16 + tail.len), meta.nodes[0].data.len);
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const sf = try serialized.parse(arena.allocator(), meta.nodes[0].data);
+    try std.testing.expectEqual(@as(u32, 4), sf.version);
+    try std.testing.expectEqual(@as(u64, file_size), sf.file_size);
+    try std.testing.expectEqual(@as(usize, 0), sf.types.len);
+    try std.testing.expectEqual(@as(usize, 0), sf.objects.len);
 }
 
 test "parseMetadata serialized tables match a full parse of a well-formed multi-block bundle" {

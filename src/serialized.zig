@@ -245,11 +245,21 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!Serial
     const header_size = hdr.header_size;
     var endian = hdr.endian;
 
+    // Format 2-8 stores metadata at EOF. A compact image is the 16-byte
+    // header concatenated with the `metadata_size` tail (endian byte plus
+    // body), omitting the object-data hole. Length is exactly
+    // 16 + metadata_size and shorter than the declared file_size.
+    const compact_v2_8 = version < 9 and file_size > source.len;
     if (version < 9) {
-        if (file_size > source.len) return error.Corrupt;
-        const endian_pos: usize = @intCast(file_size - metadata_size);
-        if (endian_pos >= source.len) return error.Corrupt;
-        endian = endianFromByte(source[endian_pos]) catch return error.UnsupportedEndianness;
+        if (compact_v2_8) {
+            if (source.len != 16 + metadata_size) return error.Corrupt;
+            endian = endianFromByte(source[16]) catch return error.UnsupportedEndianness;
+        } else {
+            if (file_size > source.len) return error.Corrupt;
+            const endian_pos: usize = @intCast(file_size - metadata_size);
+            if (endian_pos >= source.len) return error.Corrupt;
+            endian = endianFromByte(source[endian_pos]) catch return error.UnsupportedEndianness;
+        }
     } else {
         // Format 9+: metadata follows the header. Object payloads starting
         // at `data_offset` may be omitted, so a prefix of length
@@ -259,14 +269,15 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!Serial
     }
 
     // ---- metadata region ----
-    const metadata_body_start: usize = if (version < 9) blk: {
-        const start: usize = @intCast(file_size - metadata_size + 1); // skip endian byte
-        if (start > source.len) return error.Corrupt;
-        break :blk start;
-    } else @intCast(header_size);
-    const metadata_body: []const u8 = if (version < 9)
-        source[metadata_body_start..@intCast(file_size)]
-    else blk: {
+    const metadata_body_start: usize = if (version < 9)
+        if (compact_v2_8) @as(usize, 17) else @as(usize, @intCast(file_size - metadata_size + 1))
+    else
+        @intCast(header_size);
+    const metadata_body: []const u8 = if (version < 9) blk: {
+        if (compact_v2_8) break :blk source[17..source.len];
+        if (metadata_body_start > source.len) return error.Corrupt;
+        break :blk source[metadata_body_start..@intCast(file_size)];
+    } else blk: {
         const end = metadata_body_start + metadata_size;
         if (end > data_offset) return error.Corrupt;
         break :blk source[metadata_body_start..end];
@@ -716,6 +727,44 @@ test "parse a minimal version-4 serialized file" {
     try std.testing.expectEqual(@as(usize, 0), sf.objects.len);
     try std.testing.expectEqual(@as(usize, 0), sf.externals.len);
     try std.testing.expectEqualStrings("", sf.user_information);
+}
+
+test "parse accepts a format-4 compact image that omits object payloads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const hole = [_]u8{0xAA} ** 1024;
+    const tail = [_]u8{
+        0x00, // little endian
+        0x00, 0x00, 0x00, 0x00, // type count 0
+        0x00, 0x00, 0x00, 0x00, // object count 0
+        0x00, 0x00, 0x00, 0x00, // external count 0
+    };
+    const metadata_size: u32 = tail.len;
+    const file_size: u32 = 16 + hole.len + metadata_size;
+    var header: [16]u8 = undefined;
+    std.mem.writeInt(u32, header[0..4], metadata_size, .big);
+    std.mem.writeInt(u32, header[4..8], file_size, .big);
+    std.mem.writeInt(u32, header[8..12], 4, .big);
+    std.mem.writeInt(u32, header[12..16], 16, .big);
+
+    var full: std.ArrayList(u8) = .empty;
+    defer full.deinit(a);
+    try full.appendSlice(a, &header);
+    try full.appendSlice(a, &hole);
+    try full.appendSlice(a, &tail);
+    const full_sf = try parse(a, full.items);
+
+    var compact: std.ArrayList(u8) = .empty;
+    defer compact.deinit(a);
+    try compact.appendSlice(a, &header);
+    try compact.appendSlice(a, &tail);
+    const compact_sf = try parse(a, compact.items);
+    try std.testing.expectEqual(full_sf.version, compact_sf.version);
+    try std.testing.expectEqual(full_sf.file_size, compact_sf.file_size);
+    try std.testing.expectEqual(full_sf.types.len, compact_sf.types.len);
+    try std.testing.expectEqual(full_sf.objects.len, compact_sf.objects.len);
 }
 
 // ---------------------------------------------------------------------------
