@@ -11,6 +11,8 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-09-14
+
 ### Changed
 
 - Default `info` on a format 2-8 SerializedFile inside UnityFS decompresses
