@@ -327,8 +327,10 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     }
 
-    // Read the whole file once; the parsers borrow from the buffer. A
-    // directory argument processes every file in it (batch mode).
+    // Read the file once; the parsers borrow from the buffer. Default
+    // `info` maps the file instead of copying it so unused UnityFS blocks
+    // are never paged in. A directory argument processes every file in it
+    // (batch mode).
     const path = args[1];
     // `--builtin` is a global switch shared by every command that takes
     // `--trees`; it is removed here so the per-command option parsers never
@@ -415,7 +417,12 @@ pub fn main(init: std.process.Init) !void {
             }
             if (entry.kind != .file) continue;
             const full = try std.fmt.allocPrint(batch_arena, "{s}/{s}", .{ path, entry.name });
-            const bytes = std.Io.Dir.cwd().readFileAlloc(io, full, batch_arena, .unlimited) catch |err| {
+            var mapped = if (command == .info and !infoNeedsPayloads(rest))
+                mapFileRead(full) catch null
+            else
+                null;
+            defer if (mapped) |*m| unmapFile(m);
+            const bytes = if (mapped) |m| mappedBytes(m) else std.Io.Dir.cwd().readFileAlloc(io, full, batch_arena, .unlimited) catch |err| {
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 try stderr.flush();
                 command_failed_flag = true;
@@ -441,7 +448,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch |err| {
+    var mapped = if (command == .info and !infoNeedsPayloads(rest))
+        mapFileRead(path) catch null
+    else
+        null;
+    defer if (mapped) |*m| unmapFile(m);
+    const bytes = if (mapped) |m| mappedBytes(m) else std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch |err| {
         try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
         try stderr.flush();
         std.process.exit(1);
@@ -457,6 +469,49 @@ pub fn main(init: std.process.Init) !void {
     };
     finalFlush(stdout);
     if (verify_failed_flag or command_failed_flag) std.process.exit(1);
+}
+
+fn infoNeedsPayloads(rest: []const []const u8) bool {
+    for (rest) |a| {
+        if (std.mem.eql(u8, a, "--dump") or std.mem.eql(u8, a, "--objects")) return true;
+    }
+    return false;
+}
+
+const MappedFile = union(enum) {
+    mapped: []align(std.heap.page_size_min) u8,
+    empty: void,
+};
+
+fn mapFileRead(path: []const u8) !MappedFile {
+    const io = io_global.io;
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+    defer file.close(io);
+    const st = try file.stat(io);
+    if (st.size == 0) return .empty;
+    const mapped = try std.posix.mmap(
+        null,
+        @intCast(st.size),
+        .{ .READ = true },
+        .{ .TYPE = .PRIVATE },
+        file.handle,
+        0,
+    );
+    return .{ .mapped = mapped };
+}
+
+fn unmapFile(m: *MappedFile) void {
+    switch (m.*) {
+        .mapped => |bytes| std.posix.munmap(bytes),
+        .empty => {},
+    }
+}
+
+fn mappedBytes(m: MappedFile) []const u8 {
+    return switch (m) {
+        .mapped => |bytes| bytes,
+        .empty => &.{},
+    };
 }
 
 const Command = enum { info, extract, edit, verify, stats, find, fsb, show, diff, hash, skin, shader, hierarchy, managed, trees, create };
@@ -4981,10 +5036,10 @@ fn dumpSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.
 /// extracting the node and running `info` a second time. The UnityFS header's
 /// Unity string is commonly the placeholder `5.x.x`; the embedded
 /// SerializedFile version is the engine revision that owns the object layout.
-fn writeContainerEntryJson(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
+fn writeContainerEntryJson(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, declared_size: i64, stdout: *Io.Writer) !void {
     try stdout.writeAll("{\"path\":");
     try writeJsonString(stdout, path);
-    try stdout.print(",\"size\":{d}", .{bytes.len});
+    try stdout.print(",\"size\":{d}", .{declared_size});
 
     if (unityz.container.sniff(bytes).container == .serialized) {
         const sf = unityz.serialized.parse(arena, bytes) catch |err| {
@@ -5027,7 +5082,7 @@ fn printWebFile(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout
         try stdout.print("{{\"type\":\"WebFile\",\"files\":{d},\"entries\":[", .{wf.entries.len});
         for (wf.entries, 0..) |e, i| {
             if (i != 0) try stdout.print(",", .{});
-            try writeContainerEntryJson(arena, e.path, e.data, stdout);
+            try writeContainerEntryJson(arena, e.path, e.data, @intCast(e.data.len), stdout);
         }
         try stdout.print("]", .{});
         if (objects) {
@@ -5127,12 +5182,18 @@ fn printBundle(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout:
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const b = try unityz.bundle.parse(arena, bytes);
+    // `--dump` / `--objects` need object payloads. Default `info` only
+    // needs type trees and the object table, so it decompresses the
+    // covering UnityFS blocks and leaves the rest of the container alone.
+    const b = if (dump or objects)
+        try unityz.bundle.parse(arena, bytes)
+    else
+        try unityz.bundle.parseMetadata(arena, bytes);
     if (json) {
         try stdout.print("{{\"type\":\"UnityFS\",\"version\":{d},\"unity\":\"{s}\",\"nodes\":{d},\"blocks\":{d},\"nodes_list\":[", .{ b.version, b.unity_version, b.nodes.len, b.blocks.len });
         for (b.nodes, 0..) |n, i| {
             if (i != 0) try stdout.print(",", .{});
-            try writeContainerEntryJson(arena, n.path, n.data, stdout);
+            try writeContainerEntryJson(arena, n.path, n.data, n.size, stdout);
         }
         try stdout.print("]", .{});
         if (objects) {
@@ -5144,7 +5205,13 @@ fn printBundle(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout:
             }
             try stdout.print("]", .{});
         }
-        try emitShadersJson(arena, b.nodes, stdout);
+        if (dump or objects) {
+            try emitShadersJson(arena, b.nodes, stdout);
+        } else {
+            // Shader skins read object payloads; metadata-only info omits them
+            // rather than decompressing the rest of the container.
+            try stdout.print(",\"shaders\":[]", .{});
+        }
         try stdout.print("}}\n", .{});
         return;
     }
@@ -5155,7 +5222,7 @@ fn printBundle(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout:
     try stdout.print("blocks:     {d}\n", .{b.blocks.len});
     try stdout.print("nodes:      {d}\n", .{b.nodes.len});
     for (b.nodes) |n| {
-        try stdout.print("  {s}  ({d} bytes)\n", .{ n.path, n.data.len });
+        try stdout.print("  {s}  ({d} bytes)\n", .{ n.path, n.size });
     }
     if (objects) try dumpContainerEntries(arena, b.nodes, "node", false, stdout);
     if (dump) try dumpContainerEntries(arena, b.nodes, "node", true, stdout);
@@ -11131,7 +11198,7 @@ test "container info JSON includes embedded SerializedFile metadata" {
 
     const sf_bytes = try typelessMonoFixture(a, try monoScriptPayload(a));
     var aw = std.Io.Writer.Allocating.init(a);
-    try writeContainerEntryJson(a, "CAB-\"quoted", sf_bytes, &aw.writer);
+    try writeContainerEntryJson(a, "CAB-\"quoted", sf_bytes, @intCast(sf_bytes.len), &aw.writer);
     const actual = aw.toArrayList().items;
 
     try std.testing.expectEqualStrings(
