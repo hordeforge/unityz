@@ -174,10 +174,25 @@ pub fn serializedHasTypeTree(version: u32) bool {
     return version >= 13;
 }
 
-pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!SerializedFile {
+/// Fixed header fields needed to locate metadata without walking type trees.
+/// `readHeader` fills this from the first 16 (v2-8), 20 (v9-21) or 48 (v22)
+/// bytes; format 2-8 endianness lives at EOF and is left as `.little` until
+/// `parse` reads that byte.
+pub const Header = struct {
+    version: u32,
+    file_size: u64,
+    data_offset: u64,
+    metadata_size: u32,
+    endian: streams.Endian,
+    header_size: u64,
+};
+
+/// Reads the SerializedFile header. Format 9+ needs the full header in
+/// `source`; format 2-8 needs 16 bytes and does not look at the trailing
+/// metadata. Object payloads are not required.
+pub fn readHeader(source: []const u8) ParseError!Header {
     if (source.len < 16) return error.ShortData;
 
-    // ---- header: always big endian ----
     var hr = streams.Reader.init(source);
     hr.endian = .big;
     var metadata_size = try hr.readInt(u32);
@@ -189,17 +204,15 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!Serial
     var endian: streams.Endian = .little;
     switch (version) {
         2, 3, 4, 5...8 => {
-            // Endianness byte: first byte of the trailing metadata block.
             if (metadata_size == 0 or metadata_size > file_size) return error.Corrupt;
-            const endian_pos: usize = @intCast(file_size - metadata_size);
-            if (endian_pos >= source.len) return error.Corrupt;
-            endian = endianFromByte(source[endian_pos]) catch return error.UnsupportedEndianness;
         },
         9...21 => {
+            if (source.len < 20) return error.ShortData;
             endian = endianFromByte(try hr.readByte()) catch return error.UnsupportedEndianness;
             _ = try hr.readBytes(3); // reserved
         },
         22 => {
+            if (source.len < 48) return error.ShortData;
             endian = endianFromByte(try hr.readByte()) catch return error.UnsupportedEndianness;
             _ = try hr.readBytes(3); // reserved
             metadata_size = try hr.readInt(u32);
@@ -211,9 +224,39 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!Serial
     }
 
     const header_size = headerSize(version);
-    if (file_size > source.len) return error.Corrupt;
     if (data_offset < header_size or data_offset > file_size) return error.Corrupt;
     if (metadata_size == 0) return error.Corrupt;
+    return .{
+        .version = version,
+        .file_size = file_size,
+        .data_offset = data_offset,
+        .metadata_size = metadata_size,
+        .endian = endian,
+        .header_size = header_size,
+    };
+}
+
+pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!SerializedFile {
+    const hdr = try readHeader(source);
+    const version = hdr.version;
+    const file_size = hdr.file_size;
+    const data_offset = hdr.data_offset;
+    const metadata_size = hdr.metadata_size;
+    const header_size = hdr.header_size;
+    var endian = hdr.endian;
+
+    if (version < 9) {
+        if (file_size > source.len) return error.Corrupt;
+        const endian_pos: usize = @intCast(file_size - metadata_size);
+        if (endian_pos >= source.len) return error.Corrupt;
+        endian = endianFromByte(source[endian_pos]) catch return error.UnsupportedEndianness;
+    } else {
+        // Format 9+: metadata follows the header. Object payloads starting
+        // at `data_offset` may be omitted, so a prefix of length
+        // `header_size + metadata_size` (typically `data_offset`) is enough.
+        const meta_end = header_size + metadata_size;
+        if (meta_end > source.len) return error.Corrupt;
+    }
 
     // ---- metadata region ----
     const metadata_body_start: usize = if (version < 9) blk: {
@@ -602,6 +645,31 @@ test "parse a modern v22 serialized file" {
     // object data slices the data section correctly
     const data = sf.objectData(&sf.objects[1]).?;
     try std.testing.expectEqualStrings("TEXTUREBYTES", data);
+}
+
+test "parse accepts a format-22 prefix that omits object payloads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const bytes = try buildV22Fixture(a);
+    const hdr = try readHeader(bytes);
+    try std.testing.expectEqual(@as(u32, 22), hdr.version);
+    const prefix_len: usize = @intCast(hdr.data_offset);
+    try std.testing.expect(prefix_len < bytes.len);
+    try std.testing.expect(prefix_len >= hdr.header_size + hdr.metadata_size);
+
+    const prefix = try parse(a, bytes[0..prefix_len]);
+    const full = try parse(a, bytes);
+    try std.testing.expectEqual(full.version, prefix.version);
+    try std.testing.expectEqualStrings(full.unity_version, prefix.unity_version);
+    try std.testing.expectEqual(full.types.len, prefix.types.len);
+    try std.testing.expectEqual(full.objects.len, prefix.objects.len);
+    try std.testing.expectEqual(full.objects[0].class_id, prefix.objects[0].class_id);
+    try std.testing.expectEqual(full.objects[1].class_id, prefix.objects[1].class_id);
+    try std.testing.expect(prefix.objectData(&prefix.objects[1]) == null);
+
+    try std.testing.expectError(error.Corrupt, parse(a, bytes[0..@intCast(hdr.header_size)]));
 }
 
 test "parse rejects bad endianness flag" {

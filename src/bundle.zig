@@ -43,11 +43,14 @@
 //! compressed_size equal to uncompressed_size.
 //!
 //! Node data slices borrow from the concatenated decompressed block stream,
-//! which `Bundle` owns.
+//! which `Bundle` owns. `parse` decompresses every block; `parseMetadata`
+//! decompresses only the blocks covering each SerializedFile's metadata
+//! prefix, so a later corrupt block does not fail that path.
 
 const std = @import("std");
 const streams = @import("streams.zig");
 const container = @import("container.zig");
+const serialized = @import("serialized.zig");
 const lz4 = @import("lz4.zig");
 
 /// Vendored LZHAM decompressor (UnityFS block compression type 4). Returns 0
@@ -245,6 +248,21 @@ fn parseLegacy(allocator: std.mem.Allocator, data: []const u8, signature: []cons
 }
 
 pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
+    return parseWithMode(allocator, data, .all);
+}
+
+/// Like `parse`, but decompresses only the UnityFS blocks that cover each
+/// serialized node's metadata (format 9+: `[0, data_offset)` of the node;
+/// format 2-8: the whole node). Later blocks — a `.resS` sidecar, object
+/// payloads past `data_offset` — stay compressed. `Node.data` for a format
+/// 9+ SerializedFile is that prefix, which `serialized.parse` accepts.
+pub fn parseMetadata(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
+    return parseWithMode(allocator, data, .serialized_metadata);
+}
+
+const DecompressMode = enum { all, serialized_metadata };
+
+fn parseWithMode(allocator: std.mem.Allocator, data: []const u8, mode: DecompressMode) ParseError!Bundle {
     if (data.len < 8) return error.ShortData;
     var r = streams.Reader.init(data);
 
@@ -347,7 +365,32 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
         if (block_data_offset > data.len) return error.ShortData;
     }
 
-    // Concatenate the decompressed blocks into one stream.
+    const stream = switch (mode) {
+        .all => try decompressAll(allocator, data, block_data_offset, blocks, nodes),
+        .serialized_metadata => try decompressMetadata(allocator, data, block_data_offset, blocks, nodes),
+    };
+    errdefer allocator.free(stream);
+
+    return .{
+        .version = version,
+        .unity_version = unity_version,
+        .unity_revision = unity_revision,
+        .size = size,
+        .flags = flags,
+        .blocks = blocks,
+        .nodes = nodes,
+        .header_info = header_info,
+        .stream = stream,
+    };
+}
+
+fn decompressAll(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    block_data_offset: usize,
+    blocks: []const Block,
+    nodes: []Node,
+) ParseError![]u8 {
     var total: usize = 0;
     var compressed_total: usize = 0;
     for (blocks) |b| {
@@ -395,18 +438,167 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Bundle {
         const end = std.math.add(usize, off, len) catch continue;
         if (end <= stream.len) n.data = stream[off..end];
     }
+    return stream;
+}
 
-    return .{
-        .version = version,
-        .unity_version = unity_version,
-        .unity_revision = unity_revision,
-        .size = size,
-        .flags = flags,
-        .blocks = blocks,
-        .nodes = nodes,
-        .header_info = header_info,
-        .stream = stream,
-    };
+fn nodeByteSpan(n: Node, total: usize) ?struct { off: usize, len: usize } {
+    if (n.offset < 0 or n.size < 0) return null;
+    const off = std.math.cast(usize, n.offset) orelse return null;
+    const len = std.math.cast(usize, n.size) orelse return null;
+    if (off >= total) return null;
+    return .{ .off = off, .len = @min(len, total - off) };
+}
+
+fn markCovering(want: []bool, starts: []const usize, blocks: []const Block, start: usize, end: usize) void {
+    if (end <= start) return;
+    for (blocks, 0..) |b, i| {
+        const b_end = starts[i] + b.uncompressed_size;
+        if (b_end > start and starts[i] < end) want[i] = true;
+    }
+}
+
+fn decompressWanted(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    block_data_offset: usize,
+    blocks: []const Block,
+    want: []const bool,
+    payloads: []?[]u8,
+) ParseError!void {
+    var in_pos: usize = 0;
+    for (blocks, 0..) |b, i| {
+        const raw_off = block_data_offset + in_pos;
+        const raw_end = raw_off + b.compressed_size;
+        in_pos += b.compressed_size;
+        if (!want[i] or payloads[i] != null) continue;
+        if (raw_end > data.len) return error.ShortData;
+        const out = allocator.alloc(u8, b.uncompressed_size) catch return error.OutOfMemory;
+        decompressRawInto(allocator, data[raw_off..raw_end], out, blockCompressionType(b.flags)) catch |err| {
+            allocator.free(out);
+            return err;
+        };
+        payloads[i] = out;
+    }
+}
+
+fn copyFromBlocks(
+    payloads: []const ?[]u8,
+    starts: []const usize,
+    blocks: []const Block,
+    stream_off: usize,
+    dest: []u8,
+) usize {
+    var written: usize = 0;
+    while (written < dest.len) {
+        const pos = stream_off + written;
+        var found = false;
+        for (blocks, 0..) |b, i| {
+            _ = b;
+            const b_start = starts[i];
+            const b_end = b_start + blocks[i].uncompressed_size;
+            if (pos < b_start or pos >= b_end) continue;
+            const payload = payloads[i] orelse return written;
+            const local = pos - b_start;
+            const take = @min(dest.len - written, payload.len - local);
+            @memcpy(dest[written..][0..take], payload[local..][0..take]);
+            written += take;
+            found = true;
+            break;
+        }
+        if (!found) return written;
+    }
+    return written;
+}
+
+fn decompressMetadata(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    block_data_offset: usize,
+    blocks: []const Block,
+    nodes: []Node,
+) ParseError![]u8 {
+    var total: usize = 0;
+    var compressed_total: usize = 0;
+    for (blocks) |b| {
+        total += b.uncompressed_size;
+        compressed_total += b.compressed_size;
+    }
+    if (compressed_total > data.len - block_data_offset) return error.ShortData;
+    if (blocks.len == 0) return allocator.alloc(u8, 0) catch return error.OutOfMemory;
+
+    const starts = allocator.alloc(usize, blocks.len) catch return error.OutOfMemory;
+    defer allocator.free(starts);
+    {
+        var acc: usize = 0;
+        for (blocks, 0..) |b, i| {
+            starts[i] = acc;
+            acc += b.uncompressed_size;
+        }
+    }
+
+    const want = allocator.alloc(bool, blocks.len) catch return error.OutOfMemory;
+    defer allocator.free(want);
+    @memset(want, false);
+
+    const peek_len: usize = 48;
+    for (nodes) |n| {
+        const span = nodeByteSpan(n, total) orelse continue;
+        markCovering(want, starts, blocks, span.off, span.off + @min(span.len, peek_len));
+    }
+
+    const payloads = allocator.alloc(?[]u8, blocks.len) catch return error.OutOfMemory;
+    @memset(payloads, null);
+    defer {
+        for (payloads) |p| if (p) |bytes| allocator.free(bytes);
+        allocator.free(payloads);
+    }
+
+    try decompressWanted(allocator, data, block_data_offset, blocks, want, payloads);
+
+    const keep_off = allocator.alloc(usize, nodes.len) catch return error.OutOfMemory;
+    defer allocator.free(keep_off);
+    const keep_len = allocator.alloc(usize, nodes.len) catch return error.OutOfMemory;
+    defer allocator.free(keep_len);
+    @memset(keep_off, 0);
+    @memset(keep_len, 0);
+
+    for (nodes, 0..) |n, ni| {
+        const span = nodeByteSpan(n, total) orelse continue;
+        var peek_buf: [48]u8 = undefined;
+        const want_peek = @min(peek_len, span.len);
+        const got = copyFromBlocks(payloads, starts, blocks, span.off, peek_buf[0..want_peek]);
+        if (got < 16) continue;
+        // `container.sniff` also wants the metadata body in `data`, so a
+        // 48-byte header peek of a v22 file is `.unknown`. `readHeader`
+        // only needs the fixed header.
+        const hdr = serialized.readHeader(peek_buf[0..got]) catch continue;
+        const prefix: usize = if (hdr.version < 9)
+            span.len
+        else
+            @min(span.len, std.math.cast(usize, hdr.data_offset) orelse span.len);
+        keep_off[ni] = span.off;
+        keep_len[ni] = prefix;
+        markCovering(want, starts, blocks, span.off, span.off + prefix);
+    }
+
+    try decompressWanted(allocator, data, block_data_offset, blocks, want, payloads);
+
+    var packed_len: usize = 0;
+    for (keep_len) |nlen| packed_len += nlen;
+    const stream = allocator.alloc(u8, packed_len) catch return error.OutOfMemory;
+    errdefer allocator.free(stream);
+
+    var cursor: usize = 0;
+    for (nodes, 0..) |*n, ni| {
+        const nlen = keep_len[ni];
+        if (nlen == 0) continue;
+        const dest = stream[cursor..][0..nlen];
+        const copied = copyFromBlocks(payloads, starts, blocks, keep_off[ni], dest);
+        if (copied != nlen) return error.ShortData;
+        n.data = dest;
+        cursor += nlen;
+    }
+    return stream;
 }
 
 /// One node's replacement data for `rebuild`.
@@ -1431,4 +1623,203 @@ test "bundle parser survives mutated and truncated input" {
     // node data - otherwise the reads above walked nothing.
     try std.testing.expect(parsed > 0);
     try std.testing.expect(node_bytes > 0);
+}
+
+const MultiBlock = struct {
+    uncompressed: []const u8,
+    raw: ?[]const u8 = null,
+    flags: u16 = 0,
+};
+
+fn buildMultiBlockFixture(a: std.mem.Allocator, blocks: []const MultiBlock, path: []const u8) ![]u8 {
+    var total_uncomp: u32 = 0;
+    for (blocks) |b| total_uncomp += @intCast(b.uncompressed.len);
+
+    var info: std.ArrayList(u8) = .empty;
+    defer info.deinit(a);
+    try info.appendSlice(a, &[_]u8{0} ** 16);
+    try appendBe(a, &info, @as(u32, @intCast(blocks.len)));
+    for (blocks) |b| {
+        const raw = b.raw orelse b.uncompressed;
+        try appendBe(a, &info, @as(u32, @intCast(b.uncompressed.len)));
+        try appendBe(a, &info, @as(u32, @intCast(raw.len)));
+        try appendBe(a, &info, b.flags);
+    }
+    try appendBe(a, &info, @as(u32, 1));
+    try appendBe(a, &info, @as(i64, 0));
+    try appendBe(a, &info, @as(i64, total_uncomp));
+    try appendBe(a, &info, @as(u32, 4));
+    try info.appendSlice(a, path);
+    try info.appendSlice(a, &[_]u8{0});
+    try appendBe(a, &info, @as(i64, total_uncomp));
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    try out.appendSlice(a, "UnityFS\x00");
+    try appendBe(a, &out, @as(u32, 7));
+    try out.appendSlice(a, "2020.3.33f1\x00");
+    try out.appendSlice(a, "revision\x00");
+    try appendBe(a, &out, @as(i64, 0));
+    try appendBe(a, &out, @as(u32, @intCast(info.items.len)));
+    try appendBe(a, &out, @as(u32, @intCast(info.items.len)));
+    try appendBe(a, &out, @as(u32, 0));
+    while (out.items.len % 16 != 0) try out.append(a, 0);
+    try out.appendSlice(a, info.items);
+    for (blocks) |b| try out.appendSlice(a, b.raw orelse b.uncompressed);
+    const size_off = "UnityFS\x00".len + 4 + "2020.3.33f1".len + 1 + "revision".len + 1;
+    std.mem.writeInt(i64, out.items[size_off .. size_off + 8], @intCast(out.items.len), .big);
+    return out.toOwnedSlice(a);
+}
+
+fn buildSerializedV22(a: std.mem.Allocator) ![]u8 {
+    var meta: streams.Writer = .init(a);
+    defer meta.deinit();
+    try meta.writeStringToNull("2020.1.0f1");
+    try meta.writeInt(i32, 3);
+    try meta.writeByte(1);
+    try meta.writeInt(i32, 2);
+    try writeSerializedType(&meta, 4, "Transform");
+    try writeSerializedType(&meta, 28, "Texture2D");
+    try meta.writeInt(i32, 2);
+    try writeSerializedObject(&meta, 100, 0, 0, 0);
+    try writeSerializedObject(&meta, 200, 0, 12, 1);
+    try meta.writeInt(i32, 0);
+    try meta.writeInt(i32, 1);
+    try meta.writeStringToNull("");
+    try meta.writeBytes(&[_]u8{0} ** 16);
+    try meta.writeInt(i32, 0);
+    try meta.writeStringToNull("library/unity default resources");
+    try meta.writeInt(i32, 0);
+    try meta.writeStringToNull("user info here");
+
+    var out: streams.Writer = .init(a);
+    defer out.deinit();
+    const meta_len: u32 = @intCast(meta.getWritten().len);
+    const data_offset: u64 = 48 + meta_len;
+    const file_size: u64 = data_offset + 12;
+    try out.writeIntWith(u32, 0, .big);
+    try out.writeIntWith(u32, 0, .big);
+    try out.writeIntWith(u32, 22, .big);
+    try out.writeIntWith(u32, 0, .big);
+    try out.writeByte(0);
+    try out.writeBytes(&[_]u8{ 0xa1, 0xb2, 0xc3 });
+    try out.writeIntWith(u32, meta_len, .big);
+    try out.writeIntWith(i64, @intCast(file_size), .big);
+    try out.writeIntWith(i64, @intCast(data_offset), .big);
+    try out.writeIntWith(i64, 7, .big);
+    try out.writeBytes(meta.getWritten());
+    try out.writeBytes("TEXTUREBYTES");
+    return a.dupe(u8, out.getWritten());
+}
+
+fn writeSerializedType(w: *streams.Writer, class_id: i32, tree_name: []const u8) !void {
+    const typetree = @import("typetree.zig");
+    try w.writeInt(i32, class_id);
+    try w.writeByte(0);
+    try w.writeInt(i16, -1);
+    try w.writeBytes(&[_]u8{0} ** 16);
+    try w.writeInt(i32, 1);
+    try w.writeInt(i32, 0);
+    try w.writeInt(i16, 22);
+    try w.writeByte(0);
+    try w.writeByte(0);
+    try w.writeInt(u32, typetree.common_string_flag + typetree.commonStringOffset(tree_name).?);
+    try w.writeInt(u32, typetree.common_string_flag + typetree.commonStringOffset("m_Name").?);
+    try w.writeInt(i32, 0);
+    try w.writeInt(i32, 0);
+    try w.writeInt(i32, 0);
+    try w.writeInt(u64, 0);
+    try w.writeInt(i32, 0);
+}
+
+fn writeSerializedObject(w: *streams.Writer, path_id: i64, rel_start: i64, size: u32, type_index: u32) !void {
+    try w.alignTo4();
+    try w.writeInt(i64, path_id);
+    try w.writeInt(i64, rel_start);
+    try w.writeInt(u32, size);
+    try w.writeInt(u32, type_index);
+}
+
+fn classIdsOf(sf: serialized.SerializedFile, a: std.mem.Allocator) ![]i32 {
+    var ids: std.ArrayList(i32) = .empty;
+    var seen: std.AutoHashMapUnmanaged(i32, void) = .empty;
+    defer seen.deinit(a);
+    for (sf.objects) |object| {
+        const gop = try seen.getOrPut(a, object.class_id);
+        if (gop.found_existing) continue;
+        try ids.append(a, object.class_id);
+    }
+    return ids.toOwnedSlice(a);
+}
+
+test "parseMetadata skips a poisoned later block that full parse rejects" {
+    const a = std.testing.allocator;
+    const sf_bytes = try buildSerializedV22(a);
+    defer a.free(sf_bytes);
+    const hdr = try serialized.readHeader(sf_bytes);
+    const prefix = sf_bytes[0..@intCast(hdr.data_offset)];
+
+    const poison_raw = [_]u8{0xFF} ** 16;
+    const poison_plain = [_]u8{0} ** 1024;
+    const bundle_bytes = try buildMultiBlockFixture(a, &.{
+        .{ .uncompressed = prefix },
+        .{ .uncompressed = &poison_plain, .raw = &poison_raw, .flags = 2 },
+    }, "CAB-meta");
+    defer a.free(bundle_bytes);
+
+    try std.testing.expectError(error.DecompressFailed, parse(a, bundle_bytes));
+
+    var meta = try parseMetadata(a, bundle_bytes);
+    defer meta.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), meta.nodes.len);
+    try std.testing.expectEqualStrings("CAB-meta", meta.nodes[0].path);
+    try std.testing.expectEqual(@as(i64, @intCast(prefix.len + poison_plain.len)), meta.nodes[0].size);
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const sf = try serialized.parse(aa, meta.nodes[0].data);
+    try std.testing.expectEqual(@as(u32, 22), sf.version);
+    try std.testing.expectEqualStrings("2020.1.0f1", sf.unity_version);
+    try std.testing.expectEqual(@as(usize, 2), sf.types.len);
+    try std.testing.expectEqual(@as(usize, 2), sf.objects.len);
+    const ids = try classIdsOf(sf, aa);
+    try std.testing.expectEqualSlices(i32, &.{ 4, 28 }, ids);
+}
+
+test "parseMetadata serialized tables match a full parse of a well-formed multi-block bundle" {
+    const a = std.testing.allocator;
+    const sf_bytes = try buildSerializedV22(a);
+    defer a.free(sf_bytes);
+    const hdr = try serialized.readHeader(sf_bytes);
+    const split: usize = @intCast(hdr.data_offset);
+    const bundle_bytes = try buildMultiBlockFixture(a, &.{
+        .{ .uncompressed = sf_bytes[0..split] },
+        .{ .uncompressed = sf_bytes[split..] },
+    }, "CAB-eq");
+    defer a.free(bundle_bytes);
+
+    var full = try parse(a, bundle_bytes);
+    defer full.deinit(a);
+    var meta = try parseMetadata(a, bundle_bytes);
+    defer meta.deinit(a);
+
+    try std.testing.expectEqual(full.nodes.len, meta.nodes.len);
+    try std.testing.expect(meta.nodes[0].data.len < full.nodes[0].data.len);
+    try std.testing.expectEqual(split, meta.nodes[0].data.len);
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const sf_full = try serialized.parse(aa, full.nodes[0].data);
+    const sf_meta = try serialized.parse(aa, meta.nodes[0].data);
+    try std.testing.expectEqual(sf_full.version, sf_meta.version);
+    try std.testing.expectEqualStrings(sf_full.unity_version, sf_meta.unity_version);
+    try std.testing.expectEqual(sf_full.enable_type_tree, sf_meta.enable_type_tree);
+    try std.testing.expectEqual(sf_full.types.len, sf_meta.types.len);
+    try std.testing.expectEqual(sf_full.objects.len, sf_meta.objects.len);
+    try std.testing.expectEqual(sf_full.externals.len, sf_meta.externals.len);
+    const ids_full = try classIdsOf(sf_full, aa);
+    const ids_meta = try classIdsOf(sf_meta, aa);
+    try std.testing.expectEqualSlices(i32, ids_full, ids_meta);
 }

@@ -24,6 +24,13 @@ otherwise.
   This machine-readable nested metadata is part of unityz 0.1.1 and later;
   consumers that gate on it can reject an older executable through
   `unityz --version` before opening an artifact.
+- Default `info` on a UnityFS bundle reads the block table and decompresses
+  only the blocks covering each SerializedFile's metadata (the format 9+
+  `[0, data_offset)` prefix; format 2-8 still covers the whole node). A
+  later block that cannot decompress does not fail `info`. `--dump` and
+  `--objects` still decompress the whole container, as do extract, edit,
+  and verify. Default `info --json` emits `"shaders":[]` because shader
+  skins need object payloads.
 - `info` exits non-zero for an unrecognized or malformed input. Directory
   batches continue through every file but still return failure if any member
   failed, so a diagnostic line can never be mistaken for successful JSON.
@@ -484,11 +491,13 @@ object hash.
 Every command accepts a directory and runs over each regular file in it,
 except the two that consume a directory themselves: `diff` compares the
 two trees file-by-file, and `managed` reads a Mono build's assembly
-folder. Plain output streams through per file. With `--json`, each file's output
-is wrapped as one line, `{"file":"<path>","results":[<doc>, ...]}`, so a
-consumer can tell which file produced which document without depending on
-directory order. `results` holds every document the command emitted for
-that file (normally one; `hierarchy` and `info` emit one per embedded
+folder. Plain output streams through per file.
+
+With `--json`, each file's output is wrapped as one line,
+`{"file":"<path>","results":[<doc>, ...]}`, so a consumer can tell which
+file produced which document without depending on directory order.
+`results` holds every document the command emitted for that file
+(normally one; `hierarchy` and `info` emit one per embedded
 SerializedFile), and a non-JSON line is kept as a JSON string. A file the
 command could not read or decode adds `"error":"<name>"` with the same
 diagnostic on stderr; the batch continues and exits 1 at the end.

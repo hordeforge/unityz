@@ -11,6 +11,15 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+### Changed
+
+- `info` on a UnityFS bundle reads the block table and decompresses only
+  the blocks that cover each embedded SerializedFile's metadata (type
+  trees and object table). Object payloads, later blocks, and sidecar
+  `.resS` nodes stay compressed. `--dump` and `--objects` still take the
+  full-container path. Shader skins in default `info --json` are omitted
+  (`"shaders":[]`) because they need those payloads.
+
 ## [0.1.5] - 2026-09-05
 
 ### Changed
