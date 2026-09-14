@@ -24,6 +24,7 @@ const Release = struct { name: []const u8, data: []const u8 };
 /// Every shipped release. Add a line here after packing a new dump.
 const table = [_]Release{
     .{ .name = "2022.3.62f2", .data = @embedFile("builtin_trees/2022.3.62f2.bin") },
+    .{ .name = "2021.3.45f2", .data = @embedFile("builtin_trees/2021.3.45f2.bin") },
 };
 
 pub const Error = error{ UnknownRevision, UnknownClass, Corrupt, OutOfMemory };
@@ -223,19 +224,24 @@ test "lookup returns the exact 2022.3.62f2 layouts the pipeline writes" {
     try std.testing.expectEqualStrings("AssetBundle", ab.roots[0].type_name);
     try std.testing.expect(hasChild(ab.roots[0], "m_Container"));
     try std.testing.expect(hasChild(ab.roots[0], "m_PreloadTable"));
+
+    const tex_2021 = try lookup(a, "2021.3.45f2", 28);
+    try std.testing.expectEqualStrings("Texture2D", tex_2021.roots[0].type_name);
+    try std.testing.expect(hasChild(tex_2021.roots[0], "m_Width"));
 }
 
 test "lookup rejects an unknown revision and an unavailable class" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectError(error.UnknownRevision, lookup(a, "2021.3.45f2", 28));
+    try std.testing.expectError(error.UnknownRevision, lookup(a, "2019.4.40f1", 28));
     try std.testing.expectError(error.UnknownRevision, lookup(a, "", 28));
     // class 0 (Object) is abstract and has no tree; 999999 does not exist
     try std.testing.expectError(error.UnknownClass, lookup(a, "2022.3.62f2", 0));
     try std.testing.expectError(error.UnknownClass, lookup(a, "2022.3.62f2", 999999));
-    try std.testing.expectEqual(@as(usize, 1), releases().len);
+    try std.testing.expectEqual(@as(usize, 2), releases().len);
     try std.testing.expectEqualStrings("2022.3.62f2", releases()[0]);
+    try std.testing.expectEqualStrings("2021.3.45f2", releases()[1]);
 }
 
 test "decode rejects a corrupt database" {
@@ -272,6 +278,7 @@ test "the embedded databases match the digests recorded in NOTICE" {
     // updating its line below on purpose.
     const digests = [table.len][]const u8{
         "6e1a6f760832a3740f9637275845e6102d8a0de36a536f12f0508fb6f743c4c2", // 2022.3.62f2
+        "d2deb0e94bd199744eeed68fb566789fc48bb2d4c9074ecee9bf425cda7b8167", // 2021.3.45f2
     };
     for (table, digests) |r, expected| {
         var got: [32]u8 = undefined;

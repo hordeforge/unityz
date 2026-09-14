@@ -11,6 +11,13 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+### Added
+
+- Built-in engine-class type trees for Unity 2021.3.45f2 (291 classes),
+  packed from the AssetRipper TypeTreeDumps StructsDump the same way as
+  2022.3.62f2. `--builtin` and `trees --builtin` match the file's exact
+  revision; 2021.3.45f2 is no longer an unknown release.
+
 ## [0.1.6] - 2026-09-14
 
 ### Changed
