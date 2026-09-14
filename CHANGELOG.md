@@ -11,6 +11,8 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-09-15
+
 ### Added
 
 - `trees --builtin` with no release argument prints
