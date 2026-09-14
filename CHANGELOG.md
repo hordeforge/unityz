@@ -11,6 +11,11 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+### Changed
+
+- Built-in tree tests walk the shipped release table instead of a
+  hardcoded count, so adding a dump cannot leave the lookup coverage stale.
+
 ## [0.1.8] - 2026-09-14
 
 ### Added

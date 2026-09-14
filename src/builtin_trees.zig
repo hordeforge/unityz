@@ -230,14 +230,11 @@ test "lookup returns the exact 2022.3.62f2 layouts the pipeline writes" {
     try std.testing.expect(hasChild(ab.roots[0], "m_Container"));
     try std.testing.expect(hasChild(ab.roots[0], "m_PreloadTable"));
 
-    const tex_2021 = try lookup(a, "2021.3.45f2", 28);
-    try std.testing.expectEqualStrings("Texture2D", tex_2021.roots[0].type_name);
-    try std.testing.expect(hasChild(tex_2021.roots[0], "m_Width"));
-
-    const tex_2019 = try lookup(a, "2019.4.41f2", 28);
-    try std.testing.expectEqualStrings("Texture2D", tex_2019.roots[0].type_name);
-    const tex_2023 = try lookup(a, "2023.2.18f1", 28);
-    try std.testing.expectEqualStrings("Texture2D", tex_2023.roots[0].type_name);
+    for (table) |r| {
+        const tex_r = try lookup(a, r.name, 28);
+        try std.testing.expectEqualStrings("Texture2D", tex_r.roots[0].type_name);
+        try std.testing.expect(hasChild(tex_r.roots[0], "m_Width"));
+    }
 }
 
 test "lookup rejects an unknown revision and an unavailable class" {
@@ -249,11 +246,10 @@ test "lookup rejects an unknown revision and an unavailable class" {
     // class 0 (Object) is abstract and has no tree; 999999 does not exist
     try std.testing.expectError(error.UnknownClass, lookup(a, "2022.3.62f2", 0));
     try std.testing.expectError(error.UnknownClass, lookup(a, "2022.3.62f2", 999999));
-    try std.testing.expectEqual(@as(usize, 7), releases().len);
-    try std.testing.expectEqualStrings("2022.3.62f2", releases()[0]);
-    try std.testing.expectEqualStrings("2021.3.45f2", releases()[1]);
-    try std.testing.expectEqualStrings("2019.4.41f2", releases()[2]);
-    try std.testing.expectEqualStrings("2023.2.18f1", releases()[6]);
+    try std.testing.expectEqual(table.len, releases().len);
+    for (table, 0..) |r, i| {
+        try std.testing.expectEqualStrings(r.name, releases()[i]);
+    }
 }
 
 test "decode rejects a corrupt database" {
