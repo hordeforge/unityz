@@ -178,11 +178,12 @@ const usage =
     \\                 game's own bundles supply version-exact trees for
     \\                 its typeless files; MonoBehaviour trees are keyed
     \\                 by script class via the container's MonoScripts
+    \\  trees --builtin            List shipped Unity releases as JSON
     \\  trees --builtin <release>  Export the built-in engine-class trees
-    \\                 unityz ships for one exact Unity release (currently
-    \\                 2022.3.62f2) in the same JSON shape (--class <id>
-    \\                 for one class; --out <file.json>); an unknown
-    \\                 release or class is a failure
+    \\                 unityz ships for one exact Unity release in the
+    \\                 same JSON shape (--class <id> for one class;
+    \\                 --out <file.json>); an unknown release or class
+    \\                 is a failure
     \\  create <spec.json> --out <file>  Build a UnityFS bundle from scratch:
     \\                 a format-22 SerializedFile with the declared type
     \\                 trees and objects (plus an optional .resource
@@ -5207,10 +5208,11 @@ fn printBundle(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout:
         }
         if (dump or objects) {
             try emitShadersJson(arena, b.nodes, stdout);
+            try stdout.print(",\"metadata_only\":false", .{});
         } else {
             // Shader skins read object payloads; metadata-only info omits them
             // rather than decompressing the rest of the container.
-            try stdout.print(",\"shaders\":[]", .{});
+            try stdout.print(",\"shaders\":[],\"metadata_only\":true", .{});
         }
         try stdout.print("}}\n", .{});
         return;
@@ -9815,7 +9817,16 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
 /// The release must match exactly; an unknown release or a class absent
 /// from it is a failure with nothing on stdout.
 fn cmdTreesBuiltin(rest: []const []const u8, stdout: *Io.Writer) !void {
-    if (rest.len == 0 or std.mem.startsWith(u8, rest[0], "--")) return usageError("unityz: trees --builtin needs a Unity release, e.g. 2022.3.62f2 (shipped: {s})\n", .{releaseList()});
+    if (rest.len == 0) {
+        try stdout.writeAll("{\"releases\":[");
+        for (unityz.builtin_trees.releases(), 0..) |r, i| {
+            if (i != 0) try stdout.writeByte(',');
+            try writeJsonString(stdout, r);
+        }
+        try stdout.writeAll("]}\n");
+        return;
+    }
+    if (std.mem.startsWith(u8, rest[0], "--")) return usageError("unityz: trees --builtin needs a Unity release, e.g. 2022.3.62f2 (shipped: {s})\n", .{releaseList()});
     const release = rest[0];
     var out_path: ?[]const u8 = null;
     var class_filter: ?i32 = null;
@@ -11343,7 +11354,14 @@ test "trees --builtin exports the --trees JSON shape and rejects unknowns" {
     try std.testing.expect(command_failed_flag);
     command_failed_flag = false;
     try std.testing.expectEqual(before, aw.toArrayList().items.len);
-    try std.testing.expectError(error.Usage, cmdTreesBuiltin(&.{}, &aw.writer));
+    command_failed_flag = false;
+    var list_aw = std.Io.Writer.Allocating.init(a);
+    try cmdTreesBuiltin(&.{}, &list_aw.writer);
+    const listed = list_aw.toArrayList().items;
+    try std.testing.expect(std.mem.startsWith(u8, listed, "{\"releases\":["));
+    try std.testing.expect(std.mem.indexOf(u8, listed, "\"2022.3.62f2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, listed, "\"2019.4.41f2\"") != null);
+    try std.testing.expectError(error.Usage, cmdTreesBuiltin(&.{"--class"}, &list_aw.writer));
 }
 
 test "appendScriptEntry flattens MonoScript metadata for scripts.json" {

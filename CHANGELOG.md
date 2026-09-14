@@ -11,6 +11,13 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+### Added
+
+- `trees --builtin` with no release argument prints
+  `{"releases":[...]}` of the dumps this binary ships. `info --json` on a
+  UnityFS bundle includes `"metadata_only":true` when default info skipped
+  object payloads (`false` with `--dump` / `--objects`).
+
 ## [0.1.9] - 2026-09-14
 
 ### Changed

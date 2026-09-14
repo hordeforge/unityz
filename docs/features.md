@@ -302,8 +302,10 @@ nearest-version fallback, because a neighbouring release's tree can
 differ in one field and decode garbage silently. An unknown release or a
 class the release has no tree for is an error, never a guess.
 
-`unityz trees --builtin <release> [--class <id>] [--out <file.json>]`
-exports the database in the `--trees` JSON shape. Every node carries
+`unityz trees --builtin` with no release prints `{"releases":[...]}` of
+the dumps this binary ships. `unityz trees --builtin <release>
+[--class <id>] [--out <file.json>]` exports the database in the `--trees`
+JSON shape. Every node carries
 `m_Type`, `m_Name`, `m_Level`, `m_MetaFlag` plus `m_ByteSize`,
 `m_Version`, `m_TypeFlags` (Unity's array flag) and `m_Index`, so a
 consumer can write the tree back into a SerializedFile with Unity's own
