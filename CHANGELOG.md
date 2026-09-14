@@ -11,6 +11,8 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-09-14
+
 ### Changed
 
 - `info` on a UnityFS bundle reads the block table and decompresses only
