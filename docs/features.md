@@ -26,7 +26,8 @@ otherwise.
   `unityz --version` before opening an artifact.
 - Default `info` on a UnityFS bundle reads the block table and decompresses
   only the blocks covering each SerializedFile's metadata (the format 9+
-  `[0, data_offset)` prefix; format 2-8 still covers the whole node). A
+  `[0, data_offset)` prefix; format 2-8 the 16-byte header plus the
+  trailing metadata). A
   later block that cannot decompress does not fail `info`. `--dump` and
   `--objects` still decompress the whole container, as do extract, edit,
   and verify. Default `info --json` emits `"shaders":[]` because shader
