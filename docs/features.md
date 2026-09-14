@@ -294,9 +294,9 @@ trees (`src/builtin_trees/<release>.bin`, served by
 `src/builtin_trees.zig`). Each file is one release's AssetRipper
 TypeTreeDumps StructsDump packed by `scripts/structsdump-to-builtin.py`;
 the shipped releases are listed by every "no built-in type trees"
-diagnostic. Currently shipped: `2022.3.62f2` (294 concrete classes,
-21755 nodes, 416 KB) and `2021.3.45f2` (291 concrete classes, 21273
-nodes, 406 KB). Matching is by exact release string: there is no
+diagnostic. Currently shipped: `2022.3.62f2`, `2021.3.45f2`, `2019.4.41f2`,
+`2020.3.49f1`, `2021.3.58f1`, `2022.3.76f1`, and `2023.2.18f1`. Matching
+is by exact release string: there is no
 nearest-version fallback, because a neighbouring release's tree can
 differ in one field and decode garbage silently. An unknown release or a
 class the release has no tree for is an error, never a guess.

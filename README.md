@@ -153,7 +153,7 @@ emits. unityz can build one itself three ways:
   `scripts/merge-trees.py` joins the two halves for full coverage.
 
 unityz also ships the built-in engine-class trees of specific Unity
-releases (currently 2022.3.62f2 and 2021.3.45f2) inside the binary. `--builtin` on any of
+releases (currently 2019.4–2023.2 LTS dumps including 2022.3.62f2) inside the binary. `--builtin` on any of
 the commands above decodes a stripped file's built-in classes through the
 shipped trees for the file's own exact release, and `trees --builtin
 <release>` exports them; MonoBehaviour script fields still need `--trees`.

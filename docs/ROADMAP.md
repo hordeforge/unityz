@@ -21,7 +21,7 @@ Nothing in flight.
 
 - Built-in engine-class type trees (2026-09-05): `src/builtin_trees.zig`
   embeds a release-indexed database packed from AssetRipper TypeTreeDumps
-  (`scripts/structsdump-to-builtin.py`; 2022.3.62f2 and 2021.3.45f2 shipped), `trees
+  (`scripts/structsdump-to-builtin.py`; 2019.4–2023.2 LTS dumps shipped), `trees
   --builtin <release>` exports it in the `--trees` shape with byte sizes
   and versions, and `--builtin` decodes stripped files' built-in classes
   through it. Exact-release matching only. See "Built-in engine-class

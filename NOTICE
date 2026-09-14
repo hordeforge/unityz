@@ -153,12 +153,11 @@ recomputes it, so the blob the offset table indexes cannot change unnoticed:
 
 ================================================================================
 builtin_trees -- embedded Unity engine-class type-tree database
-Location in this distribution: src/builtin_trees/2022.3.62f2.bin,
-src/builtin_trees/2021.3.45f2.bin
+Location in this distribution: src/builtin_trees/*.bin
   (embedded into the built library and CLI by src/builtin_trees.zig, so it
   travels in binary releases as well as in the source package)
 
-The files are a repack of the Unity 2022.3.62f2 and 2021.3.45f2 StructsDumps published by the
+The files are a repack of Unity StructsDumps published by the
 AssetRipper TypeTreeDumps project
 (https://github.com/AssetRipper/TypeTreeDumps), produced by
 scripts/structsdump-to-builtin.py, whose header records the exact source
@@ -175,6 +174,21 @@ moving upstream branch and carries no checksum of its own:
   src/builtin_trees/2021.3.45f2.bin
     sha256  d2deb0e94bd199744eeed68fb566789fc48bb2d4c9074ecee9bf425cda7b8167
     size    415408 bytes
+  src/builtin_trees/2019.4.41f2.bin
+    sha256  7c8efed42c93dcf8f65b9ad519309c1fee0b575995742ffff9f2e0308d95d75f
+    size    399375 bytes
+  src/builtin_trees/2020.3.49f1.bin
+    sha256  b0e66d2c9e7af06bcfa7e0f76251b712b5999f2a34bf02a699b63a4bcd9688fd
+    size    404865 bytes
+  src/builtin_trees/2021.3.58f1.bin
+    sha256  ec04e0b50210bb42ef12db78a8d1a45cea482997a2d04f5e0adfe0fa91c5ec81
+    size    415531 bytes
+  src/builtin_trees/2022.3.76f1.bin
+    sha256  e0df308d300588d307fa5ff122f0d2f6218a89f24858a861a11c37319858f334
+    size    426361 bytes
+  src/builtin_trees/2023.2.18f1.bin
+    sha256  a207d9cac7e85f970b188e1dd3c2aca02e9bf2479f3427f2c6b6c2735a2f4713
+    size    431256 bytes
 
 A test in src/builtin_trees.zig recomputes that digest, so the shipped table
 can be traced to a known repack and refreshing a release means updating both
