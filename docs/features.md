@@ -295,7 +295,8 @@ trees (`src/builtin_trees/<release>.bin`, served by
 TypeTreeDumps StructsDump packed by `scripts/structsdump-to-builtin.py`;
 the shipped releases are listed by every "no built-in type trees"
 diagnostic. Currently shipped: `2022.3.62f2` (294 concrete classes,
-21755 nodes, 416 KB). Matching is by exact release string: there is no
+21755 nodes, 416 KB) and `2021.3.45f2` (291 concrete classes, 21273
+nodes, 406 KB). Matching is by exact release string: there is no
 nearest-version fallback, because a neighbouring release's tree can
 differ in one field and decode garbage silently. An unknown release or a
 class the release has no tree for is an error, never a guess.
@@ -344,8 +345,8 @@ synthetic bundle.
 To add a release:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/AssetRipper/TypeTreeDumps/main/StructsDump/release/2021.3.45f2.dump -o 2021.3.45f2.dump
-uv run scripts/structsdump-to-builtin.py 2021.3.45f2.dump -o src/builtin_trees/2021.3.45f2.bin
+curl -sL https://raw.githubusercontent.com/AssetRipper/TypeTreeDumps/main/StructsDump/release/2020.3.48f1.dump -o 2020.3.48f1.dump
+uv run scripts/structsdump-to-builtin.py 2020.3.48f1.dump -o src/builtin_trees/2020.3.48f1.bin
 ```
 
 Then add the release to the `table` in `src/builtin_trees.zig`, add the
