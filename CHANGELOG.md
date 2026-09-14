@@ -11,6 +11,13 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+### Added
+
+- Built-in engine-class type trees for Unity 2019.4.41f2, 2020.3.49f1,
+  2021.3.58f1, 2022.3.76f1, and 2023.2.18f1 (latest f1/f2 on each LTS
+  line in TypeTreeDumps), packed the same way as 2022.3.62f2 and
+  2021.3.45f2. Matching stays exact by release string.
+
 ## [0.1.7] - 2026-09-14
 
 ### Added

@@ -25,6 +25,11 @@ const Release = struct { name: []const u8, data: []const u8 };
 const table = [_]Release{
     .{ .name = "2022.3.62f2", .data = @embedFile("builtin_trees/2022.3.62f2.bin") },
     .{ .name = "2021.3.45f2", .data = @embedFile("builtin_trees/2021.3.45f2.bin") },
+    .{ .name = "2019.4.41f2", .data = @embedFile("builtin_trees/2019.4.41f2.bin") },
+    .{ .name = "2020.3.49f1", .data = @embedFile("builtin_trees/2020.3.49f1.bin") },
+    .{ .name = "2021.3.58f1", .data = @embedFile("builtin_trees/2021.3.58f1.bin") },
+    .{ .name = "2022.3.76f1", .data = @embedFile("builtin_trees/2022.3.76f1.bin") },
+    .{ .name = "2023.2.18f1", .data = @embedFile("builtin_trees/2023.2.18f1.bin") },
 };
 
 pub const Error = error{ UnknownRevision, UnknownClass, Corrupt, OutOfMemory };
@@ -228,20 +233,27 @@ test "lookup returns the exact 2022.3.62f2 layouts the pipeline writes" {
     const tex_2021 = try lookup(a, "2021.3.45f2", 28);
     try std.testing.expectEqualStrings("Texture2D", tex_2021.roots[0].type_name);
     try std.testing.expect(hasChild(tex_2021.roots[0], "m_Width"));
+
+    const tex_2019 = try lookup(a, "2019.4.41f2", 28);
+    try std.testing.expectEqualStrings("Texture2D", tex_2019.roots[0].type_name);
+    const tex_2023 = try lookup(a, "2023.2.18f1", 28);
+    try std.testing.expectEqualStrings("Texture2D", tex_2023.roots[0].type_name);
 }
 
 test "lookup rejects an unknown revision and an unavailable class" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectError(error.UnknownRevision, lookup(a, "2019.4.40f1", 28));
+    try std.testing.expectError(error.UnknownRevision, lookup(a, "2018.4.36f1", 28));
     try std.testing.expectError(error.UnknownRevision, lookup(a, "", 28));
     // class 0 (Object) is abstract and has no tree; 999999 does not exist
     try std.testing.expectError(error.UnknownClass, lookup(a, "2022.3.62f2", 0));
     try std.testing.expectError(error.UnknownClass, lookup(a, "2022.3.62f2", 999999));
-    try std.testing.expectEqual(@as(usize, 2), releases().len);
+    try std.testing.expectEqual(@as(usize, 7), releases().len);
     try std.testing.expectEqualStrings("2022.3.62f2", releases()[0]);
     try std.testing.expectEqualStrings("2021.3.45f2", releases()[1]);
+    try std.testing.expectEqualStrings("2019.4.41f2", releases()[2]);
+    try std.testing.expectEqualStrings("2023.2.18f1", releases()[6]);
 }
 
 test "decode rejects a corrupt database" {
@@ -279,6 +291,11 @@ test "the embedded databases match the digests recorded in NOTICE" {
     const digests = [table.len][]const u8{
         "6e1a6f760832a3740f9637275845e6102d8a0de36a536f12f0508fb6f743c4c2", // 2022.3.62f2
         "d2deb0e94bd199744eeed68fb566789fc48bb2d4c9074ecee9bf425cda7b8167", // 2021.3.45f2
+        "7c8efed42c93dcf8f65b9ad519309c1fee0b575995742ffff9f2e0308d95d75f", // 2019.4.41f2
+        "b0e66d2c9e7af06bcfa7e0f76251b712b5999f2a34bf02a699b63a4bcd9688fd", // 2020.3.49f1
+        "ec04e0b50210bb42ef12db78a8d1a45cea482997a2d04f5e0adfe0fa91c5ec81", // 2021.3.58f1
+        "e0df308d300588d307fa5ff122f0d2f6218a89f24858a861a11c37319858f334", // 2022.3.76f1
+        "a207d9cac7e85f970b188e1dd3c2aca02e9bf2479f3427f2c6b6c2735a2f4713", // 2023.2.18f1
     };
     for (table, digests) |r, expected| {
         var got: [32]u8 = undefined;
