@@ -11,6 +11,8 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-09-14
+
 ### Added
 
 - Built-in engine-class type trees for Unity 2021.3.45f2 (291 classes),
