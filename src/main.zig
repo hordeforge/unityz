@@ -780,7 +780,7 @@ fn parseJsonTreesOptions(rest: []const []const u8, comptime command: []const u8)
 /// file when given (null on a diagnostic, as before), plus the built-in
 /// release database under `--builtin`.
 fn loadTrees(arena: std.mem.Allocator, trees_path: ?[]const u8, stdout: *Io.Writer) !?*const InjectedTrees {
-    const from_file: ?*const InjectedTrees = if (trees_path) |tp| try parseInjectedTrees(arena, tp, stdout) else null;
+    const from_file: ?*const InjectedTrees = if (trees_path) |tp| try parseInjectedTrees(tp, stdout) else null;
     if (!builtin_mode) return from_file;
     const table = try arena.create(InjectedTrees);
     table.* = if (from_file) |f| f.* else .{};
@@ -790,14 +790,38 @@ fn loadTrees(arena: std.mem.Allocator, trees_path: ?[]const u8, stdout: *Io.Writ
     return table;
 }
 
+/// The last `--trees` file parsed, memoized for the whole process.
+///
+/// A directory batch runs one command per file, each with its own arena, so
+/// without this the same table is re-read and re-parsed once per file. A
+/// TypeTreeGenerator dump is tens of megabytes of JSON and links thousands
+/// of trees, and a game's asset directory holds hundreds of files - the read
+/// and the parse then dominate the batch. The table is read-only once built
+/// (`loadTrees` copies it before attaching a `BuiltinCache`), so every caller
+/// can share one copy. It lives in its own process-lifetime arena rather than
+/// a caller's, which is reset between files.
+var trees_cache_state: ?std.heap.ArenaAllocator = null;
+var trees_cache_path: ?[]const u8 = null;
+var trees_cache_table: ?*const InjectedTrees = null;
+
 /// Reads and parses a `--trees` file into an InjectedTrees table (arena
 /// owned). Prints a diagnostic, marks the run failed and returns null when the
 /// file is unreadable or contains no class trees: the caller asked for those
 /// trees, so decoding without them is not the success it would otherwise look
 /// like on stdout. `create` already fails the same way on the same file, and
 /// the run keeps going so a directory batch still reports its other files.
-fn parseInjectedTrees(arena: std.mem.Allocator, path: []const u8, stdout: *Io.Writer) !?*const InjectedTrees {
+///
+/// Only a successful parse is memoized: a failing file re-reports per file,
+/// as before, and that path is cold anyway.
+fn parseInjectedTrees(path: []const u8, stdout: *Io.Writer) !?*const InjectedTrees {
     const io = io_global.io;
+    if (trees_cache_path) |cached_path| {
+        if (std.mem.eql(u8, cached_path, path)) {
+            if (trees_cache_table) |tp| return tp;
+        }
+    }
+    if (trees_cache_state == null) trees_cache_state = .init(std.heap.page_allocator);
+    const arena = trees_cache_state.?.allocator();
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch |err| {
         failure("unityz: {s}: cannot read trees file: {s}\n", .{ path, @errorName(err) });
         return null;
@@ -820,6 +844,8 @@ fn parseInjectedTrees(arena: std.mem.Allocator, path: []const u8, stdout: *Io.Wr
     }
     const tp = try arena.create(InjectedTrees);
     tp.* = out;
+    trees_cache_path = try arena.dupe(u8, path);
+    trees_cache_table = tp;
     return tp;
 }
 
@@ -1144,7 +1170,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
                 if (unityz.container.sniff(e.data).container == .serialized) continue;
                 try sidecars.append(arena, e);
             }
-            for (try diskSidecars(arena, path)) |sc| try sidecars.append(arena, sc);
+            for (try diskSidecars(path)) |sc| try sidecars.append(arena, sc);
             for (entries) |e| {
                 if (path_filter) |pf| {
                     if (pf.node) |sn| {
@@ -1182,7 +1208,7 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             const injected = try loadTrees(arena, trees_path, stdout);
             // Streamed textures/audio point at sibling `.resS` files; load
             // them so those references resolve for a bare serialized file.
-            const sidecars = try diskSidecars(arena, path);
+            const sidecars = try diskSidecars(path);
             try extractSerialized(arena, path, bytes, raw, json_mode, class_filter, if (path_filter) |pf| pf.path_id else null, null, sidecars, &manifest, format, name_filter, injected, summary_ptr, &scripts, stdout);
             if (summary_mode) {
                 try printExtractSummary(arena, &summary, json_mode, stdout);
@@ -1504,12 +1530,33 @@ test "resolveSidecar rejects wrapping ranges" {
     try std.testing.expectEqual(@as(usize, 0), nomatch.len);
 }
 
+/// The last directory scanned for sidecars, memoized for the whole process.
+///
+/// A directory batch runs one command per file, and every file in it has the
+/// same sibling `.resS`/`.resource` set - so without this the scan re-reads
+/// all of them once per file. Those are the bulk of a Unity build's bytes
+/// (one `.resS` routinely runs to hundreds of megabytes), which makes the
+/// re-read, not the parse, what a batch spends its time on.
+///
+/// Peak memory is unchanged: a single call already holds the whole set at
+/// once, so keeping it costs no more than one file's scan already did.
+var sidecar_cache_state: ?std.heap.ArenaAllocator = null;
+var sidecar_cache_dir: ?[]const u8 = null;
+var sidecar_cache_list: ?[]const Sidecar = null;
+
 /// Loads the sibling `.resS`/`.resource` files next to a bare serialized
 /// file, so streamed references (`m_StreamData`/`m_Resource` pointing at
 /// `<name>.resS`) resolve during extract/verify. Empty when none exist.
-fn diskSidecars(arena: std.mem.Allocator, path: []const u8) ![]const Sidecar {
+fn diskSidecars(path: []const u8) ![]const Sidecar {
     const io = io_global.io;
     const dir_path = std.fs.path.dirname(path) orelse ".";
+    if (sidecar_cache_dir) |cached_dir| {
+        if (std.mem.eql(u8, cached_dir, dir_path)) {
+            if (sidecar_cache_list) |l| return l;
+        }
+    }
+    if (sidecar_cache_state == null) sidecar_cache_state = .init(std.heap.page_allocator);
+    const arena = sidecar_cache_state.?.allocator();
     var list: std.ArrayList(Sidecar) = .empty;
     // A sidecar that cannot be read is not a fatal error - the file's
     // non-streamed objects still extract - but it must be said out loud:
@@ -1540,6 +1587,8 @@ fn diskSidecars(arena: std.mem.Allocator, path: []const u8) ![]const Sidecar {
         // entry.name borrows the iterator's reused buffer; copy it.
         try list.append(arena, .{ .path = try arena.dupe(u8, entry.name), .data = data });
     }
+    sidecar_cache_dir = try arena.dupe(u8, dir_path);
+    sidecar_cache_list = list.items;
     return list.items;
 }
 
@@ -5566,7 +5615,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
             // references point into (mirrors extract's resolution domain).
             var sidecars: std.ArrayList(Sidecar) = .empty;
             try sidecars.appendSlice(arena, try containerSidecars(arena, nodes));
-            for (try diskSidecars(arena, path)) |sc| try sidecars.append(arena, sc);
+            for (try diskSidecars(path)) |sc| try sidecars.append(arena, sc);
             const entry_label: []const u8 = if (kind == .bundle) "node" else "entry";
             for (nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
@@ -5581,7 +5630,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
         },
         .serialized => {
             try rejectNodeSelector(if (path_filter) |pf| pf.node else null);
-            const sidecars = try diskSidecars(arena, path);
+            const sidecars = try diskSidecars(path);
             _ = try verifySerializedBytes(arena, bytes, null, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars, basename(path), injected);
         },
         .archive => {
@@ -8235,6 +8284,16 @@ fn collectStats(arena: std.mem.Allocator, bytes: []const u8, node: []const u8, c
 /// Accumulates a parsed serialized file's per-class totals and per-object
 /// entries into the running tallies.
 fn accumulateStats(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, class_filter: ?i32, classes: *std.ArrayList(ClassStat), total_objects: *usize, total_bytes: *u64, entries: *std.ArrayList(StatEntry)) !void {
+    // Index the running tally by class id: the scan it replaces walked every
+    // class already seen once per object, and `stats` over a shared asset
+    // file asks that of hundreds of thousands of objects. Seeded from
+    // `classes` because the caller accumulates across a bundle's nodes, and
+    // rebuilt per call rather than threaded through, which costs one pass
+    // over the (few dozen) classes instead of one per object.
+    var by_class: std.AutoHashMapUnmanaged(i32, usize) = .empty;
+    defer by_class.deinit(arena);
+    for (classes.items, 0..) |c, i| try by_class.put(arena, c.class_id, i);
+
     for (sf.objects) |*o| {
         if (class_filter) |cf| {
             if (o.class_id != cf) continue;
@@ -8242,16 +8301,16 @@ fn accumulateStats(arena: std.mem.Allocator, sf: *const unityz.serialized.Serial
         const data = sf.objectData(o) orelse continue;
         total_objects.* += 1;
         total_bytes.* += data.len;
-        var found = false;
-        for (classes.items) |*c| {
-            if (c.class_id == o.class_id) {
-                c.count += 1;
-                c.bytes += data.len;
-                found = true;
-                break;
-            }
+        const slot = try by_class.getOrPut(arena, o.class_id);
+        if (slot.found_existing) {
+            const c = &classes.items[slot.value_ptr.*];
+            c.count += 1;
+            c.bytes += data.len;
+        } else {
+            // Appended in first-seen order, as the scan's fallthrough did.
+            slot.value_ptr.* = classes.items.len;
+            try classes.append(arena, .{ .class_id = o.class_id, .count = 1, .bytes = data.len });
         }
-        if (!found) try classes.append(arena, .{ .class_id = o.class_id, .count = 1, .bytes = data.len });
         try entries.append(arena, .{
             .path_id = o.path_id,
             .class_id = o.class_id,
