@@ -8,12 +8,12 @@
 # no `from __future__ import annotations`), so 3.10 is the real floor.
 target-version = "py310"
 
-# The same version CI runs (`pipx run ruff==0.16.1`, .github/workflows/ci.yml).
+# The same version CI runs (`pipx run ruff==0.16.6`, .github/workflows/ci.yml).
 # The pin in the workflow only binds the runner: a local `ruff check scripts`
 # would otherwise enforce whatever version happens to be installed, which is a
 # different rule set from the blocking one. Stated here, a mismatched ruff says
 # so instead of reporting a green or red tree CI will not reproduce.
-required-version = "0.16.1"
+required-version = "0.16.6"
 
 [lint]
 # Every rule group the tree already passes, on rather than off: the default set
@@ -49,16 +49,20 @@ select = [
     "PIE",  # misc lints
     "PLC",  # pylint conventions
     "PLE",  # pylint errors: bad string format, misplaced `raise`, bad `strip`
+    "PLR",  # pylint refactor: complexity caps, collapsible `else: if`, `exit()`
     "PLW",  # pylint warnings: unchecked `subprocess.run`, rebound loop var
+    "PTH",  # os.path calls that pathlib does better
     "Q",    # quote style
     "RET",  # return-path simplifications
     "RSE",  # `raise X()` vs `raise X`
     "RUF",  # ruff's own rules
     "S",    # bandit: exec, pickle, weak hashes, unchecked subprocess
+    "SIM",  # simplifications: collapsible `if`, `contextlib.suppress`, dict.get
     "SLF",  # private member access across objects
     "T10",  # a leftover `breakpoint()` or `pdb` import
     "TC",   # imports only needed for typing
     "TID",  # banned and relative imports
+    "TRY",  # exception handling: wrong type for a type check, `except` swallowing
     "UP",   # pyupgrade
     "W",    # pycodestyle warnings
     "YTT",  # `sys.version` misuse
@@ -72,27 +76,42 @@ select = [
 # reformatting those lines first, which is a change to the scripts and not to
 # this file. No cap is imposed here in the meantime.
 #
-# S101 (assert) is the one bandit rule dropped, scoped to that rule rather
-# than taken out of the whole group. The tree's single assert narrows a type
-# (`assert _spec.loader is not None` before `exec_module` in
-# structsdump-to-builtin.py); it is not a runtime check on input. Everything
-# else bandit looks for stays blocking: exec, pickle, a weak hash, an
-# unchecked subprocess, a parsed URL opened blind. That matters for scripts
-# that read a third-party dump and emit a blob the binary ships.
-ignore = ["E501", "S101"]
+# The four rules below each gate a group that is otherwise clean, so the rule
+# is dropped rather than the group: with the group selected, every other rule
+# in it blocks today and the listed finding is the only thing left to fix
+# before the rule itself can come back.
+#   PLR2004 - two magic-value comparisons (0xFFFF, 2). The rest of PLR - the
+#             complexity caps, `else: if` collapsing, `exit()` outside a REPL -
+#             is enforced.
+#   PTH123  - five `open()` calls that predate pathlib here. The rest of PTH
+#             is enforced.
+#   SIM115  - two files opened without a context manager. The rest of SIM,
+#             including the boolean and comparison simplifications, is enforced.
+#   TRY003  - one long message built at the `raise`. TRY004 (wrong exception
+#             type for a type check), TRY300 and TRY400 are enforced.
+ignore = ["E501", "PLR2004", "PTH123", "SIM115", "TRY003"]
 
 # Not selected, and not oversights:
 #   T20  - these are CLI scripts; `print` is their output channel, not debris.
 #   D    - the modules carry docstrings; per-function ones are not required.
-# The remaining groups (SIM, PTH, TRY, PLR, COM, EM) have live findings in the
-# tree today. They are not enabled here because enabling a rule the tree fails
-# would make this file advisory instead of blocking; fix the findings, then add
-# the group.
+#   CPY  - the licence lives in LICENSE and NOTICE, not in a per-file header.
+# COM and EM are the only groups still held back wholesale by live findings:
+# four missing trailing commas, and a raw string passed straight to `raise`.
+# Enabling a group the tree fails would make this file advisory instead of
+# blocking; fix the findings, then add the group.
 #
-# PLR is named rather than `PL` on purpose. Selecting the whole pylint prefix
-# would fail on two PLR2004 magic-value comparisons and nothing else, so the
-# prefix as a unit was left out - which also dropped PLE and PLW, the two
-# halves of it that find defects rather than style (a bad string-format char,
-# a misplaced bare `raise`, a `subprocess.run` with no `check=`, a rebound
-# loop variable). Those three subgroups pass clean today and are selected
-# above; only the refactor group waits on its findings.
+# The four pylint subgroups are named individually rather than as the `PL`
+# prefix. They cover the same rules between them, but spelling them out keeps
+# the reason each one is here visible, and makes it obvious if one is ever
+# dropped.
+
+# S101 (assert) is dropped for the one file that has one, not repo-wide: the
+# tree's single assert narrows a type (`assert _spec.loader is not None`
+# before `exec_module`) and is not a runtime check on input. Scoped here, a
+# new assert anywhere else - including in the other two scripts - still
+# fails. Everything else bandit looks for stays blocking everywhere: exec,
+# pickle, a weak hash, an unchecked subprocess, a parsed URL opened blind.
+# That matters for scripts that read a third-party dump and emit a blob the
+# binary ships.
+[lint.per-file-ignores]
+"scripts/structsdump-to-builtin.py" = ["S101"]
