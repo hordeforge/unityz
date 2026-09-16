@@ -8969,6 +8969,13 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             try pairs.append(arena, rest[i]);
         }
     }
+    // The two forms are exclusive: `--patch` carries every edit itself, so
+    // the positional `<path_id> <field> <json-value>` arguments have nowhere
+    // to go. Accepting both silently applied the patch alone and reported
+    // success, leaving the caller's field edits unmade.
+    if (patch_path != null and (single_form or pairs.items.len != 0)) {
+        return usageError("unityz: edit --patch carries the edits; drop the <path_id> <field> <json-value> arguments\n", .{});
+    }
     const injected = try loadTrees(arena, trees_path, stdout);
     if (patch_path) |pp| {
         const io = io_global.io;
