@@ -390,20 +390,7 @@ pub fn main(init: std.process.Init) !void {
     // folder) consume a directory themselves; every other command
     // batch-expands a directory argument over its files.
     if (stat.kind == .directory and (command == .diff or command == .managed)) {
-        if (command == .managed) {
-            cmdManaged(path, rest, &.{}, stdout) catch |err| {
-                if (err == error.Usage) std.process.exit(2);
-                if (err == error.WriteFailed) std.process.exit(141);
-                bailFlush(stdout);
-                try stderr.print("unityz: {s}: {s}\n", .{ path, @errorName(err) });
-                try stderr.flush();
-                std.process.exit(1);
-            };
-            finalFlush(stdout);
-            if (command_failed_flag) std.process.exit(1);
-            return;
-        }
-        cmdDiff(path, rest, &.{}, stdout) catch |err| {
+        runCommand(command, path, rest, &.{}, stdout) catch |err| {
             if (err == error.Usage) std.process.exit(2);
             if (err == error.WriteFailed) std.process.exit(141);
             bailFlush(stdout);
@@ -1644,14 +1631,7 @@ fn atlasValues(arena: std.mem.Allocator, sf: *const unityz.serialized.Serialized
     var list: std.ArrayList(unityz.value.Value) = .empty;
     for (sf.objects) |*o| {
         if (o.class_id != 687078895) continue; // SpriteAtlas
-        const ti = o.type_index orelse continue;
-        if (ti >= sf.types.len) continue;
-        const tree = sf.types[ti].type_tree;
-        if (tree.roots.len == 0) continue;
-        const data = sf.objectData(o) orelse continue;
-        var r = unityz.streams.Reader.init(data);
-        r.endian = sf.endian;
-        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+        const v = decodeObject(arena, sf, o, "", null) orelse continue;
         list.append(arena, v) catch break;
     }
     cache.atlases = list.items;
@@ -3171,6 +3151,29 @@ fn objectByPathId(
     return &sf.objects[i];
 }
 
+/// Type-tree-decodes one object of `sf`, or null when it has no usable
+/// tree, no data, or fails to read. A typeless Mono file falls back to the
+/// injected table; passing `injected` as null skips such objects.
+fn decodeObject(
+    arena: std.mem.Allocator,
+    sf: *const unityz.serialized.SerializedFile,
+    o: *const unityz.serialized.ObjectInfo,
+    own_basename: []const u8,
+    injected: ?*const InjectedTrees,
+) ?unityz.value.Value {
+    const ti = o.type_index orelse return null;
+    if (ti >= sf.types.len) return null;
+    const data = sf.objectData(o) orelse return null;
+    var tree: *const unityz.typetree.TypeTree = &sf.types[ti].type_tree;
+    if (tree.roots.len == 0) {
+        const inj = injected orelse return null;
+        tree = injectedTreeFor(arena, inj, sf, own_basename, o.class_id, data) orelse return null;
+    }
+    var r = unityz.streams.Reader.init(data);
+    r.endian = sf.endian;
+    return unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch null;
+}
+
 /// Reads and type-tree-decodes another object of the same file, or null.
 fn readObjectValue(
     arena: std.mem.Allocator,
@@ -3179,24 +3182,8 @@ fn readObjectValue(
     own_basename: []const u8,
     injected: ?*const InjectedTrees,
 ) ?unityz.value.Value {
-    if (objectByPathId(arena, sf, path_id)) |other| {
-        const ti = other.type_index orelse return null;
-        if (ti >= sf.types.len) return null;
-        const od = sf.objectData(other) orelse return null;
-        var tree = sf.types[ti].type_tree;
-        if (tree.roots.len == 0) {
-            // Typeless Mono file: decode from the injected table.
-            if (injected) |inj| {
-                if (injectedTreeFor(arena, inj, sf, own_basename, other.class_id, od)) |it| {
-                    tree = it.*;
-                } else return null;
-            } else return null;
-        }
-        var r2 = unityz.streams.Reader.init(od);
-        r2.endian = sf.endian;
-        return unityz.object_reader.readObject(arena, &r2, &tree.roots[0]) catch null;
-    }
-    return null;
+    const other = objectByPathId(arena, sf, path_id) orelse return null;
+    return decodeObject(arena, sf, other, own_basename, injected);
 }
 
 /// Recursively writes an AudioMixerGroup subtree: the object's name plus its
@@ -4674,6 +4661,39 @@ fn writeMaterialText(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u
     return arena.dupe(u8, w.getWritten());
 }
 
+/// One row of a Material saved-properties table: the property name and
+/// the value beside it.
+const MaterialProp = struct { name: []const u8, value: unityz.value.Value };
+
+/// The rows of the saved-properties table `name`, empty when the table is
+/// absent or is not an array.
+fn materialPropRows(props: unityz.value.Value, name: []const u8) []const unityz.value.Value {
+    const table = unityz.classes.fieldOf(props, name) orelse return &.{};
+    return if (table == .array) table.array else &.{};
+}
+
+/// Splits one saved-properties row into its name/value pair, or null when
+/// the row is not the `[name, value]` shape Unity writes.
+fn materialProp(entry: unityz.value.Value) ?MaterialProp {
+    if (entry != .array or entry.array.len < 2) return null;
+    return .{
+        .name = switch (entry.array[0]) {
+            .string => |s| s,
+            else => "",
+        },
+        .value = entry.array[1],
+    };
+}
+
+/// Opens the JSON object for one saved property, separating it from the
+/// previous one and counting it.
+fn startMaterialProp(w: *Io.Writer, count: *usize, name: []const u8) !void {
+    if (count.* != 0) try w.writeByte(',');
+    count.* += 1;
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, name);
+}
+
 /// Structured Material export: name, shader reference, render queue, and
 /// the saved properties (texture bindings with scale/offset, floats,
 /// colors, ints). Null when the material has no saved-properties block.
@@ -4689,98 +4709,51 @@ fn materialJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
         try w.print(",\"render_queue\":{d}", .{q});
     }
     try w.writeAll(",\"textures\":[");
-    if (unityz.classes.fieldOf(props, "m_TexEnvs")) |texenvs| {
-        if (texenvs == .array) {
-            var count: usize = 0;
-            for (texenvs.array) |entry| {
-                if (entry != .array or entry.array.len < 2) continue;
-                const prop_name = switch (entry.array[0]) {
-                    .string => |s| s,
-                    else => "",
-                };
-                const val = entry.array[1];
-                const tex = if (unityz.classes.pptrField(val, "m_Texture")) |t| t.path_id else 0;
-                if (count != 0) try w.writeByte(',');
-                try w.writeAll("{\"name\":");
-                try writeJsonString(w, prop_name);
-                try w.print(",\"texture\":{d}", .{tex});
-                if (unityz.classes.fieldOf(val, "m_Scale")) |sc| {
-                    try w.print(",\"scale\":[{f},{f}]", .{
-                        jsonFloat(if (unityz.classes.floatField(sc, "x")) |x| x else 1),
-                        jsonFloat(if (unityz.classes.floatField(sc, "y")) |y| y else 1),
-                    });
-                }
-                if (unityz.classes.fieldOf(val, "m_Offset")) |off| {
-                    try w.print(",\"offset\":[{f},{f}]", .{
-                        jsonFloat(unityz.classes.floatField(off, "x") orelse 0),
-                        jsonFloat(unityz.classes.floatField(off, "y") orelse 0),
-                    });
-                }
-                try w.writeByte('}');
-                count += 1;
-            }
+    var count: usize = 0;
+    for (materialPropRows(props, "m_TexEnvs")) |entry| {
+        const prop = materialProp(entry) orelse continue;
+        const tex = if (unityz.classes.pptrField(prop.value, "m_Texture")) |t| t.path_id else 0;
+        try startMaterialProp(w, &count, prop.name);
+        try w.print(",\"texture\":{d}", .{tex});
+        if (unityz.classes.fieldOf(prop.value, "m_Scale")) |sc| {
+            try w.print(",\"scale\":[{f},{f}]", .{
+                jsonFloat(if (unityz.classes.floatField(sc, "x")) |x| x else 1),
+                jsonFloat(if (unityz.classes.floatField(sc, "y")) |y| y else 1),
+            });
         }
+        if (unityz.classes.fieldOf(prop.value, "m_Offset")) |off| {
+            try w.print(",\"offset\":[{f},{f}]", .{
+                jsonFloat(unityz.classes.floatField(off, "x") orelse 0),
+                jsonFloat(unityz.classes.floatField(off, "y") orelse 0),
+            });
+        }
+        try w.writeByte('}');
     }
     try w.writeAll("],\"floats\":[");
-    if (unityz.classes.fieldOf(props, "m_Floats")) |floats| {
-        if (floats == .array) {
-            var count: usize = 0;
-            for (floats.array) |entry| {
-                if (entry != .array or entry.array.len < 2) continue;
-                const prop_name = switch (entry.array[0]) {
-                    .string => |s| s,
-                    else => "",
-                };
-                if (count != 0) try w.writeByte(',');
-                try w.writeAll("{\"name\":");
-                try writeJsonString(w, prop_name);
-                try w.print(",\"value\":{f}}}", .{jsonFloat(entry.array[1].asFloat() orelse 0)});
-                count += 1;
-            }
-        }
+    count = 0;
+    for (materialPropRows(props, "m_Floats")) |entry| {
+        const prop = materialProp(entry) orelse continue;
+        try startMaterialProp(w, &count, prop.name);
+        try w.print(",\"value\":{f}}}", .{jsonFloat(prop.value.asFloat() orelse 0)});
     }
     try w.writeAll("],\"colors\":[");
-    if (unityz.classes.fieldOf(props, "m_Colors")) |colors| {
-        if (colors == .array) {
-            var count: usize = 0;
-            for (colors.array) |entry| {
-                if (entry != .array or entry.array.len < 2) continue;
-                const prop_name = switch (entry.array[0]) {
-                    .string => |s| s,
-                    else => "",
-                };
-                if (count != 0) try w.writeByte(',');
-                try w.writeAll("{\"name\":");
-                try writeJsonString(w, prop_name);
-                try w.writeAll(",\"value\":[");
-                const val = entry.array[1];
-                try w.print("{f},{f},{f},{f}]}}", .{
-                    jsonFloat(unityz.classes.floatField(val, "r") orelse 0),
-                    jsonFloat(unityz.classes.floatField(val, "g") orelse 0),
-                    jsonFloat(unityz.classes.floatField(val, "b") orelse 0),
-                    jsonFloat(unityz.classes.floatField(val, "a") orelse 1),
-                });
-                count += 1;
-            }
-        }
+    count = 0;
+    for (materialPropRows(props, "m_Colors")) |entry| {
+        const prop = materialProp(entry) orelse continue;
+        try startMaterialProp(w, &count, prop.name);
+        try w.print(",\"value\":[{f},{f},{f},{f}]}}", .{
+            jsonFloat(unityz.classes.floatField(prop.value, "r") orelse 0),
+            jsonFloat(unityz.classes.floatField(prop.value, "g") orelse 0),
+            jsonFloat(unityz.classes.floatField(prop.value, "b") orelse 0),
+            jsonFloat(unityz.classes.floatField(prop.value, "a") orelse 1),
+        });
     }
     try w.writeAll("],\"ints\":[");
-    if (unityz.classes.fieldOf(props, "m_Ints")) |ints| {
-        if (ints == .array) {
-            var count: usize = 0;
-            for (ints.array) |entry| {
-                if (entry != .array or entry.array.len < 2) continue;
-                const prop_name = switch (entry.array[0]) {
-                    .string => |s| s,
-                    else => "",
-                };
-                if (count != 0) try w.writeByte(',');
-                try w.writeAll("{\"name\":");
-                try writeJsonString(w, prop_name);
-                try w.print(",\"value\":{d}}}", .{entry.array[1].asInt() orelse 0});
-                count += 1;
-            }
-        }
+    count = 0;
+    for (materialPropRows(props, "m_Ints")) |entry| {
+        const prop = materialProp(entry) orelse continue;
+        try startMaterialProp(w, &count, prop.name);
+        try w.print(",\"value\":{d}}}", .{prop.value.asInt() orelse 0});
     }
     try w.writeAll("]}\n");
     return try arena.dupe(u8, aw.written());
@@ -5180,14 +5153,7 @@ fn shaderDisplayName(v: unityz.value.Value) []const u8 {
 fn emitShaderSkinsJson(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, stdout: *Io.Writer, first: *bool) !void {
     for (sf.objects) |*o| {
         if (o.class_id != 48) continue;
-        const ti = o.type_index orelse continue;
-        if (ti >= sf.types.len) continue;
-        const tree = sf.types[ti].type_tree;
-        if (tree.roots.len == 0) continue;
-        const data = sf.objectData(o) orelse continue;
-        var r = unityz.streams.Reader.init(data);
-        r.endian = sf.endian;
-        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+        const v = decodeObject(arena, sf, o, "", null) orelse continue;
         const name = shaderDisplayName(v);
         if (!first.*) try stdout.writeByte(',');
         first.* = false;
@@ -5939,26 +5905,6 @@ fn asPPtr(v: unityz.value.Value) ?unityz.value.PPtr {
     };
 }
 
-/// Reads a Shader object's value tree (borrowing from `sf`), returning null
-/// when the object has no decodable type tree.
-fn shaderObjectValue(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, o: *const unityz.serialized.ObjectInfo, own_name: []const u8, injected: ?*const InjectedTrees) ?unityz.value.Value {
-    const ti = o.type_index orelse return null;
-    if (ti >= sf.types.len) return null;
-    var tree = sf.types[ti].type_tree;
-    if (tree.roots.len == 0) {
-        if (injected) |inj| {
-            const od0 = sf.objectData(o) orelse return null;
-            if (injectedTreeFor(arena, inj, sf, own_name, o.class_id, od0)) |it| {
-                tree = it.*;
-            } else return null;
-        } else return null;
-    }
-    const od = sf.objectData(o) orelse return null;
-    var r = unityz.streams.Reader.init(od);
-    r.endian = sf.endian;
-    return unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch null;
-}
-
 /// The shader stage a d3d11 `ShaderGpuProgramType` names.
 fn shaderStageName(gpu_type: u32) []const u8 {
     return switch (gpu_type) {
@@ -6128,7 +6074,7 @@ fn skinSerializedBytes(
     // Per-shader skinning summary.
     for (sf.objects) |*o| {
         if (o.class_id != 48) continue;
-        const v = shaderObjectValue(arena, &sf, o, own_name, injected) orelse continue;
+        const v = decodeObject(arena, &sf, o, own_name, injected) orelse continue;
         const name = shaderDisplayName(v);
         const info = try unityz.shader.skinInfo(arena, v);
         if (info) |inf| {
@@ -6169,7 +6115,7 @@ fn skinSerializedBytes(
     var verdicts: std.AutoHashMapUnmanaged(i64, ?ShaderSkinVerdict) = .empty;
     for (sf.objects) |*o| {
         if (o.class_id != 137) continue;
-        const rv = shaderObjectValue(arena, &sf, o, own_name, injected) orelse continue;
+        const rv = decodeObject(arena, &sf, o, own_name, injected) orelse continue;
         const mats = unityz.classes.fieldOf(rv, "m_Materials") orelse continue;
         const arr = switch (mats) {
             .array => |a| a,
@@ -6872,14 +6818,7 @@ fn findAudioStreamInSerialized(arena: std.mem.Allocator, bytes: []const u8, path
     const sf = serializedCached(arena, bytes) catch return null;
     const o = objectByPathId(arena, sf, path_id) orelse return null;
     if (o.class_id != 83) return null;
-    const data = sf.objectData(o) orelse return null;
-    const ti = o.type_index orelse return null;
-    if (ti >= sf.types.len) return null;
-    const tree = sf.types[ti].type_tree;
-    if (tree.roots.len == 0) return null;
-    var r = unityz.streams.Reader.init(data);
-    r.endian = sf.endian;
-    const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return null;
+    const v = decodeObject(arena, sf, o, "", null) orelse return null;
     const ac = unityz.classes.AudioClip.fromValue(v);
     if (ac.audio_data.len != 0) return ac.audio_data;
     if (ac.resource.size != 0 and ac.resource.path.len != 0) {
@@ -7079,18 +7018,8 @@ fn findObjectValue(arena: std.mem.Allocator, bytes: []const u8, fa: Fp, own_base
 fn findObjectValueInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_id: i64, own_basename: []const u8, injected: ?*const InjectedTrees) !?unityz.value.Value {
     const sf = serializedCached(arena, bytes) catch return null;
     const o = objectByPathId(arena, sf, path_id) orelse return null;
-    const data = sf.objectData(o) orelse return null;
-    const ti = o.type_index orelse return null;
-    if (ti >= sf.types.len) return null;
-    var tree: *const unityz.typetree.TypeTree = &sf.types[ti].type_tree;
     // Mono builds strip the trees; `--trees` supplies them, as in `show`.
-    if (tree.roots.len == 0) {
-        const inj = injected orelse return null;
-        tree = injectedTreeFor(arena, inj, sf, own_basename, o.class_id, data) orelse return null;
-    }
-    var r = unityz.streams.Reader.init(data);
-    r.endian = sf.endian;
-    return unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch null;
+    return decodeObject(arena, sf, o, own_basename, injected);
 }
 
 /// `diff --pixels`: decodes a Texture2D or renders a Sprite in both files
@@ -7242,14 +7171,7 @@ fn findObjectRgbaInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_
     };
     const o = objectByPathId(arena, sf, path_id) orelse return null;
     if (o.class_id != want) return null;
-    const data = sf.objectData(o) orelse return null;
-    const ti = o.type_index orelse return null;
-    if (ti >= sf.types.len) return null;
-    const tree = sf.types[ti].type_tree;
-    if (tree.roots.len == 0) return null;
-    var r = unityz.streams.Reader.init(data);
-    r.endian = sf.endian;
-    const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch return null;
+    const v = decodeObject(arena, sf, o, "", null) orelse return null;
     switch (kind) {
         .texture => {
             const t = unityz.classes.Texture2D.fromValue(v);
@@ -8610,33 +8532,7 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                 failure("unityz: {s}: bundle parse failed: {s}\n", .{ path, @errorName(err) });
                 return;
             };
-            // A selector that will not parse must stop the edit before
-            // anything is written: the serialized branch already rejects
-            // it up front, and silently skipping one here would rewrite
-            // the file having applied only part of the patch. A raw-node
-            // key must name an existing non-serialized node.
-            for (entries) |entry| {
-                if (isRawNodeKey(entry.name)) {
-                    var node_found = false;
-                    for (b.nodes) |n| {
-                        if (!std.mem.eql(u8, entry.name, n.path)) continue;
-                        node_found = true;
-                        if (unityz.container.sniff(n.data).container == .serialized) {
-                            failure("unityz: entry '{s}' names a serialized node; use 'node:path-id'\n", .{entry.name});
-                            return;
-                        }
-                    }
-                    if (!node_found) {
-                        failure("unityz: bad patch entry '{s}': no such node\n", .{entry.name});
-                        return;
-                    }
-                    continue;
-                }
-                _ = parseSelector(entry.name) catch {
-                    failure("unityz: bad patch entry '{s}'\n", .{entry.name});
-                    return;
-                };
-            }
+            if (!validatePatchEntries(entries, b.nodes, "node")) return;
             const matched = try arena.alloc(bool, entries.len);
             @memset(matched, false);
             var replacements: std.ArrayList(unityz.bundle.NodeReplacement) = .empty;
@@ -8698,33 +8594,7 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
                 failure("unityz: {s}: webfile parse failed: {s}\n", .{ path, @errorName(err) });
                 return;
             };
-            // A selector that will not parse must stop the edit before
-            // anything is written: the serialized branch already rejects
-            // it up front, and silently skipping one here would rewrite
-            // the file having applied only part of the patch. A raw-node
-            // key must name an existing non-serialized entry.
-            for (entries) |entry| {
-                if (isRawNodeKey(entry.name)) {
-                    var entry_found = false;
-                    for (wf.entries) |e| {
-                        if (!std.mem.eql(u8, entry.name, e.path)) continue;
-                        entry_found = true;
-                        if (unityz.container.sniff(e.data).container == .serialized) {
-                            failure("unityz: entry '{s}' names a serialized entry; use 'node:path-id'\n", .{entry.name});
-                            return;
-                        }
-                    }
-                    if (!entry_found) {
-                        failure("unityz: bad patch entry '{s}': no such entry\n", .{entry.name});
-                        return;
-                    }
-                    continue;
-                }
-                _ = parseSelector(entry.name) catch {
-                    failure("unityz: bad patch entry '{s}'\n", .{entry.name});
-                    return;
-                };
-            }
+            if (!validatePatchEntries(entries, wf.entries, "entry")) return;
             const matched = try arena.alloc(bool, entries.len);
             @memset(matched, false);
             var replacements: std.ArrayList(unityz.webfile.EntryReplacement) = .empty;
@@ -8777,6 +8647,38 @@ fn cmdEditPatch(path: []const u8, out_path: ?[]const u8, patch_text: []const u8,
 
     if (!try writeEditOutput(arena, path, out_path, rewritten, verify, stdout)) return;
     try stdout.print("{d} object(s) patched\n", .{edited_count});
+}
+
+/// Rejects the patch entries that cannot apply, before anything is written:
+/// a raw-node key must name an existing non-serialized member of `nodes`,
+/// and every other key must parse as a selector. Skipping a bad one instead
+/// would rewrite the file with only part of the patch applied. `noun` names
+/// what a member is called in the diagnostics ("node" or "entry"). Returns
+/// false once a failure has been reported.
+fn validatePatchEntries(entries: []const unityz.value.Field, nodes: anytype, noun: []const u8) bool {
+    for (entries) |entry| {
+        if (isRawNodeKey(entry.name)) {
+            var found = false;
+            for (nodes) |n| {
+                if (!std.mem.eql(u8, entry.name, n.path)) continue;
+                found = true;
+                if (unityz.container.sniff(n.data).container == .serialized) {
+                    failure("unityz: entry '{s}' names a serialized {s}; use 'node:path-id'\n", .{ entry.name, noun });
+                    return false;
+                }
+            }
+            if (!found) {
+                failure("unityz: bad patch entry '{s}': no such {s}\n", .{ entry.name, noun });
+                return false;
+            }
+            continue;
+        }
+        _ = parseSelector(entry.name) catch {
+            failure("unityz: bad patch entry '{s}'\n", .{entry.name});
+            return false;
+        };
+    }
+    return true;
 }
 
 /// A patch is atomic: an object entry that matched no node's object fails the
@@ -10319,21 +10221,7 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
             1, 4, 137 => {},
             else => continue,
         }
-        const data = sf.objectData(o) orelse continue;
-        const ti = o.type_index orelse continue;
-        if (ti >= sf.types.len) continue;
-        var tree = sf.types[ti].type_tree;
-        if (tree.roots.len == 0) {
-            // Typeless Mono file: decode from the injected table.
-            if (injected) |inj| {
-                if (injectedTreeFor(arena, inj, &sf, basename(node orelse ""), o.class_id, data)) |it| {
-                    tree = it.*;
-                } else continue;
-            } else continue;
-        }
-        var r = unityz.streams.Reader.init(data);
-        r.endian = sf.endian;
-        const v = unityz.object_reader.readObject(arena, &r, &tree.roots[0]) catch continue;
+        const v = decodeObject(arena, &sf, o, basename(node orelse ""), injected) orelse continue;
         switch (o.class_id) {
             4 => { // Transform
                 var tn = TNode{};
