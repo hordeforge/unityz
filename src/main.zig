@@ -8775,7 +8775,13 @@ fn writeEditOutput(arena: std.mem.Allocator, path: []const u8, out_path: ?[]cons
     // truncated with the original bytes already gone.
     const tmp_path = try std.fmt.allocPrint(arena, "{s}.unityz-tmp", .{write_path});
     const cwd = std.Io.Dir.cwd();
-    const file = cwd.createFile(io, tmp_path, .{}) catch |err| {
+    // Exclusive create: the temp name is derived from the output path, so
+    // it is predictable to anyone who can write the output directory. A
+    // plain create follows a symlink planted there, and the rename that
+    // follows then moves that symlink over the asset - the write lands on
+    // whatever the attacker pointed it at. O_EXCL refuses both an existing
+    // file and a symlink, so a squatted name is an error, not a redirect.
+    const file = cwd.createFile(io, tmp_path, .{ .exclusive = true }) catch |err| {
         failure("unityz: {s}: cannot create temp file '{s}': {s}\n", .{ write_path, tmp_path, @errorName(err) });
         return false;
     };
