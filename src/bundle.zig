@@ -494,13 +494,22 @@ fn copyFromBlocks(
     while (written < dest.len) {
         const pos = stream_off + written;
         var found = false;
-        for (blocks, 0..) |b, i| {
-            _ = b;
-            const b_start = starts[i];
-            const b_end = b_start + blocks[i].uncompressed_size;
+        // The three slices are the parallel per-block arrays `parseFs`
+        // allocates at `blocks.len`; iterating them together is what states
+        // that, rather than indexing each by a shared `i` and hoping.
+        for (payloads, starts, blocks) |slot, b_start, b| {
+            const b_end = b_start + b.uncompressed_size;
             if (pos < b_start or pos >= b_end) continue;
-            const payload = payloads[i] orelse return written;
+            const payload = slot orelse return written;
+            // `decompressWanted` allocates every payload at exactly its
+            // block's uncompressed size. That is what makes `take` non-zero
+            // and so makes this loop terminate: the test above puts `pos`
+            // strictly inside the block, so a payload of that length always
+            // has a byte at `local`. A shorter one would leave `take` at 0
+            // with `written` unchanged, and the while loop would spin.
+            std.debug.assert(payload.len == b.uncompressed_size);
             const local = pos - b_start;
+            std.debug.assert(local < payload.len);
             const take = @min(dest.len - written, payload.len - local);
             @memcpy(dest[written..][0..take], payload[local..][0..take]);
             written += take;

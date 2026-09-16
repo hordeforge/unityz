@@ -245,6 +245,38 @@ fn usageError(comptime fmt: []const u8, args: anytype) error{Usage} {
     return error.Usage;
 }
 
+/// Matches `flag` at `i` in an option ladder and yields the value that
+/// follows it, advancing `i` past that value; null when the argument is some
+/// other option, so the call chains as one `else if` arm.
+///
+/// The value being missing is reported here, naming the flag. Written as a
+/// `... and i + 1 < rest.len` guard on the arm instead, a flag given without
+/// its value fails the arm and falls through to the ladder's `else`, which
+/// reports it as an unknown option - `unityz extract x.assets --class` said
+/// `unknown extract option '--class'` about an option the command has.
+fn optionValue(rest: []const []const u8, i: *usize, comptime flag: []const u8) error{Usage}!?[]const u8 {
+    if (!std.mem.eql(u8, rest[i.*], flag)) return null;
+    if (i.* + 1 >= rest.len) return usageError("unityz: " ++ flag ++ " needs a value\n", .{});
+    i.* += 1;
+    return rest[i.*];
+}
+
+/// Parses a `--class` value into a Unity class id. Shared by every command
+/// that takes the option so they cannot drift apart on the wording of the
+/// error - `trees --builtin` had, reporting its own phrasing for the same
+/// bad input the other six called an invalid class id.
+fn parseClassId(text: []const u8) error{Usage}!i32 {
+    return std.fmt.parseInt(i32, text, 10) catch
+        usageError("unityz: invalid class id '{s}'\n", .{text});
+}
+
+/// Parses a path-id argument - `--path-id <sel>` or the positional selector
+/// `show`/`edit` take - into a `Selector`, reporting a bad one uniformly.
+fn parseSelectorArg(text: []const u8) error{Usage}!Selector {
+    return parseSelector(text) catch
+        usageError("unityz: invalid path id '{s}'\n", .{text});
+}
+
 /// Reports a per-input failure on stderr and marks the run failed (exit 1)
 /// without aborting: batch mode keeps going, single runs finish their output.
 fn failure(comptime fmt: []const u8, args: anytype) void {
@@ -745,9 +777,8 @@ fn parseJsonTreesOptions(rest: []const []const u8, comptime command: []const u8)
         const arg = rest[i];
         if (std.mem.eql(u8, arg, "--json")) {
             opts.json = true;
-        } else if (std.mem.eql(u8, arg, "--trees") and i + 1 < rest.len) {
-            opts.trees_path = rest[i + 1];
-            i += 1;
+        } else if (try optionValue(rest, &i, "--trees")) |option_value| {
+            opts.trees_path = option_value;
         } else {
             return usageError("unityz: unknown " ++ command ++ " option '{s}'\n", .{arg});
         }
@@ -1040,30 +1071,20 @@ fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, std
             json_mode = true;
         } else if (std.mem.eql(u8, arg, "--summary")) {
             summary_mode = true;
-        } else if (std.mem.eql(u8, arg, "--class") and i + 1 < rest.len) {
-            class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
+        } else if (try optionValue(rest, &i, "--class")) |option_value| {
+            class_filter = try parseClassId(option_value);
+        } else if (try optionValue(rest, &i, "--outdir")) |option_value| {
+            extract_outdir = option_value;
+        } else if (try optionValue(rest, &i, "--path-id")) |option_value| {
+            path_filter = try parseSelectorArg(option_value);
+        } else if (try optionValue(rest, &i, "--name")) |option_value| {
+            name_filter = option_value;
+        } else if (try optionValue(rest, &i, "--format")) |option_value| {
+            format = parseFormat(option_value) catch {
+                return usageError("unityz: unknown extract format '{s}' (png|tga|bmp|raw)\n", .{option_value});
             };
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--outdir") and i + 1 < rest.len) {
-            extract_outdir = rest[i + 1];
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--path-id") and i + 1 < rest.len) {
-            path_filter = parseSelector(rest[i + 1]) catch {
-                return usageError("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
-            };
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--name") and i + 1 < rest.len) {
-            name_filter = rest[i + 1];
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--format") and i + 1 < rest.len) {
-            format = parseFormat(rest[i + 1]) catch {
-                return usageError("unityz: unknown extract format '{s}' (png|tga|bmp|raw)\n", .{rest[i + 1]});
-            };
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--trees") and i + 1 < rest.len) {
-            trees_path = rest[i + 1];
-            i += 1;
+        } else if (try optionValue(rest, &i, "--trees")) |option_value| {
+            trees_path = option_value;
         } else {
             return usageError("unityz: unknown extract option '{s}'\n", .{arg});
         }
@@ -1795,9 +1816,8 @@ fn cmdFsb(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout:
     var json = false;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
-        if (std.mem.eql(u8, rest[i], "--outdir") and i + 1 < rest.len) {
-            outdir = rest[i + 1];
-            i += 1;
+        if (try optionValue(rest, &i, "--outdir")) |option_value| {
+            outdir = option_value;
         } else if (std.mem.eql(u8, rest[i], "--json")) {
             json = true;
         } else {
@@ -5517,21 +5537,14 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
     var trees_path: ?[]const u8 = null;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
-        if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
-            class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
-            };
-            i += 1;
-        } else if (std.mem.eql(u8, rest[i], "--path-id") and i + 1 < rest.len) {
-            path_filter = parseSelector(rest[i + 1]) catch {
-                return usageError("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
-            };
-            i += 1;
+        if (try optionValue(rest, &i, "--class")) |option_value| {
+            class_filter = try parseClassId(option_value);
+        } else if (try optionValue(rest, &i, "--path-id")) |option_value| {
+            path_filter = try parseSelectorArg(option_value);
         } else if (std.mem.eql(u8, rest[i], "--json")) {
             json = true;
-        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
-            trees_path = rest[i + 1];
-            i += 1;
+        } else if (try optionValue(rest, &i, "--trees")) |option_value| {
+            trees_path = option_value;
         } else {
             return usageError("unityz: unknown verify option '{s}'\n", .{rest[i]});
         }
@@ -6501,16 +6514,10 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var json = false;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
-        if (std.mem.eql(u8, rest[i], "--path-id") and i + 1 < rest.len) {
-            path_filter = parseSelector(rest[i + 1]) catch {
-                return usageError("unityz: invalid path id '{s}'\n", .{rest[i + 1]});
-            };
-            i += 1;
-        } else if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
-            class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
-            };
-            i += 1;
+        if (try optionValue(rest, &i, "--path-id")) |option_value| {
+            path_filter = try parseSelectorArg(option_value);
+        } else if (try optionValue(rest, &i, "--class")) |option_value| {
+            class_filter = try parseClassId(option_value);
         } else if (std.mem.eql(u8, rest[i], "--json")) {
             json = true;
         } else {
@@ -7257,14 +7264,10 @@ fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             audio = true;
         } else if (std.mem.eql(u8, rest[i], "--fields")) {
             fields = true;
-        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
-            trees_path = rest[i + 1];
-            i += 1;
-        } else if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
-            class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
-            };
-            i += 1;
+        } else if (try optionValue(rest, &i, "--trees")) |option_value| {
+            trees_path = option_value;
+        } else if (try optionValue(rest, &i, "--class")) |option_value| {
+            class_filter = try parseClassId(option_value);
         } else {
             return usageError("unityz: unknown diff option '{s}'\n", .{rest[i]});
         }
@@ -7684,9 +7687,7 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     if (rest.len < 1) {
         return usageError("unityz: show needs: <path-id>\n", .{});
     }
-    const sel = parseSelector(rest[0]) catch {
-        return usageError("unityz: invalid path id '{s}'\n", .{rest[0]});
-    };
+    const sel = try parseSelectorArg(rest[0]);
     var raw = false;
     var trees_path: ?[]const u8 = null;
     var i: usize = 1;
@@ -7696,9 +7697,8 @@ fn cmdShow(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
         } else if (std.mem.eql(u8, rest[i], "--json")) {
             // show always prints JSON; accept the flag every other command has
             // so scripts can pass it uniformly.
-        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
-            trees_path = rest[i + 1];
-            i += 1;
+        } else if (try optionValue(rest, &i, "--trees")) |option_value| {
+            trees_path = option_value;
         } else {
             return usageError("unityz: unknown show option '{s}'\n", .{rest[i]});
         }
@@ -7875,20 +7875,16 @@ fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var trees_path: ?[]const u8 = null;
     var i: usize = 1;
     while (i < rest.len) : (i += 1) {
-        if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
-            class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
-            };
-            i += 1;
+        if (try optionValue(rest, &i, "--class")) |option_value| {
+            class_filter = try parseClassId(option_value);
         } else if (std.mem.eql(u8, rest[i], "--json")) {
             json = true;
         } else if (std.mem.eql(u8, rest[i], "--exact")) {
             exact = true;
         } else if (std.mem.eql(u8, rest[i], "--any")) {
             any = true;
-        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
-            trees_path = rest[i + 1];
-            i += 1;
+        } else if (try optionValue(rest, &i, "--trees")) |option_value| {
+            trees_path = option_value;
         } else {
             return usageError("unityz: unknown find option '{s}'\n", .{rest[i]});
         }
@@ -8056,18 +8052,14 @@ fn cmdStats(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     var trees_path: ?[]const u8 = null;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
-        if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
-            class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch {
-                return usageError("unityz: invalid class id '{s}'\n", .{rest[i + 1]});
-            };
-            i += 1;
+        if (try optionValue(rest, &i, "--class")) |option_value| {
+            class_filter = try parseClassId(option_value);
         } else if (std.mem.eql(u8, rest[i], "--json")) {
             json = true;
         } else if (std.mem.eql(u8, rest[i], "--dups")) {
             dups_only = true;
-        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
-            trees_path = rest[i + 1];
-            i += 1;
+        } else if (try optionValue(rest, &i, "--trees")) |option_value| {
+            trees_path = option_value;
         } else {
             return usageError("unityz: unknown stats option '{s}'\n", .{rest[i]});
         }
@@ -8955,20 +8947,17 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     const single_form = rest.len > 0 and !std.mem.startsWith(u8, rest[0], "--");
     var i: usize = if (single_form) 1 else 0;
     while (i < rest.len) : (i += 1) {
-        if (std.mem.eql(u8, rest[i], "--out") and i + 1 < rest.len) {
+        if (try optionValue(rest, &i, "--out")) |option_value| {
             // One output file cannot hold a directory's worth of rewritten files;
             // a batch edits in place instead.
             if (batch_mode) return usageError("unityz: edit --out names one file; over a directory, edit in place\n", .{});
-            out_path = rest[i + 1];
-            i += 1;
-        } else if (std.mem.eql(u8, rest[i], "--patch") and i + 1 < rest.len) {
-            patch_path = rest[i + 1];
-            i += 1;
+            out_path = option_value;
+        } else if (try optionValue(rest, &i, "--patch")) |option_value| {
+            patch_path = option_value;
         } else if (std.mem.eql(u8, rest[i], "--verify")) {
             verify = true;
-        } else if (std.mem.eql(u8, rest[i], "--trees") and i + 1 < rest.len) {
-            trees_path = rest[i + 1];
-            i += 1;
+        } else if (try optionValue(rest, &i, "--trees")) |option_value| {
+            trees_path = option_value;
         } else {
             try pairs.append(arena, rest[i]);
         }
@@ -8985,9 +8974,7 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     if (pairs.items.len < 2 or pairs.items.len % 2 != 0) {
         return usageError("unityz: edit needs: <path_id> <field> <json-value> [<field> <json-value> ...]\n", .{});
     }
-    const sel = parseSelector(rest[0]) catch {
-        return usageError("unityz: invalid path id '{s}'\n", .{rest[0]});
-    };
+    const sel = try parseSelectorArg(rest[0]);
 
     switch (unityz.container.sniff(bytes).container) {
         .bundle => return cmdEditBundle(path, out_path, sel, pairs.items, verify, bytes, injected, stdout),
@@ -9305,10 +9292,9 @@ fn cmdCreate(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
     var verify = true;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
-        if (std.mem.eql(u8, rest[i], "--out") and i + 1 < rest.len) {
+        if (try optionValue(rest, &i, "--out")) |option_value| {
             if (batch_mode) return usageError("unityz: create --out names one file; run it per spec\n", .{});
-            out_path = rest[i + 1];
-            i += 1;
+            out_path = option_value;
         } else if (std.mem.eql(u8, rest[i], "--no-verify")) {
             verify = false;
         } else if (std.mem.eql(u8, rest[i], "--verify")) {
@@ -9626,10 +9612,9 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
     var out_path: ?[]const u8 = null;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
-        if (std.mem.eql(u8, rest[i], "--out") and i + 1 < rest.len) {
+        if (try optionValue(rest, &i, "--out")) |option_value| {
             if (batch_mode) return usageError("unityz: trees --out names one file; over a directory, read the per-file stdout lines\n", .{});
-            out_path = rest[i + 1];
-            i += 1;
+            out_path = option_value;
         } else if (std.mem.eql(u8, rest[i], "--json")) {
             // the output is always JSON; accepted so scripts can pass it uniformly
         } else {
@@ -9836,12 +9821,10 @@ fn cmdTreesBuiltin(rest: []const []const u8, stdout: *Io.Writer) !void {
     var class_filter: ?i32 = null;
     var i: usize = 1;
     while (i < rest.len) : (i += 1) {
-        if (std.mem.eql(u8, rest[i], "--out") and i + 1 < rest.len) {
-            out_path = rest[i + 1];
-            i += 1;
-        } else if (std.mem.eql(u8, rest[i], "--class") and i + 1 < rest.len) {
-            class_filter = std.fmt.parseInt(i32, rest[i + 1], 10) catch return usageError("unityz: --class needs an integer class id\n", .{});
-            i += 1;
+        if (try optionValue(rest, &i, "--out")) |option_value| {
+            out_path = option_value;
+        } else if (try optionValue(rest, &i, "--class")) |option_value| {
+            class_filter = try parseClassId(option_value);
         } else if (std.mem.eql(u8, rest[i], "--json")) {
             // the output is always JSON
         } else {
