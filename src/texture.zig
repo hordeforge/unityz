@@ -421,18 +421,26 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
                 dst[3] = 255;
             }
         }.convert),
-        format.rg16 => copyPixels(out, data, w, h, 4, struct {
+        // Unity names these raw formats by their *total* bit width, not
+        // their per-channel width: RGB48/RGBA64 below are 16 bits per
+        // channel, R8 above is 8. So RG16 is two 8-bit channels (2 bytes)
+        // and RG32 is two 16-bit integer channels (4 bytes) - the float
+        // pair is RGFloat(19), decoded separately. Reading RG16 as two
+        // u16s and RG32 as two f32s doubled both strides, which both
+        // rejected a correctly sized payload as `BadSize` and, for a
+        // payload long enough to pass, produced garbage pixels.
+        format.rg16 => copyPixels(out, data, w, h, 2, struct {
             fn convert(pixel: []const u8, dst: []u8) void {
-                dst[0] = @intCast(std.mem.readInt(u16, pixel[0..2], .little) >> 8);
-                dst[1] = @intCast(std.mem.readInt(u16, pixel[2..4], .little) >> 8);
+                dst[0] = pixel[0];
+                dst[1] = pixel[1];
                 dst[2] = 0;
                 dst[3] = 255;
             }
         }.convert),
-        format.rg32 => copyPixels(out, data, w, h, 8, struct {
+        format.rg32 => copyPixels(out, data, w, h, 4, struct {
             fn convert(pixel: []const u8, dst: []u8) void {
-                dst[0] = f32ToByte(pixel);
-                dst[1] = f32ToByte(pixel[4..]);
+                dst[0] = @intCast(std.mem.readInt(u16, pixel[0..2], .little) >> 8);
+                dst[1] = @intCast(std.mem.readInt(u16, pixel[2..4], .little) >> 8);
                 dst[2] = 0;
                 dst[3] = 255;
             }
@@ -487,10 +495,14 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
                 dst[3] = 255;
             }
         }.convert),
-        format.rg16_signed => copyPixels(out, data, w, h, 4, struct {
+        // Same total-bit naming as the unsigned family: 75-78 (R8/RG16/
+        // RGB24/RGBA32_SIGNED) are 8 bits per channel and 79-82 (R16/RG32/
+        // RGB48/RGBA64_SIGNED) are 16. RG16_SIGNED sits in the 8-bit half
+        // next to RGB24_SIGNED, so it is two i8 lanes, not two i16 lanes.
+        format.rg16_signed => copyPixels(out, data, w, h, 2, struct {
             fn convert(pixel: []const u8, dst: []u8) void {
-                dst[0] = i16BiasedByte(pixel);
-                dst[1] = i16BiasedByte(pixel[2..]);
+                dst[0] = pixel[0] +% 128;
+                dst[1] = pixel[1] +% 128;
                 dst[2] = 0;
                 dst[3] = 255;
             }
@@ -511,10 +523,13 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
                 dst[3] = i16BiasedByte(pixel[6..]);
             }
         }.convert),
-        format.rg32_signed => copyPixels(out, data, w, h, 8, struct {
+        // RG32_SIGNED is the 16-bit-per-channel pair (mirroring
+        // RGB48_SIGNED above), so it biases two i16 lanes exactly as they
+        // do - not two i32 lanes.
+        format.rg32_signed => copyPixels(out, data, w, h, 4, struct {
             fn convert(pixel: []const u8, dst: []u8) void {
-                dst[0] = @intCast((std.mem.readInt(u32, pixel[0..4], .little) +% 0x80000000) >> 24);
-                dst[1] = @intCast((std.mem.readInt(u32, pixel[4..8], .little) +% 0x80000000) >> 24);
+                dst[0] = i16BiasedByte(pixel);
+                dst[1] = i16BiasedByte(pixel[2..]);
                 dst[2] = 0;
                 dst[3] = 255;
             }
@@ -670,11 +685,14 @@ pub fn expectedSize(tex_format: i32, width: u32, height: u32) ?usize {
         // the understated size read past the end of the buffer and copied
         // whatever followed it into the exported image.
         format.r_float => w * h * 4,
-        format.rg_half, format.rg16, format.rg16_signed => w * h * 4,
+        format.rg_half => w * h * 4,
+        // Two 8-bit channels: Unity's raw formats are named by total bit
+        // width, so RG16 pairs with R8 and RG32 with R16 - see `decode`.
+        format.rg16, format.rg16_signed => w * h * 2,
         format.rg_float => w * h * 8,
         format.rgba_half => w * h * 8,
         format.rgb9e5 => w * h * 4,
-        format.rg32, format.rg32_signed => w * h * 8,
+        format.rg32, format.rg32_signed => w * h * 4,
         format.rgb48, format.rgb48_signed => w * h * 6,
         format.rgba64, format.rgba64_signed => w * h * 8,
         format.pvrtc_rgb2, format.pvrtc_rgba2 => blk: {
@@ -3216,6 +3234,49 @@ test "raw format r16 signed" {
         0xd7, 0xd7, 0xd7, 0xff, 0xf7, 0xf7, 0xf7, 0xff, 0xb1, 0xb1, 0xb1, 0xff, 0x10, 0x10, 0x10, 0xff,
         0xe3, 0xe3, 0xe3, 0xff, 0x5c, 0x5c, 0x5c, 0xff, 0x7e, 0x7e, 0x7e, 0xff, 0xbb, 0xbb, 0xbb, 0xff,
     }, out);
+}
+
+// Unity names its raw formats by total bit width, so the two-channel ones
+// are half the stride their name's number suggests per channel: RG16 is
+// two 8-bit lanes and RG32 two 16-bit lanes, mirroring R8/R16 and
+// RGB48/RGBA64. Pin both the stride and the lane width, since an
+// overstated stride rejects a correctly sized payload as `BadSize`.
+test "raw format rg16 and rg32 strides follow the total-bit naming" {
+    const a = std.testing.allocator;
+    try std.testing.expectEqual(@as(?usize, 24), expectedSize(format.rg16, 4, 3));
+    try std.testing.expectEqual(@as(?usize, 24), expectedSize(format.rg16_signed, 4, 3));
+    try std.testing.expectEqual(@as(?usize, 48), expectedSize(format.rg32, 4, 3));
+    try std.testing.expectEqual(@as(?usize, 48), expectedSize(format.rg32_signed, 4, 3));
+
+    // RG16: one byte per channel, copied straight through.
+    var rg16: [24]u8 = undefined;
+    for (&rg16, 0..) |*b, i| b.* = @intCast(i * 10);
+    const out16 = try decode(a, format.rg16, 4, 3, &rg16);
+    defer a.free(out16);
+    for (0..12) |p| {
+        try std.testing.expectEqualSlices(u8, &[_]u8{ rg16[p * 2], rg16[p * 2 + 1], 0, 255 }, out16[p * 4 ..][0..4]);
+    }
+
+    // RG32: two little-endian u16 lanes, each reduced to its high byte.
+    var rg32: [48]u8 = undefined;
+    for (&rg32, 0..) |*b, i| b.* = @intCast(i * 5);
+    const out32 = try decode(a, format.rg32, 4, 3, &rg32);
+    defer a.free(out32);
+    for (0..12) |p| {
+        try std.testing.expectEqualSlices(u8, &[_]u8{ rg32[p * 4 + 1], rg32[p * 4 + 3], 0, 255 }, out32[p * 4 ..][0..4]);
+    }
+
+    // The signed pair biases the same lanes by half their range.
+    const out16s = try decode(a, format.rg16_signed, 4, 3, &rg16);
+    defer a.free(out16s);
+    for (0..12) |p| {
+        try std.testing.expectEqualSlices(u8, &[_]u8{ rg16[p * 2] +% 128, rg16[p * 2 + 1] +% 128, 0, 255 }, out16s[p * 4 ..][0..4]);
+    }
+    const out32s = try decode(a, format.rg32_signed, 4, 3, &rg32);
+    defer a.free(out32s);
+    for (0..12) |p| {
+        try std.testing.expectEqualSlices(u8, &[_]u8{ rg32[p * 4 + 1] +% 128, rg32[p * 4 + 3] +% 128, 0, 255 }, out32s[p * 4 ..][0..4]);
+    }
 }
 
 test "raw format argb float" {

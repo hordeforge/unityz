@@ -70,9 +70,9 @@ file-level total.
 Decodes to RGBA8, exports as PNG by default, or TGA / BMP / raw RGBA8
 with `--format`:
 
-- RGB/RGBA8, BGR24, 16-bit R16/RG16, half/float RHalf/RGHalf/RGBAHalf/
-  RFloat/RGFloat/RGBAFloat/ARGBFloat/RG32, RGB9e5Float, RGB48/RGBA64,
-  and the signed variants
+- RGB/RGBA8, BGR24, 8-bit-per-channel RG16, 16-bit-per-channel R16/RG32/
+  RGB48/RGBA64, half/float RHalf/RGHalf/RGBAHalf/RFloat/RGFloat/
+  RGBAFloat/ARGBFloat, RGB9e5Float, and the signed variants
 - DXT1/3/5, BC4/5, BC6H (HDR), BC7
 - PVRTC (2bpp/4bpp RGB and RGBA), ATC (RGB4/RGBA8), EAC (R/RG, signed
   and unsigned). Verification note: these three are validated against
