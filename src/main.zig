@@ -9131,8 +9131,7 @@ fn parseFieldPath(text: []const u8) ![]const PathSeg {
 
 /// Rebuilds an `.obj` value with one named field replaced (or appended when
 /// `append` is set); field order is preserved.
-fn replaceObjField(fields: []const unityz.value.Field, name: []const u8, new_value: unityz.value.Value, append: bool) !unityz.value.Value {
-    const allocator = std.heap.page_allocator;
+fn replaceObjField(allocator: std.mem.Allocator, fields: []const unityz.value.Field, name: []const u8, new_value: unityz.value.Value, append: bool) !unityz.value.Value {
     var list: std.ArrayList(unityz.value.Field) = .empty;
     defer list.deinit(allocator);
     var replaced = false;
@@ -9149,8 +9148,7 @@ fn replaceObjField(fields: []const unityz.value.Field, name: []const u8, new_val
 }
 
 /// Rebuilds an `.array` value with one element replaced.
-fn replaceArrayIndex(arr: []const unityz.value.Value, index: usize, new_value: unityz.value.Value) !unityz.value.Value {
-    const allocator = std.heap.page_allocator;
+fn replaceArrayIndex(allocator: std.mem.Allocator, arr: []const unityz.value.Value, index: usize, new_value: unityz.value.Value) !unityz.value.Value {
     var list: std.ArrayList(unityz.value.Value) = .empty;
     defer list.deinit(allocator);
     for (arr, 0..) |item, i| {
@@ -9197,7 +9195,7 @@ fn setFieldPath(allocator: std.mem.Allocator, v: unityz.value.Value, segs: []con
             if (j == segs.len) {
                 for (fields) |f| {
                     if (std.mem.eql(u8, f.name, seg.raw)) {
-                        return replaceObjField(fields, seg.raw, try asTargetValue(allocator, f.value, new_value), true);
+                        return replaceObjField(allocator, fields, seg.raw, try asTargetValue(allocator, f.value, new_value), true);
                     }
                 }
             }
@@ -9209,7 +9207,7 @@ fn setFieldPath(allocator: std.mem.Allocator, v: unityz.value.Value, segs: []con
             break :blk null;
         } orelse return error.BadPath;
         const new_child = if (is_last) try asTargetValue(allocator, child, new_value) else try setFieldPath(allocator, child, segs, i + 1, new_value);
-        return replaceObjField(fields, seg.name, new_child, is_last);
+        return replaceObjField(allocator, fields, seg.name, new_child, is_last);
     }
     const arr = switch (v) {
         .array => |a| a,
@@ -9218,7 +9216,7 @@ fn setFieldPath(allocator: std.mem.Allocator, v: unityz.value.Value, segs: []con
     const idx = seg.index orelse return error.BadPath;
     if (idx >= arr.len) return error.BadPath;
     const new_child = if (is_last) try asTargetValue(allocator, arr[idx], new_value) else try setFieldPath(allocator, arr[idx], segs, i + 1, new_value);
-    return replaceArrayIndex(arr, idx, new_child);
+    return replaceArrayIndex(allocator, arr, idx, new_child);
 }
 
 /// Converts `new_value` to the shape of the target `old`: a base64 string
@@ -10873,6 +10871,11 @@ fn testFieldOf(v: unityz.value.Value, name: []const u8) ?unityz.value.Value {
 }
 
 test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments" {
+    // The rebuilt tree is allocator-owned copy-on-write output; an arena
+    // collects every intermediate copy the walk makes.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const ta = arena_state.allocator();
     // The tree `edit` walks: a scalar, an array, a nested object and a PPtr.
     const original = unityz.value.Value{ .obj = &[_]unityz.value.Field{
         .{ .name = "m_Name", .value = .{ .string = "Old" } },
@@ -10894,7 +10897,7 @@ test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments"
     }.apply;
 
     // A nested scalar is replaced and the siblings survive untouched.
-    const nested = try set(std.testing.allocator, original, "m_Sub.count", .{ .int = 7 });
+    const nested = try set(ta, original, "m_Sub.count", .{ .int = 7 });
     try std.testing.expectEqual(@as(i64, 7), testFieldOf(testFieldOf(nested, "m_Sub").?, "count").?.int);
     try std.testing.expectEqualStrings("Old", testFieldOf(nested, "m_Name").?.string);
     try std.testing.expectEqual(@as(usize, 4), nested.obj.len);
@@ -10905,11 +10908,10 @@ test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments"
     const with_bytes = unityz.value.Value{ .obj = &[_]unityz.value.Field{
         .{ .name = "m_IndexBuffer", .value = .{ .bytes = &[_]u8{ 0x02, 0x00, 0x01, 0x00 } } },
     } };
-    const patched = try set(std.testing.allocator, with_bytes, "m_IndexBuffer", .{ .string = "AwD/AA==" });
+    const patched = try set(ta, with_bytes, "m_IndexBuffer", .{ .string = "AwD/AA==" });
     try std.testing.expectEqualSlices(u8, &.{ 0x03, 0x00, 0xff, 0x00 }, patched.obj[0].value.bytes);
-    std.testing.allocator.free(patched.obj[0].value.bytes);
     // a bad base64 literal is rejected
-    try std.testing.expectError(error.InvalidCharacter, set(std.testing.allocator, with_bytes, "m_IndexBuffer", .{ .string = "!!!not-base64!!!" }));
+    try std.testing.expectError(error.InvalidCharacter, set(ta, with_bytes, "m_IndexBuffer", .{ .string = "!!!not-base64!!!" }));
 
     // Replacing a whole subtree coerces the base64 strings inside it, so an
     // `extract --json` export fed back through `edit --patch` round-trips
@@ -10920,15 +10922,13 @@ test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments"
             .{ .name = "m_Data", .value = .{ .bytes = &[_]u8{ 0x00, 0x01, 0x02, 0x03 } } },
         } } },
     } };
-    const replaced = try set(std.testing.allocator, with_subtree, "m_VertexData", .{ .obj = &[_]unityz.value.Field{
+    const replaced = try set(ta, with_subtree, "m_VertexData", .{ .obj = &[_]unityz.value.Field{
         .{ .name = "m_VertexCount", .value = .{ .int = 1382 } },
         .{ .name = "m_Data", .value = .{ .string = "AwD/AA==" } },
     } });
     const vd = testFieldOf(replaced, "m_VertexData").?;
     try std.testing.expectEqual(@as(i64, 1382), testFieldOf(vd, "m_VertexCount").?.int);
     try std.testing.expectEqualSlices(u8, &.{ 0x03, 0x00, 0xff, 0x00 }, testFieldOf(vd, "m_Data").?.bytes);
-    std.testing.allocator.free(testFieldOf(vd, "m_Data").?.bytes);
-    std.testing.allocator.free(vd.obj);
 
     // Some type trees name plain fields with literal index brackets (a
     // mesh's "m_MeshMetrics[0]" is a float, not an array access); the path
@@ -10941,14 +10941,14 @@ test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments"
             .{ .int = 20 },
         } } },
     } };
-    const metric = try set(std.testing.allocator, with_metric, "m_MeshMetrics[0]", .{ .float = 0.5 });
+    const metric = try set(ta, with_metric, "m_MeshMetrics[0]", .{ .float = 0.5 });
     try std.testing.expectEqual(@as(f64, 0.5), testFieldOf(metric, "m_MeshMetrics[0]").?.float);
     // the ordinary array-index reading still works alongside
-    const idx2 = try set(std.testing.allocator, with_metric, "m_Values[1]", .{ .int = 99 });
+    const idx2 = try set(ta, with_metric, "m_Values[1]", .{ .int = 99 });
     try std.testing.expectEqual(@as(i64, 99), testFieldOf(idx2, "m_Values").?.array[1].int);
 
     // An indexed segment replaces one element and preserves order.
-    const indexed = try set(std.testing.allocator, original, "m_Values[1]", .{ .int = 99 });
+    const indexed = try set(ta, original, "m_Values[1]", .{ .int = 99 });
     const arr = testFieldOf(indexed, "m_Values").?.array;
     try std.testing.expectEqual(@as(usize, 3), arr.len);
     try std.testing.expectEqual(@as(i64, 10), arr[0].int);
@@ -10957,24 +10957,24 @@ test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments"
 
     // PPtrs are stored compactly but expose m_FileID / m_PathID for descent;
     // the untouched half of the pair carries over.
-    const repointed = try set(std.testing.allocator, original, "m_Script.m_PathID", .{ .int = 1234 });
+    const repointed = try set(ta, original, "m_Script.m_PathID", .{ .int = 1234 });
     try std.testing.expectEqual(@as(i64, 1234), testFieldOf(repointed, "m_Script").?.pptr.path_id);
     try std.testing.expectEqual(@as(i32, 0), testFieldOf(repointed, "m_Script").?.pptr.file_id);
-    const refiled = try set(std.testing.allocator, original, "m_Script.m_FileID", .{ .int = 3 });
+    const refiled = try set(ta, original, "m_Script.m_FileID", .{ .int = 3 });
     try std.testing.expectEqual(@as(i32, 3), testFieldOf(refiled, "m_Script").?.pptr.file_id);
     try std.testing.expectEqual(@as(i64, 42), testFieldOf(refiled, "m_Script").?.pptr.path_id);
 
     // Every way a path can fail to name an existing leaf is BadPath, so a
     // typo never silently appends a field or drops the edit.
-    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "nope", .{ .int = 1 }));
-    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Sub.nope", .{ .int = 1 }));
-    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Values[3]", .{ .int = 1 })); // past the end
-    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Name.x", .{ .int = 1 })); // scalar has no fields
-    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Sub[0]", .{ .int = 1 })); // obj is not an array
-    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Script.m_Other", .{ .int = 1 }));
-    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Script.m_PathID.x", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(ta, original, "nope", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(ta, original, "m_Sub.nope", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(ta, original, "m_Values[3]", .{ .int = 1 })); // past the end
+    try std.testing.expectError(error.BadPath, set(ta, original, "m_Name.x", .{ .int = 1 })); // scalar has no fields
+    try std.testing.expectError(error.BadPath, set(ta, original, "m_Sub[0]", .{ .int = 1 })); // obj is not an array
+    try std.testing.expectError(error.BadPath, set(ta, original, "m_Script.m_Other", .{ .int = 1 }));
+    try std.testing.expectError(error.BadPath, set(ta, original, "m_Script.m_PathID.x", .{ .int = 1 }));
     // a PPtr half only accepts an integer-like value
-    try std.testing.expectError(error.BadPath, set(std.testing.allocator, original, "m_Script.m_PathID", .{ .string = "x" }));
+    try std.testing.expectError(error.BadPath, set(ta, original, "m_Script.m_PathID", .{ .string = "x" }));
 }
 
 test "applyNodeBytes replaces a raw node range from base64" {
