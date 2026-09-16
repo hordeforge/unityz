@@ -435,7 +435,16 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.eql(u8, r, "--json")) break true;
         } else false;
         var it = dir.iterate();
-        while (try it.next(io)) |entry| {
+        // An iteration error is not propagated: leaving `main` with it would
+        // drop the buffered stdout of every file already processed and print
+        // a bare error name that never says which directory stopped being
+        // readable. Report the directory, keep what was written, fail the run.
+        while (it.next(io) catch |err| {
+            bailFlush(stdout);
+            try stderr.print("unityz: {s}: directory scan failed: {s}\n", .{ path, @errorName(err) });
+            try stderr.flush();
+            std.process.exit(1);
+        }) |entry| {
             defer {
                 // Every arena the memoizing lookups parse into is created
                 // and destroyed inside `runCommand`, at the same stack
@@ -704,9 +713,19 @@ const BuiltinCache = struct {
             self.revision = revision;
             self.trees = .empty;
             self.db = unityz.builtin_trees.open(self.arena, revision) catch |err| blk: {
-                if (err == error.UnknownRevision and !self.warned) {
+                // `UnknownRevision` is the ordinary answer for a release the
+                // shipped database has no trees for. Anything else means the
+                // database itself failed to decode, and swallowing it left
+                // every object of the file reading as typeless with nothing
+                // to point at the cause - the same trap the per-class lookup
+                // below already avoids. Warned once per run either way.
+                if (!self.warned) {
                     self.warned = true;
-                    diagnostic("unityz: no built-in type trees for Unity {s}; shipped releases: {s}\n", .{ revision, releaseList() });
+                    if (err == error.UnknownRevision) {
+                        diagnostic("unityz: no built-in type trees for Unity {s}; shipped releases: {s}\n", .{ revision, releaseList() });
+                    } else {
+                        diagnostic("unityz: built-in type trees for Unity {s}: {s}; objects will decode as typeless\n", .{ revision, @errorName(err) });
+                    }
                 }
                 break :blk null;
             };
@@ -1515,7 +1534,14 @@ fn diskSidecars(arena: std.mem.Allocator, path: []const u8) ![]const Sidecar {
     };
     defer dir.close(io);
     var it = dir.iterate();
-    while (try it.next(io)) |entry| {
+    // An error part-way through the scan is the same non-fatal case as an
+    // unreadable sidecar, not a reason to abort the command: propagating it
+    // failed `extract`/`verify` outright over a directory that had already
+    // yielded usable sidecars. Keep those, say what stopped the scan.
+    while (it.next(io) catch |err| {
+        diagnostic("unityz: {s}: scan for .resS/.resource sidecars failed: {s}; the remaining streamed objects will be skipped\n", .{ dir_path, @errorName(err) });
+        return list.items;
+    }) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".resS") and
             !std.mem.endsWith(u8, entry.name, ".resource")) continue;
@@ -8453,7 +8479,8 @@ const EditableObject = struct {
 
 /// Decodes one object of `sf` for an in-place edit. Typeless Mono files
 /// decode through the injected tree table; without one there is no tree to
-/// decode against. `error.ObjectNotFound` when the path id is absent.
+/// decode against. `error.ObjectNotFound` when the path id is absent,
+/// `error.TruncatedObjectData` when its byte range runs past the file.
 fn readEditableObject(
     arena: std.mem.Allocator,
     sf: *const unityz.serialized.SerializedFile,
@@ -8465,7 +8492,12 @@ fn readEditableObject(
     const type_index = o.type_index orelse return error.MissingTypeIndex;
     if (type_index >= sf.types.len) return error.MissingTypeIndex;
     var tree = sf.types[type_index].type_tree;
-    const data = sf.objectData(o) orelse return error.OutOfMemory;
+    // The object table is validated against the file size the header
+    // declares, which a compact format 2-8 file may set past the bytes
+    // actually present - so an object range outside the buffer survives
+    // the parse and lands here. Calling that `OutOfMemory` sent the
+    // operator looking at the machine instead of at the truncated asset.
+    const data = sf.objectData(o) orelse return error.TruncatedObjectData;
     if (tree.roots.len == 0) {
         // Typeless Mono file: decode from the injected table.
         const inj = injected orelse return error.MissingTypeIndex;
