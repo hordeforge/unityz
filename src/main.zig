@@ -564,23 +564,7 @@ fn parseCommand(arg: []const u8) ?Command {
 
 fn runCommand(command: Command, path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     switch (command) {
-        .info => {
-            var dump = false;
-            var objects = false;
-            var json = false;
-            for (rest) |arg| {
-                if (std.mem.eql(u8, arg, "--dump")) {
-                    dump = true;
-                } else if (std.mem.eql(u8, arg, "--objects")) {
-                    objects = true;
-                } else if (std.mem.eql(u8, arg, "--json")) {
-                    json = true;
-                } else {
-                    return usageError("unityz: unknown info option '{s}'\n", .{arg});
-                }
-            }
-            return cmdInfo(path, bytes, dump, objects, json, stdout);
-        },
+        .info => return cmdInfo(path, rest, bytes, stdout),
         .extract => return cmdExtract(path, rest, bytes, stdout),
         .edit => return cmdEdit(path, rest, bytes, stdout),
         .verify => return cmdVerify(path, rest, bytes, stdout),
@@ -5036,8 +5020,22 @@ fn shaderJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
 
 /// `info <path> [--dump]` — sniff the container and print a summary;
 /// `--dump` additionally prints every object of a serialized file as JSON.
-fn cmdInfo(path: []const u8, bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
+fn cmdInfo(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     _ = path;
+    var dump = false;
+    var objects = false;
+    var json = false;
+    for (rest) |arg| {
+        if (std.mem.eql(u8, arg, "--dump")) {
+            dump = true;
+        } else if (std.mem.eql(u8, arg, "--objects")) {
+            objects = true;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+        } else {
+            return usageError("unityz: unknown info option '{s}'\n", .{arg});
+        }
+    }
     const sniff = unityz.container.sniff(bytes);
     switch (sniff.container) {
         .webfile => return printWebFile(bytes, dump, objects, json, stdout),
@@ -10637,7 +10635,7 @@ test "info rejects an unrecognized file instead of printing a successful diagnos
 
     try std.testing.expectError(
         error.UnknownFormat,
-        cmdInfo("broken.bin", "not a Unity asset", false, false, true, &writer.writer),
+        cmdInfo("broken.bin", &.{"--json"}, "not a Unity asset", &writer.writer),
     );
     try std.testing.expectEqual(0, output.items.len);
 }
