@@ -52,10 +52,19 @@ pub const Reader = struct {
         self.pos = self.data.len;
     }
 
-    pub fn skip(self: *Reader, n: usize) ReadError!void {
-        const new_pos = self.pos + n;
+    /// Cursor advance that cannot wrap. `n` is routinely a length field read
+    /// straight out of the file (a u32 string or array length), and `usize`
+    /// is 32 bits on the 32-bit targets this builds for, so `pos + n` there
+    /// can overflow past the bounds check and hand back a backwards slice.
+    /// Overflow is the same answer as running off the end: `OutOfBounds`.
+    fn advanced(self: *const Reader, n: usize) ReadError!usize {
+        const new_pos = std.math.add(usize, self.pos, n) catch return error.OutOfBounds;
         if (new_pos > self.data.len) return error.OutOfBounds;
-        self.pos = new_pos;
+        return new_pos;
+    }
+
+    pub fn skip(self: *Reader, n: usize) ReadError!void {
+        self.pos = try self.advanced(n);
     }
 
     /// Advances to the next 4-byte boundary (used by aligned i64 fields in
@@ -67,8 +76,7 @@ pub const Reader = struct {
 
     /// Returns a borrowed slice of `n` bytes and advances the cursor.
     pub fn readSlice(self: *Reader, n: usize) ReadError![]const u8 {
-        const new_pos = self.pos + n;
-        if (new_pos > self.data.len) return error.OutOfBounds;
+        const new_pos = try self.advanced(n);
         const out = self.data[self.pos..new_pos];
         self.pos = new_pos;
         return out;
@@ -150,8 +158,7 @@ pub const Reader = struct {
     /// Reads `n` bytes, returning `null` (without advancing) when fewer
     /// than `n` remain.
     pub fn tryReadSlice(self: *Reader, n: usize) ?[]const u8 {
-        const new_pos = self.pos + n;
-        if (new_pos > self.data.len) return null;
+        const new_pos = self.advanced(n) catch return null;
         const out = self.data[self.pos..new_pos];
         self.pos = new_pos;
         return out;
@@ -159,9 +166,7 @@ pub const Reader = struct {
 
     /// Peeks at the next `n` bytes without advancing.
     pub fn peek(self: *const Reader, n: usize) ReadError![]const u8 {
-        const new_pos = self.pos + n;
-        if (new_pos > self.data.len) return error.OutOfBounds;
-        return self.data[self.pos..new_pos];
+        return self.data[self.pos..try self.advanced(n)];
     }
 
     pub fn peekByte(self: *const Reader) ReadError!u8 {
@@ -274,6 +279,22 @@ test "reader out of bounds" {
     try std.testing.expectError(error.OutOfBounds, r.readSlice(1));
     try std.testing.expect(r.eof());
     try std.testing.expectEqual(@as(usize, 0), r.remaining());
+}
+
+test "reader length overflowing the cursor is out of bounds" {
+    // A length read out of the file can be large enough that `pos + n` wraps
+    // `usize` - reachable with a u32 field on a 32-bit target, and reachable
+    // here on any target with the maximum length. The wrap must not slip past
+    // the bounds check.
+    var r = Reader.init("abcd");
+    try std.testing.expectEqual(@as(u8, 'a'), try r.readByte());
+    const huge = std.math.maxInt(usize);
+    try std.testing.expectError(error.OutOfBounds, r.readSlice(huge));
+    try std.testing.expectError(error.OutOfBounds, r.skip(huge));
+    try std.testing.expectError(error.OutOfBounds, r.peek(huge));
+    try std.testing.expectEqual(@as(?[]const u8, null), r.tryReadSlice(huge));
+    // None of the failed reads moved the cursor.
+    try std.testing.expectEqual(@as(usize, 1), r.position());
 }
 
 test "reader little endian integers" {

@@ -66,7 +66,7 @@ pub fn decompressInto(out: []u8, src: []const u8) Error!void {
         // --- literal run ---
         var lit_len: usize = token >> 4;
         if (lit_len == 15) {
-            lit_len += try readExtension(&in_pos, src);
+            lit_len +|= try readExtension(&in_pos, src);
         }
         if (lit_len > expected_size -| out_pos) return error.OutputOverflow;
         if (in_pos + lit_len > src.len) return error.TruncatedInput;
@@ -85,9 +85,9 @@ pub fn decompressInto(out: []u8, src: []const u8) Error!void {
 
         var match_len: usize = token & 0x0f;
         if (match_len == 15) {
-            match_len += try readExtension(&in_pos, src);
+            match_len +|= try readExtension(&in_pos, src);
         }
-        match_len += 4;
+        match_len +|= 4;
         if (match_len > expected_size -| out_pos) return error.OutputOverflow;
 
         // Copy in `offset`-sized chunks: each chunk reads only bytes an
@@ -108,13 +108,20 @@ pub fn decompressInto(out: []u8, src: []const u8) Error!void {
 
 /// Reads the 255-extension of a length field. Returns the accumulated extra
 /// length beyond the first 15.
+///
+/// The accumulation saturates rather than wrapping, as do the two call sites
+/// that add it to a length: `usize` is 32 bits on the 32-bit targets this
+/// builds for, and a crafted block can spend ~16M continuation bytes there to
+/// push the sum past 2^32. A saturated length is still larger than any
+/// remaining output, so it lands on the `OutputOverflow` check below instead
+/// of wrapping to a small one (or tripping an overflow panic).
 fn readExtension(in_pos: *usize, src: []const u8) Error!usize {
     var extra: usize = 0;
     while (true) {
         if (in_pos.* >= src.len) return error.TruncatedInput;
         const b = src[in_pos.*];
         in_pos.* += 1;
-        extra += b;
+        extra +|= b;
         if (b != 255) break;
     }
     return extra;

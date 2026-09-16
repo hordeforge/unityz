@@ -490,6 +490,12 @@ fn mapFileRead(path: []const u8) !MappedFile {
     defer file.close(io);
     const st = try file.stat(io);
     if (st.size == 0) return .empty;
+    // `stat` reports 64-bit sizes on every target, but `mmap` takes a `usize`,
+    // which is 32 bits on the 32-bit targets this builds for. A file past 4 GiB
+    // there would make the cast panic instead of reporting anything; a
+    // too-large-to-map file is a mapping failure like any other, and both
+    // callers fall back to reading the file when mapping fails.
+    if (st.size > std.math.maxInt(usize)) return error.FileTooBig;
     const mapped = try std.posix.mmap(
         null,
         @intCast(st.size),
