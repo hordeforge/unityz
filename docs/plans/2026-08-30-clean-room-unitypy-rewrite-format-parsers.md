@@ -28,6 +28,13 @@ through its type tree and writes a `.json` sidecar alongside the raw
 assemblies to parse the graph).  
 **Related:**
 
+Shipping PR series for this plan (PRs #47-#75), recorded in the post-#75
+handover  
+https://github.com/hordeforge/unityz/pull/75
+
+Roadmap entry for this plan  
+[../ROADMAP.md](../ROADMAP.md)
+
 ## Outcome
 
 `unityz` reads and edits Unity asset files end to end, implemented from
@@ -35,9 +42,11 @@ public format documentation only - no code or data taken from UnityPy.
 
 - `unityz info <file>` prints the file type and, for serialized files, the
   format version, Unity version, platform, endianness, type-tree flag, and
-  type/object/external counts for any UnityFS bundle, WebFile,
-  `.assets`/`.resources`/`.resS` file produced by Unity 2.5 through current
-  versions (serialized formats 2-22, version 4 included; container
+  type/object/external counts for any UnityFS bundle, WebFile, or
+  `.assets`/`.resources` file produced by Unity 2.5 through current
+  versions (`.resS`/`.resource` files are headerless stream sidecars, not
+  containers: they are resolved for streamed references, not read
+  directly; serialized formats 2-22, version 4 included; container
   detection covers every supported version, so bare v4 files are
   reachable from the CLI too).
   `--objects` adds the object table; per-class object counts are
