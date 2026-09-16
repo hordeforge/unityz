@@ -5044,8 +5044,11 @@ fn shaderJson(arena: std.mem.Allocator, v: unityz.value.Value) !?[]u8 {
     return try arena.dupe(u8, aw.written());
 }
 
-/// `info <path> [--dump]` — sniff the container and print a summary;
-/// `--dump` additionally prints every object of a serialized file as JSON.
+/// `info <path> [--dump] [--objects] [--json]` — sniff the container and
+/// print a summary. `--dump` additionally prints every object of a
+/// serialized file as JSON, `--objects` adds the object table, and
+/// `--json` makes the summary machine-readable (`--objects` then adds the
+/// table to it).
 fn cmdInfo(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     _ = path;
     var dump = false;
@@ -7267,7 +7270,10 @@ fn findObjectRgbaInSerialized(arena: std.mem.Allocator, bytes: []const u8, path_
 /// reports objects only in one file, objects whose bytes changed between
 /// them (same path id, different hash), and the unchanged count. Useful
 /// for spotting what changed between two builds; UnityPy has no such
-/// comparison. Both files must be the same container kind.
+/// comparison. Both files must be the same container kind; when either
+/// argument is a directory the two trees are compared file-by-file
+/// instead. `--pixels`, `--audio` and `--fields` add decoded passes over
+/// the matched objects, and `--class` narrows every pass to one class.
 fn cmdDiff(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     if (rest.len < 1) {
         return usageError("unityz: diff needs: <file2>\n", .{});
@@ -7882,11 +7888,15 @@ fn dumpHex(data: []const u8, stdout: *Io.Writer) !void {
     }
 }
 
-/// `find <path> <substring> [--class N]` — locate objects whose name
-/// contains `substring` (case-insensitive) or whose class matches. Reads
-/// each object through its type tree, so only objects with an `m_Name`
-/// field match by name. Recurses into bundle/webfile nodes. UnityPy's CLI
-/// has no search.
+/// `find <path> <substring> [--class N] [--exact] [--any] [--json]
+/// [--trees <file.json>]` — locate objects whose name contains
+/// `substring` (case-insensitive; `--exact` makes it a case-sensitive
+/// whole-name match). `--class` narrows the search to one class rather
+/// than widening it: an object must match both. Reads each object
+/// through its type tree, so only objects with an `m_Name` field match
+/// by name, unless `--any` extends the match to every string value in
+/// the tree. Recurses into bundle/webfile nodes. UnityPy's CLI has no
+/// search.
 fn cmdFind(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     if (rest.len < 1) {
         return usageError("unityz: find needs: <substring> [--class <id>] [--json] [--exact]\n", .{});

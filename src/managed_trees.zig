@@ -250,7 +250,7 @@ fn delegateTyped(field: dotnet.Field, types: *const TypeMap) bool {
 }
 
 /// Appends one flat node (and its children) for a managed field.
-/// `types` resolves class/valuetype names; `warn` collects unsupported
+/// `types` resolves class/valuetype names; `warnings` collects unsupported
 /// types so the caller can report them.
 fn appendFieldNodes(
     arena: std.mem.Allocator,

@@ -1,9 +1,11 @@
 //! Texture decoding: Unity `TextureFormat` → RGBA8.
 //!
 //! Implemented from the public format descriptions: the uncompressed
-//! RGB/RGBA family (RGB24, RGBA32, ARGB32, BGRA32, BGR24, 16-bit R16/RG16,
-//! half-float RHalf/RGHalf/RGBAHalf, float RFloat/RGFloat/RGBAFloat/
-//! ARGBFloat/RG32, shared-exponent RGB9e5Float, 48/64-bit RGB48/RGBA64,
+//! RGB/RGBA family (RGB24, RGBA32, ARGB32, BGRA32, BGR24, the
+//! integer formats Unity names by total bit width - R16 and RG32 are
+//! 16 bits per channel, RG16 is 8 - half-float RHalf/RGHalf/RGBAHalf,
+//! float RFloat/RGFloat/RGBAFloat/ARGBFloat, shared-exponent
+//! RGB9e5Float, 48/64-bit RGB48/RGBA64,
 //! and the signed variants 75-82), the S3TC/DXT block formats (BC1/BC2/
 //! BC3), BC4/BC5, BC6H (HDR, all 14 modes), BC7 (all eight modes plus
 //! the reserved mode), ETC1/ETC2
@@ -23,9 +25,9 @@
 //! [0,1] for the 8-bit output. The raw half/float/16-bit family uses
 //! standard documented conversions (clamp+truncate for float, high byte
 //! for 16-bit integer, bias for signed); UnityPy's own converters are
-//! lossy on these (half truncates x*256 and crashes above 1.0, and its
-//! RG32 path reads 16-bit samples). The crunched block family covers the
-//! Unity crunch variants: ETC_RGB4Crunched (64), ETC2_RGBA8Crunched (65),
+//! lossy on these (half truncates x*256 and crashes above 1.0). The
+//! crunched block family covers the Unity crunch variants:
+//! ETC_RGB4Crunched (64), ETC2_RGBA8Crunched (65),
 //! DXT1Crunched (28), and DXT5Crunched (29), all routed through the
 //! vendored unitycrunch decompressor to raw ETC1/ETC2/DXT1/DXT5 blocks
 //! and then decoded by the corresponding block decoder. The crunch C++

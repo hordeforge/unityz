@@ -1,5 +1,5 @@
-//! UnityFS bundle parser — the modern Unity asset bundle container
-//! (`UnityFS\0` magic, format version 6+).
+//! UnityFS bundle parser and writer — the modern Unity asset bundle
+//! container (`UnityFS\0` magic, format version 6+).
 //!
 //! Layout (from the public UnityFS format docs):
 //!
@@ -46,6 +46,11 @@
 //! which `Bundle` owns. `parse` decompresses every block; `parseMetadata`
 //! decompresses only the blocks covering each SerializedFile's metadata
 //! prefix, so a later corrupt block does not fail that path.
+//!
+//! Writing goes the other way through `rebuild` (a parsed bundle with node
+//! payloads replaced, keeping the source's compression) and `create` (a
+//! format-8 archive from declared nodes); both are documented at their own
+//! declarations.
 
 const std = @import("std");
 const streams = @import("streams.zig");

@@ -562,7 +562,8 @@ UnityArchive files; unityz detects the container.
 
 UnityPy's TPK database covers every Unity release and picks the nearest
 version; unityz's built-in database (`--builtin`, `trees --builtin`) covers
-the releases it ships, currently only 2022.3.62f2, and matches exactly.
+the releases it ships (the seven 2019.4-2023.2 LTS dumps listed under
+"Built-in engine-class trees") and matches exactly.
 For a shipped release the trees are node-for-node what UnityPy writes
 (see "Built-in engine-class trees"); for any other release a stripped
 SerializedFile still needs caller-supplied `--trees`, and the remaining
