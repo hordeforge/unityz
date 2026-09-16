@@ -612,72 +612,95 @@ test "compress enforces end-of-block conditions" {
     // least LASTLITERALS (5) bytes, and the last match starts at least
     // MFLIMIT (12) bytes before the end of the block. The C reference
     // decoder rejects blocks that violate these, so pin them on real-ish
-    // inputs. The walker mirrors the decoder's token grammar.
+    // inputs. The walker mirrors the decoder's token grammar and tracks the
+    // decompressed position, because both limits are stated in terms of the
+    // block's output: counting compressed bytes instead folds the token and
+    // its length extensions into the total and lets a four-literal tail -
+    // exactly the LASTLITERALS violation - pass.
     const a = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0xbeef);
     const rnd = prng.random();
+    var noise_buf: [3000]u8 = undefined;
+    rnd.bytes(&noise_buf);
     const inputs = [_][]const u8{
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // one run
         "the quick brown fox jumps over the lazy dog\n" ** 8, // repeated
         "short", // under MFLIMIT: all literals
         "",
+        &noise_buf, // incompressible: no match survives, all literals
     };
-    var noise_buf: [3000]u8 = undefined;
-    rnd.bytes(&noise_buf);
+    const walker = struct {
+        const Ends = struct {
+            /// Literal count of the trailing literals-only sequence, 0 when
+            /// the block does not end in one.
+            final_literals: usize,
+            /// Output offset the last match starts at; null when the block
+            /// holds no match at all.
+            last_match_start: ?usize,
+        };
+        fn ends(c: []const u8) Ends {
+            var ip: usize = 0;
+            var op: usize = 0;
+            var final_literals: usize = 0;
+            var last_match_start: ?usize = null;
+            while (ip < c.len) {
+                const token = c[ip];
+                ip += 1;
+                var lit_len: usize = token >> 4;
+                if (lit_len == 15) {
+                    while (true) {
+                        const b = c[ip];
+                        ip += 1;
+                        lit_len += b;
+                        if (b != 255) break;
+                    }
+                }
+                ip += lit_len;
+                op += lit_len;
+                // A sequence that ends the block carries no offset or match,
+                // so this is the literals-only tail.
+                if (ip == c.len) {
+                    final_literals = lit_len;
+                    break;
+                }
+                ip += 2; // offset
+                var ml: usize = token & 0x0f;
+                if (ml == 15) {
+                    while (true) {
+                        const b = c[ip];
+                        ip += 1;
+                        ml += b;
+                        if (b != 255) break;
+                    }
+                }
+                ml += 4;
+                last_match_start = op;
+                op += ml;
+            }
+            return .{ .final_literals = final_literals, .last_match_start = last_match_start };
+        }
+    };
     for (inputs) |inp| {
         const c = try compress(a, inp);
         defer a.free(c);
         const out = try decompress(a, c, inp.len);
         defer a.free(out);
-        try std.testing.expectEqualStrings(inp, out);
+        try std.testing.expectEqualSlices(u8, inp, out);
         if (c.len == 0) continue;
-        // walk: find the last sequence's start and the last match's start
-        var ip: usize = 0;
-        var last_lit_start: ?usize = null;
-        while (ip < c.len) {
-            const seq_start = ip;
-            const token = c[ip];
-            ip += 1;
-            var lit_len: usize = token >> 4;
-            if (lit_len == 15) {
-                while (true) {
-                    const b = c[ip];
-                    ip += 1;
-                    lit_len += b;
-                    if (b != 255) break;
-                }
-            }
-            ip += lit_len;
-            if (ip == c.len) {
-                last_lit_start = seq_start;
-                break;
-            }
-            ip += 2; // offset
-            var ml: usize = token & 0x0f;
-            if (ml == 15) {
-                while (true) {
-                    const b = c[ip];
-                    ip += 1;
-                    ml += b;
-                    if (b != 255) break;
-                }
-            }
-            ml += 4;
-        }
-        // The final sequence holds the last 5 bytes of output: at least 5
-        // literals. The last match's token starts >= 12 bytes before the
-        // end of the block.
-        if (inp.len >= 5) {
-            try std.testing.expect(last_lit_start != null);
-            try std.testing.expect(c.len - last_lit_start.? >= 5);
-        }
+        const e = walker.ends(c);
+        // The block ends in a literals-only sequence holding at least
+        // LASTLITERALS (5) bytes, and those literals are stored verbatim,
+        // so they are both the tail of the input and the tail of the block.
+        if (inp.len >= 5) try std.testing.expect(e.final_literals >= 5);
+        try std.testing.expect(e.final_literals <= inp.len);
+        try std.testing.expectEqualSlices(
+            u8,
+            inp[inp.len - e.final_literals ..],
+            c[c.len - e.final_literals ..],
+        );
+        // No match may start inside the last MFLIMIT (12) bytes of output.
+        if (e.last_match_start) |ms| try std.testing.expect(inp.len - ms >= 12);
     }
-    // noise: incompressible, must still round-trip and end literals-only
-    const cn = try compress(a, &noise_buf);
-    defer a.free(cn);
-    const dn = try decompress(a, cn, noise_buf.len);
-    defer a.free(dn);
-    try std.testing.expectEqualSlices(u8, &noise_buf, dn);
 }
 
 test "compress round-trips edge-case sizes and adversarial patterns" {

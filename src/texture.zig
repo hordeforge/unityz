@@ -3547,6 +3547,53 @@ test "unsupported format and bad size" {
     try std.testing.expectError(error.BadSize, decode(a, format.rg_float, 8, 8, &half_rg_float));
 }
 
+test "every sized format decodes within the bytes expectedSize asks for" {
+    // The pair above is spot-checked, and spot checks drift: RG16/RG32
+    // shipped with doubled strides, and the guard that should have caught
+    // an over-read is `expectedSize` itself, which `decode` trusts
+    // completely. Sweep the whole format-id space instead of a hand-kept
+    // list, so a format added to the table cannot skip the check, and hand
+    // each one exactly the bytes it asked for: a stride that outruns its
+    // sizing slices past the end of `data` and panics in a safe build.
+    const a = std.testing.allocator;
+    const w: u32 = 5; // neither square nor a whole number of 4x4 blocks
+    const h: u32 = 3;
+    var buf: [4096]u8 = undefined;
+    // Pseudo-random rather than zeroed: an all-zero payload sends several
+    // block decoders down one early-out path and reads less than a real one.
+    var prng = std.Random.DefaultPrng.init(0xf00d);
+    prng.random().bytes(&buf);
+
+    var sized: usize = 0;
+    var crunched: usize = 0;
+    var decoded: usize = 0;
+    var f: i32 = 0;
+    while (f <= 128) : (f += 1) {
+        // An id the table does not know has no size and `decode` rejects it.
+        const n = expectedSize(f, w, h) orelse continue;
+        sized += 1;
+        // Crunched streams carry their own length, so 0 here means "not
+        // bounded by the dimensions" rather than "empty".
+        if (n == 0) {
+            crunched += 1;
+            continue;
+        }
+        try std.testing.expect(n <= buf.len);
+        // One byte short must always be refused, whatever the format.
+        try std.testing.expectError(error.BadSize, decode(a, f, w, h, buf[0 .. n - 1]));
+        const out = decode(a, f, w, h, buf[0..n]) catch continue;
+        defer a.free(out);
+        try std.testing.expectEqual(@as(usize, w) * h * 4, out.len);
+        decoded += 1;
+    }
+    // `catch continue` means the loop alone would stay green if nothing ever
+    // decoded, so pin the stronger fact instead: every id the table sizes by
+    // its dimensions decoded at exactly that size, which is what makes the
+    // over-read check above cover the whole table rather than a few formats.
+    try std.testing.expect(sized > 0);
+    try std.testing.expectEqual(sized - crunched, decoded);
+}
+
 const A1Vector = struct {
     block: [8]u8,
     rgba: [64]u8,
