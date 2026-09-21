@@ -24,6 +24,7 @@ select = [
     "A",    # a builtin shadowed by a local name
     "ANN",  # missing annotations, and `Any` used as one
     "ARG",  # unused function arguments
+    "ASYNC", # blocking calls and unawaited tasks inside `async def`
     "B",    # bugbear: mutable defaults, loop-variable capture, silent bugs
     "BLE",  # blind `except Exception`
     "C4",   # comprehension rewrites
@@ -59,6 +60,7 @@ select = [
     "S",    # bandit: exec, pickle, weak hashes, unchecked subprocess
     "SIM",  # simplifications: collapsible `if`, `contextlib.suppress`, dict.get
     "SLF",  # private member access across objects
+    "SLOT", # `__slots__` missing on a str/tuple/namedtuple subclass
     "T10",  # a leftover `breakpoint()` or `pdb` import
     "TC",   # imports only needed for typing
     "TID",  # banned and relative imports
@@ -90,6 +92,10 @@ ignore = ["PLR2004", "PTH123", "SIM115", "TRY003"]
 #   T20  - these are CLI scripts; `print` is their output channel, not debris.
 #   D    - the modules carry docstrings; per-function ones are not required.
 #   CPY  - the licence lives in LICENSE and NOTICE, not in a per-file header.
+#   FIX/TD - these police the wording of TODO comments, not defects.
+#   The framework groups - AIR, DJ, FAST, NPY, PD, PT, PYI, INT - cover
+#   libraries this tree does not import and never will; the scripts are
+#   stdlib-only by design, so selecting them would assert nothing.
 # COM and EM are the only groups still held back wholesale by live findings:
 # four missing trailing commas, and a raw string passed straight to `raise`.
 # Enabling a group the tree fails would make this file advisory instead of

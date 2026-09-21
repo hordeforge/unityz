@@ -22,10 +22,22 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
+      # Formatting is the only static check the Zig sources get, so its scope
+      # is the whole tree rather than three named paths: a .zig added outside
+      # src/ - a tools/ directory, a second build file - is unformatted and
+      # silent under the old list. Driving it from the index also keeps
+      # .zig-cache out without depending on how `zig fmt` walks a directory.
       - name: Check Zig formatting
-        run: zig fmt --check build.zig build.zig.zon src
+        run: git ls-files -z '*.zig' '*.zon' | xargs -0 zig fmt --check
+      # Every tracked .sh, not `scripts/*.sh`: that glob covers the top of one
+      # directory only, so a script added in a subdirectory, at the repo root
+      # or under docs/ would merge unlinted with nothing saying so. Listing
+      # them from the index makes the check follow the tree instead of a fixed
+      # path. No `xargs -r`: an empty list means the glob stopped matching, and
+      # shellcheck failing on no arguments says that out loud rather than
+      # reporting a vacuous pass.
       - name: Lint shell scripts
-        run: shellcheck scripts/*.sh
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck
       # The generator scripts build data that ships inside the binary, so they
       # are linted like the Zig and the shell is. The version is pinned so a
       # new ruff release adding rules cannot turn a green tree red on an
