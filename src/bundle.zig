@@ -391,6 +391,26 @@ fn parseWithMode(allocator: std.mem.Allocator, data: []const u8, mode: Decompres
     };
 }
 
+/// Sums the block table's uncompressed sizes, rejecting a file that cannot
+/// hold the compressed bytes it declares.
+///
+/// The per-block bounds checks in the callers only run once the output is
+/// already sized, so a truncated file declaring a million gigabyte-sized
+/// blocks would reserve the whole declared size before the first block is
+/// rejected. Every block's compressed bytes have to be present in the file,
+/// so require that first and keep the allocation proportional to the input,
+/// the way `readCount` bounds the serialized-file tables.
+fn uncompressedTotal(data: []const u8, block_data_offset: usize, blocks: []const Block) ParseError!usize {
+    var total: usize = 0;
+    var compressed_total: usize = 0;
+    for (blocks) |b| {
+        total += b.uncompressed_size;
+        compressed_total += b.compressed_size;
+    }
+    if (compressed_total > data.len - block_data_offset) return error.ShortData;
+    return total;
+}
+
 fn decompressAll(
     allocator: std.mem.Allocator,
     data: []const u8,
@@ -398,19 +418,7 @@ fn decompressAll(
     blocks: []const Block,
     nodes: []Node,
 ) ParseError![]u8 {
-    var total: usize = 0;
-    var compressed_total: usize = 0;
-    for (blocks) |b| {
-        total += b.uncompressed_size;
-        compressed_total += b.compressed_size;
-    }
-    // The per-block bounds check below only runs once `stream` is already
-    // sized, so a truncated file declaring a million gigabyte-sized blocks
-    // would reserve the whole declared size before the first block is
-    // rejected. Every block's compressed bytes have to be present in the
-    // file, so require that first and keep the allocation proportional to
-    // the input, the way `readCount` bounds the serialized-file tables.
-    if (compressed_total > data.len - block_data_offset) return error.ShortData;
+    const total = try uncompressedTotal(data, block_data_offset, blocks);
     const stream = try allocator.alloc(u8, total);
     errdefer allocator.free(stream);
 
@@ -533,13 +541,7 @@ fn decompressMetadata(
     blocks: []const Block,
     nodes: []Node,
 ) ParseError![]u8 {
-    var total: usize = 0;
-    var compressed_total: usize = 0;
-    for (blocks) |b| {
-        total += b.uncompressed_size;
-        compressed_total += b.compressed_size;
-    }
-    if (compressed_total > data.len - block_data_offset) return error.ShortData;
+    const total = try uncompressedTotal(data, block_data_offset, blocks);
     if (blocks.len == 0) return allocator.alloc(u8, 0) catch return error.OutOfMemory;
 
     const starts = allocator.alloc(usize, blocks.len) catch return error.OutOfMemory;
