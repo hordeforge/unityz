@@ -508,7 +508,12 @@ fn buildSyntheticBlob(a: std.mem.Allocator, bone_binding: bool) ![]const u8 {
     try par.writeInt(i32, @as(i32, @intCast(blob_version)));
     try par.writeInt(i32, 0); // bufferCount
     try par.writeInt(i32, 1); // entryCount
-    if (bone_binding) try par.writeAlignedString("unity_SkinnedMeshBoneMatrix") else try par.writeAlignedString("UnityPerDraw");
+    // Parameter-blob strings are length-then-bytes with no NUL and the pad
+    // measured over the length field too (`writeBlobString`), not the
+    // serialized-file `writeAlignedString` form: that one spells the length
+    // one too high and the re-encode `verifyBlob` performs then differs from
+    // the bytes it parsed, so the fixture would never verify.
+    if (bone_binding) try writeBlobString(&par, "unity_SkinnedMeshBoneMatrix") else try writeBlobString(&par, "UnityPerDraw");
     try par.writeInt(i32, 1); // kind = cbuffer binding
     try par.writeInt(i32, 0); // index
     try par.writeInt(i32, 1); // arraySize
@@ -525,7 +530,15 @@ fn buildSyntheticBlob(a: std.mem.Allocator, bone_binding: bool) ![]const u8 {
 
 /// Builds a Shader value tree referencing one vertex sub-program (blob index
 /// 0) and one parameter blob (index 1) in the d3d11 platform blob `blob`.
-fn buildShaderValue(blob: []const u8) value.Value {
+/// The outer field list is the one literal here that is not comptime-known:
+/// it carries `blob`. `&[_]value.Field{...}` on a runtime value points into
+/// this function's stack frame rather than being promoted to static data, so
+/// returning it hands the caller a dangling slice - the tests below then read
+/// whatever later reused that frame, and `openD3d11Blob` answers `null` on
+/// the garbage, which `verifyBlob` reports as a clean pass. Copy it into the
+/// caller's allocator instead. Everything nested inside is comptime-known and
+/// does promote, so only this one list needs allocating.
+fn buildShaderValue(a: std.mem.Allocator, blob: []const u8, decompressed_len: usize) !value.Value {
     const sub = [_]value.Value{.{ .obj = &[_]value.Field{ .{ .name = "m_BlobIndex", .value = .{ .int = 0 } }, .{
         .name = "m_GpuProgramType",
         .value = .{ .int = 15 },
@@ -557,15 +570,22 @@ fn buildShaderValue(blob: []const u8) value.Value {
         .{ .name = "m_Name", .value = .{ .string = "Test/Skinned\x00" } },
         .{ .name = "m_SubShaders", .value = .{ .array = &[_]value.Value{subshader} } },
     } };
-    return value.Value{ .obj = &[_]value.Field{
+    // `openD3d11Blob` decompresses only when the two lengths differ, so a
+    // caller handing over LZ4 bytes has to say what they expand to; passing
+    // `blob.len` for both keeps the blob plain.
+    const comp = try a.dupe(value.Value, &[_]value.Value{.{ .uint = blob.len }});
+    const comp_tiers = try a.dupe(value.Value, &[_]value.Value{.{ .array = comp }});
+    const decomp = try a.dupe(value.Value, &[_]value.Value{.{ .uint = decompressed_len }});
+    const decomp_tiers = try a.dupe(value.Value, &[_]value.Value{.{ .array = decomp }});
+    return value.Value{ .obj = try a.dupe(value.Field, &[_]value.Field{
         .{ .name = "m_Name", .value = .{ .string = "" } },
         .{ .name = "m_ParsedForm", .value = pf },
         .{ .name = "platforms", .value = .{ .array = &[_]value.Value{.{ .int = 4 }} } },
         .{ .name = "offsets", .value = .{ .array = &[_]value.Value{.{ .array = &[_]value.Value{.{ .uint = 0 }} }} } },
-        .{ .name = "compressedLengths", .value = .{ .array = &[_]value.Value{.{ .array = &[_]value.Value{.{ .uint = blob.len }} }} } },
-        .{ .name = "decompressedLengths", .value = .{ .array = &[_]value.Value{.{ .array = &[_]value.Value{.{ .uint = blob.len }} }} } },
+        .{ .name = "compressedLengths", .value = .{ .array = comp_tiers } },
+        .{ .name = "decompressedLengths", .value = .{ .array = decomp_tiers } },
         .{ .name = "compressedBlob", .value = .{ .bytes = blob } },
-    } };
+    }) };
 }
 
 test "skinInfo skins a vertex program with blend inputs and bone matrices" {
@@ -573,7 +593,7 @@ test "skinInfo skins a vertex program with blend inputs and bone matrices" {
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const blob = try buildSyntheticBlob(a, true);
-    const shader = buildShaderValue(blob);
+    const shader = try buildShaderValue(a, blob, blob.len);
     const info = (try skinInfo(a, shader)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(info.determined);
     try std.testing.expect(info.skins);
@@ -592,7 +612,7 @@ test "skinInfo does not skin a program with blend inputs but no bone matrices" {
     // The same blob minus the bone-matrix binding: bind channels 8/9 stay, so
     // blend_channels is true, but no bone binding means it does not skin.
     const blob = try buildSyntheticBlob(a, false);
-    const no_bone = buildShaderValue(blob);
+    const no_bone = try buildShaderValue(a, blob, blob.len);
     const info = (try skinInfo(a, no_bone)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(info.determined);
     try std.testing.expect(info.blend_channels);
@@ -667,8 +687,31 @@ test "verifies a synthetic shader blob round-trips" {
     defer arena.deinit();
     const a = arena.allocator();
     const blob = try buildSyntheticBlob(a, true);
-    const shader = buildShaderValue(blob);
+    const shader = try buildShaderValue(a, blob, blob.len);
+
+    // `verifyBlob` reports true both when every parameter record re-encodes
+    // and when there was no single-tier d3d11 blob to check at all, and
+    // `openD3d11Blob` has a dozen `return null` paths into that second
+    // answer. A bare `expect(try verifyBlob(...))` therefore stays green if
+    // the blob stops opening at all, with the round trip never run. Pin
+    // that the blob really opened and really carried both records first.
+    const opened = (try openD3d11Blob(a, shader)) orelse return error.SyntheticBlobDidNotOpen;
+    try std.testing.expectEqual(@as(usize, 2), opened.records.len);
     try std.testing.expect(try verifyBlob(a, shader));
+
+    // The other half of the property: a record whose bytes do not re-encode
+    // has to come back false, or the check above would hold for a
+    // `verifyBlob` that never compares anything. One extra byte inside the
+    // parameter record's declared length makes the re-encoding shorter than
+    // the bytes it was parsed from.
+    const padded = try a.alloc(u8, blob.len + 1);
+    @memcpy(padded[0..blob.len], blob);
+    padded[blob.len] = 0;
+    // Record table: a u32 count, then 12 bytes (offset, length, segment)
+    // per record; record 1 is the parameter blob.
+    const len_field = padded[4 + 12 + 4 ..][0..4];
+    std.mem.writeInt(u32, len_field, std.mem.readInt(u32, len_field, .little) + 1, .little);
+    try std.testing.expect(!try verifyBlob(a, try buildShaderValue(a, padded, padded.len)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1425,7 +1468,12 @@ test "shader blob decoder survives mutated payloads" {
             // tail is leftover bytes from an earlier iteration
             rnd.bytes(buf[source.len..blen]);
         }
-        const shader = buildShaderValue(buf[0..blen]);
+        // The LZ4 arm only reaches the decompressor when the two declared
+        // lengths disagree, so the compressed blobs have to announce what
+        // they expand to; equal lengths would send them down the plain path
+        // and leave `lz4.decompress` untouched by all 1000 of them.
+        const decomp_len = if (iter % 2 == 0) blen else plain.len;
+        const shader = try buildShaderValue(a, buf[0..blen], decomp_len);
         _ = verifyBlob(a, shader) catch continue;
         if (iter % 2 == 0) verified_plain += 1 else verified_lz4 += 1;
     }
