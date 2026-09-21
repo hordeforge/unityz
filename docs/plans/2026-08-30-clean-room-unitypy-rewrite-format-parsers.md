@@ -116,9 +116,15 @@ after this plan closed: `create <spec.json> --out <file>`
 (`serialized_writer.create` and `bundle.create`) authors a format-22
 SerializedFile and a UnityFS format-8 bundle from declared type trees and
 object values, where `bundle.rebuild`/`webfile.rebuild` only rewrite a
-parsed container. The other three non-goals still hold: class database
-download/caching, asset bundle encryption variants, and .NET assembly
-extraction beyond raw bytes.
+parsed container.
+
+The .NET non-goal was reopened too: `src/dotnet.zig`
+reads ECMA-335 assembly metadata directly, so `managed` lists every
+MonoBehaviour's serialized field layout and `managed --trees` builds
+type trees from it, and `extract` writes the decoded managed graph as a
+`script_<path_id>_<class>.json` sidecar next to the raw `.bin` payload.
+The other two non-goals still hold: class database download/caching and
+asset bundle encryption variants.
 
 ## Decisions and unknowns
 
@@ -325,7 +331,7 @@ output uses shortest round-trip digits instead of UnityPy's 9-digit
 format, so the text differs but every parsed value is the same f32).
 
 2026-08-30 (CLI correctness pass): `info --dump` JSON output is now fully
-valid: `value.jsonString` escaped quotes/backslash/newline/CR/tab but
+valid: `value.writeJsonString` escaped quotes/backslash/newline/CR/tab but
 passed control characters through raw, and Unity strings often carry
 trailing NULs (e.g. MonoScript class names), which would have produced
 invalid JSON. All remaining C0 controls and DEL are now written as
