@@ -450,6 +450,11 @@ container node (a `.resS`/`.resource` sidecar) replaces bytes at an
 offset without touching the object tree, keeping every sidecar reference
 valid.
 
+The two edit forms are exclusive. `--patch` carries every edit itself, so
+combining it with the positional `<path_id> <field> <json-value>`
+arguments is a usage error (exit 2) rather than a run that applies the
+patch and drops the positional edits.
+
 ## Stats
 
 `stats` reports per-class sizes and duplicate-object detection, with
@@ -496,6 +501,11 @@ Every command accepts a directory and runs over each regular file in it,
 except the two that consume a directory themselves: `diff` compares the
 two trees file-by-file, and `managed` reads a Mono build's assembly
 folder. Plain output streams through per file.
+
+Files are processed in byte order of their names, not in the order the
+filesystem lists them, so the same directory produces the same output on
+ext4 and on APFS. `diff` over two directories sorts its report the same
+way, which matters because the text report stops after ten lines.
 
 With `--json`, each file's output is wrapped as one line,
 `{"file":"<path>","results":[<doc>, ...]}`, so a consumer can tell which
@@ -545,7 +555,7 @@ without parsing output:
 Whole-file evidence: the real 7DTD bundle (Unity 2022.3.62f2, fully
 typeless) extracts to 8090 files with zero decode failures (260 PNGs,
 7130 JSONs, 7 OBJs, 6 audio files), and Raft (2021.3) data files
-round-trip 38,212/38,213 objects byte-exactly, the two exceptions using
+round-trip 38,212/38,213 objects byte-exactly, the one exception using
 custom serialization. See the rewrite plan's completion notes for the
 full per-pass evidence.
 

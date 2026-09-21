@@ -507,9 +507,10 @@ fn copyFromBlocks(
     while (written < dest.len) {
         const pos = stream_off + written;
         var found = false;
-        // The three slices are the parallel per-block arrays `parseFs`
-        // allocates at `blocks.len`; iterating them together is what states
-        // that, rather than indexing each by a shared `i` and hoping.
+        // The three slices are the parallel per-block arrays that
+        // `decompressMetadata` allocates at `blocks.len`; iterating them
+        // together is what states that, rather than indexing each by a
+        // shared `i` and hoping.
         for (payloads, starts, blocks) |slot, b_start, b| {
             const b_end = b_start + b.uncompressed_size;
             if (pos < b_start or pos >= b_end) continue;

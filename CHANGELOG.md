@@ -11,6 +11,41 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+### Changed
+
+- A command run over a directory processes its files in name order, and
+  `diff` over two directories sorts its report the same way, so the same
+  inputs give the same output on any filesystem.
+- `zig build` rejects big-endian and Windows targets at configure time
+  with a message naming the vendored LZHAM decoder as the reason,
+  instead of producing a silently wrong build or a C++ redefinition
+  error.
+- Trees files and sidecars are read once per run rather than once per
+  file in a batch.
+
+### Fixed
+
+- `edit --patch` combined with the positional
+  `<path_id> <field> <json-value>` arguments is a usage error (exit 2).
+  It used to apply the patch, drop the positional edits, and report
+  success.
+- RG16 and RG32 textures decode at their real lane width (two 8-bit and
+  two 16-bit integer channels). They were read at double the stride,
+  which rejected correctly sized payloads as a bad size and produced
+  garbage pixels for longer ones.
+- A Texture2D with a zero width or height reports a bad size instead of
+  panicking in the PVRTC decoder.
+- An object whose declared offset exceeds the host word size is rejected
+  instead of wrapping into an in-bounds slice on a 32-bit target, as are
+  file-supplied lengths that would wrap `usize` there.
+- An object whose byte range runs past the end of the file reports
+  `TruncatedObjectData` rather than `OutOfMemory`, a built-in tree
+  database that fails to decode is reported instead of swallowed, and a
+  sidecar scan that fails part-way keeps the sidecars it already found
+  instead of failing the whole command.
+- A missing value after an option is reported as a missing value rather
+  than as an unknown option.
+
 ## [0.1.10] - 2026-09-15
 
 ### Added

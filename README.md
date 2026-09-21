@@ -37,14 +37,18 @@ runs the suite on them.
 
 Two families are **not** supported, both because of the vendored LZHAM
 decoder (`src/vendor/lzham`), which UnityFS block compression type 4
-needs:
+needs. `build.zig` refuses both at configure time, so `-Dtarget=` for
+either fails with a message naming the reason rather than a C++ error or
+wrong output:
 
 - **Windows.** `lzham_platform.cpp` defines `sprintf_s` / `vsprintf_s` for
   every compiler that is not MSVC, and mingw-w64's `sec_api/stdio_s.h`
-  already defines both, so `-Dtarget=x86_64-windows-gnu` fails to compile.
+  already defines both, so `-Dtarget=x86_64-windows-gnu` would fail to
+  compile anyway, deep in vendored C++.
 - **Big-endian hosts.** `lzham_core.h` hardcodes
   `LZHAM_LITTLE_ENDIAN_CPU` and unaligned integer loads for every
-  non-MSVC target, so type 4 blocks would decode wrong there.
+  non-MSVC target, so type 4 blocks would decode wrong there - a build
+  that succeeds and silently produces wrong bytes.
 
 CI also blocks on formatting, shell lint, and Python lint for the
 generator scripts:

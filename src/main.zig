@@ -3132,10 +3132,9 @@ fn sanitizeComponent(name: []u8) []u8 {
 /// Creates a directory and any missing parents, tolerating an existing
 /// directory. Walks the path one component at a time with single-level
 /// `createDir` instead of std's `createDirPath`, which hangs on special
-/// filesystems such as /proc. Components come from the platform's path
-/// iterator rather than a hardcoded '/' split, so a `--outdir` written
-/// with the native separator (`a\b\c` on Windows) still creates parents,
-/// and the root prefix (`/`, `C:\`) is never handed to `createDir`.
+/// filesystems such as /proc. Components come from `std.fs.path`'s
+/// component iterator rather than a hardcoded '/' split, so an absolute
+/// `--outdir` never hands its root prefix (`/`) to `createDir`.
 fn ensureDirPath(io: std.Io, dir_path: []const u8) !void {
     if (dir_path.len == 0) return;
     if (std.Io.Dir.cwd().statFile(io, dir_path, .{})) |st| {
