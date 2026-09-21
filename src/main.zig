@@ -3,7 +3,7 @@
 //! Layout, in file order:
 //!
 //! 1. `usage`, then the small output helpers (`failure`, `diagnostic`,
-//!    `usageError`) every command reports through.
+//!    `usageError`, `jsonFloat`) every command reports through.
 //! 2. `main` — argument parsing, the global flags, and reading the input
 //!    file. It is the top of the flow and sits near the top of the file.
 //! 3. `Command`, `parseCommand` and `runCommand` — the dispatch table.
@@ -38,39 +38,6 @@ const readSpriteTriangles = unityz.classes.readSpriteTriangles;
 /// value model, which parses the same escaping back, so every JSON this
 /// CLI prints agrees byte for byte with the library's own.
 const writeJsonString = unityz.value.writeJsonString;
-
-/// Renders a float the way `unityz.value.jsonWrite` does when printed with
-/// `{f}`: the number when finite, `null` otherwise. Float fields are
-/// bit-cast straight out of the file, so any bit pattern - NaN, +/-Inf -
-/// reaches the hand-written JSON documents below, and `{d}` spells those as
-/// the bare words `nan` / `inf`, which no conforming JSON parser accepts.
-/// The library's own value-tree writer already emits `null` for them; this
-/// keeps the CLI's own documents agreeing with it.
-const JsonFloat = struct {
-    v: f64,
-
-    pub fn format(self: JsonFloat, w: *Io.Writer) Io.Writer.Error!void {
-        if (std.math.isFinite(self.v)) return w.print("{d}", .{self.v});
-        return w.writeAll("null");
-    }
-};
-
-/// `JsonFloat` shorthand for the print sites; pair it with `{f}`.
-fn jsonFloat(v: f64) JsonFloat {
-    return .{ .v = v };
-}
-
-test "jsonFloat spells non-finite floats null and leaves finite ones alone" {
-    var buf: [64]u8 = undefined;
-    var w: Io.Writer = .fixed(&buf);
-    try w.print("[{f},{f},{f},{f}]", .{
-        jsonFloat(1.5),
-        jsonFloat(std.math.nan(f64)),
-        jsonFloat(std.math.inf(f64)),
-        jsonFloat(-std.math.inf(f64)),
-    });
-    try std.testing.expectEqualStrings("[1.5,null,null,null]", w.buffered());
-}
 
 const usage =
     \\unityz — read, extract, and edit Unity assets
@@ -289,6 +256,39 @@ fn diagnostic(comptime fmt: []const u8, args: anytype) void {
     var w: Io.File.Writer = .initStreaming(.stderr(), io_global.io, &buf);
     w.interface.print(fmt, args) catch {};
     w.interface.flush() catch {};
+}
+
+/// Renders a float the way `unityz.value.jsonWrite` does when printed with
+/// `{f}`: the number when finite, `null` otherwise. Float fields are
+/// bit-cast straight out of the file, so any bit pattern - NaN, +/-Inf -
+/// reaches the hand-written JSON documents below, and `{d}` spells those as
+/// the bare words `nan` / `inf`, which no conforming JSON parser accepts.
+/// The library's own value-tree writer already emits `null` for them; this
+/// keeps the CLI's own documents agreeing with it.
+const JsonFloat = struct {
+    v: f64,
+
+    pub fn format(self: JsonFloat, w: *Io.Writer) Io.Writer.Error!void {
+        if (std.math.isFinite(self.v)) return w.print("{d}", .{self.v});
+        return w.writeAll("null");
+    }
+};
+
+/// `JsonFloat` shorthand for the print sites; pair it with `{f}`.
+fn jsonFloat(v: f64) JsonFloat {
+    return .{ .v = v };
+}
+
+test "jsonFloat spells non-finite floats null and leaves finite ones alone" {
+    var buf: [64]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try w.print("[{f},{f},{f},{f}]", .{
+        jsonFloat(1.5),
+        jsonFloat(std.math.nan(f64)),
+        jsonFloat(std.math.inf(f64)),
+        jsonFloat(-std.math.inf(f64)),
+    });
+    try std.testing.expectEqualStrings("[1.5,null,null,null]", w.buffered());
 }
 
 pub fn main(init: std.process.Init) !void {
