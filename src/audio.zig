@@ -204,8 +204,7 @@ fn decodeXboxIma(out: []i16, data: []const u8, channels: usize, sample_count: u3
             // the whole 64-sample block decodes to clipped noise. Reading it
             // unsigned also made the `< 0` clamp below unreachable.
             var step_index: i32 = @as(i8, @bitCast(data[header_off + 2]));
-            if (step_index < 0) step_index = 0;
-            if (step_index > 88) step_index = 88;
+            step_index = std.math.clamp(step_index, 0, 88);
             var i: usize = 0;
             while (i < block_samples and produced + i < sample_count) : (i += 1) {
                 if (i != 0) {
@@ -226,8 +225,7 @@ fn decodeXboxIma(out: []i16, data: []const u8, channels: usize, sample_count: u3
                     hist1 += delta;
                     hist1 = std.math.clamp(hist1, std.math.minInt(i16), std.math.maxInt(i16));
                     step_index += ima_index_table[@intCast(code)];
-                    if (step_index < 0) step_index = 0;
-                    if (step_index > 88) step_index = 88;
+                    step_index = std.math.clamp(step_index, 0, 88);
                 }
                 out[(produced + i) * channels + ch] = @intCast(hist1);
             }

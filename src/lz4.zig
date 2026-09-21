@@ -240,7 +240,7 @@ pub fn compress(allocator: std.mem.Allocator, src: []const u8) Error![]u8 {
 
     const hash4 = struct {
         fn at(s: []const u8, pos: usize) u32 {
-            const x = @as(u32, s[pos]) | (@as(u32, s[pos + 1]) << 8) | (@as(u32, s[pos + 2]) << 16) | (@as(u32, s[pos + 3]) << 24);
+            const x = std.mem.readInt(u32, s[pos..][0..4], .little);
             return (x *% 2654435761) >> 20; // 0..4095
         }
     }.at;

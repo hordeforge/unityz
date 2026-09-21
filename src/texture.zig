@@ -2000,49 +2000,15 @@ const AstcBlockData = struct {
 
 const AstcIntSeqData = struct { bits: u64, nonbits: u64 };
 
-const astcBitReverseTable = [_]u8{
-    0,  128, 64, 192, 32, 160, 96,  224, 16, 144, 80, 208, 48, 176, 112, 240,
-    8,  136, 72, 200, 40, 168, 104, 232, 24, 152, 88, 216, 56, 184, 120, 248,
-    4,  132, 68, 196, 36, 164, 100, 228, 20, 148, 84, 212, 52, 180, 116, 244,
-    12, 140, 76, 204, 44, 172, 108, 236, 28, 156, 92, 220, 60, 188, 124, 252,
-    2,  130, 66, 194, 34, 162, 98,  226, 18, 146, 82, 210, 50, 178, 114, 242,
-    10, 138, 74, 202, 42, 170, 106, 234, 26, 154, 90, 218, 58, 186, 122, 250,
-    6,  134, 70, 198, 38, 166, 102, 230, 22, 150, 86, 214, 54, 182, 118, 246,
-    14, 142, 78, 206, 46, 174, 110, 238, 30, 158, 94, 222, 62, 190, 126, 254,
-    1,  129, 65, 193, 33, 161, 97,  225, 17, 145, 81, 209, 49, 177, 113, 241,
-    9,  137, 73, 201, 41, 169, 105, 233, 25, 153, 89, 217, 57, 185, 121, 249,
-    5,  133, 69, 197, 37, 165, 101, 229, 21, 149, 85, 213, 53, 181, 117, 245,
-    13, 141, 77, 205, 45, 173, 109, 237, 29, 157, 93, 221, 61, 189, 125, 253,
-    3,  131, 67, 195, 35, 163, 99,  227, 19, 147, 83, 211, 51, 179, 115, 243,
-    11, 139, 75, 203, 43, 171, 107, 235, 27, 155, 91, 219, 59, 187, 123, 251,
-    7,  135, 71, 199, 39, 167, 103, 231, 23, 151, 87, 215, 55, 183, 119, 247,
-    15, 143, 79, 207, 47, 175, 111, 239, 31, 159, 95, 223, 63, 191, 127, 255,
-};
-
 /// Reverses the low `bits` bits of an 8-bit value.
 fn astcBitReverseU8(c: u8, bits: u8) u8 {
-    if (bits >= 8) return astcBitReverseTable[c];
-    return astcBitReverseTable[c] >> @intCast(8 -% bits);
+    if (bits >= 8) return @bitReverse(c);
+    return @bitReverse(c) >> @intCast(8 -% bits);
 }
 
-/// Reverses the low `bits` bits of a 64-bit value. Each byte selector is
-/// narrowed to usize before indexing: a `u64` index only coerces on targets
-/// where usize is 64-bit, so the bare form fails to build for 32-bit ones.
+/// Reverses the low `bits` bits of a 64-bit value.
 fn astcBitReverseU64(d: u64, bits: usize) u64 {
-    const byte = struct {
-        fn at(v: u64, shift: u6) usize {
-            return @intCast((v >> shift) & 0xff);
-        }
-    }.at;
-    const ret = (std.math.shl(u64, @as(u64, astcBitReverseTable[byte(d, 0)]), 56)) |
-        (@as(u64, astcBitReverseTable[byte(d, 8)]) << 48) |
-        (@as(u64, astcBitReverseTable[byte(d, 16)]) << 40) |
-        (@as(u64, astcBitReverseTable[byte(d, 24)]) << 32) |
-        (@as(u64, astcBitReverseTable[byte(d, 32)]) << 24) |
-        (@as(u64, astcBitReverseTable[byte(d, 40)]) << 16) |
-        (@as(u64, astcBitReverseTable[byte(d, 48)]) << 8) |
-        @as(u64, astcBitReverseTable[byte(d, 56)]);
-    return ret >> @intCast(64 -% bits);
+    return @bitReverse(d) >> @intCast(64 -% bits);
 }
 
 /// Reads `num` bits (LSB first) at absolute bit position `bit`, up to 32
