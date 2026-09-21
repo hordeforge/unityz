@@ -821,6 +821,14 @@ fn parseInjectedTrees(path: []const u8, stdout: *Io.Writer) !?*const InjectedTre
         }
     }
     if (trees_cache_state == null) trees_cache_state = .init(std.heap.page_allocator);
+    // A failing file is not memoized, so every file of a directory batch
+    // retries it - and each retry reads the whole trees file and parses it
+    // into this process-lifetime arena, which nothing ever resets. A
+    // tens-of-megabyte dump against a few hundred assets is gigabytes held
+    // to the end of the run. Nothing is live in the arena while no table is
+    // cached (a failed parse returns null and hands out no pointer into it),
+    // so the previous attempt's bytes go before this one allocates.
+    if (trees_cache_table == null) _ = trees_cache_state.?.reset(.retain_capacity);
     const arena = trees_cache_state.?.allocator();
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch |err| {
         failure("unityz: {s}: cannot read trees file: {s}\n", .{ path, @errorName(err) });
