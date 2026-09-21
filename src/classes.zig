@@ -2445,6 +2445,60 @@ test "renderSpriteMesh texture-maps a quad" {
     }
 }
 
+test "renderSpriteMesh rejects mesh and texture data it cannot render" {
+    // Positions, UVs, triangles and `m_PixelsToUnits` all come out of the
+    // asset file, and the extent conversion below the guards is an
+    // `@intFromFloat` that is illegal behavior on a negative, NaN or
+    // out-of-range value. Each guard therefore has to fire as an error
+    // rather than be reached, and each reports a different cause.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tex = [_]u8{0} ** (2 * 2 * 4);
+    const good = SpriteMesh{
+        .positions = &.{ .{ 0, 0, 0 }, .{ 2, 0, 0 }, .{ 0, 2, 0 }, .{ 2, 2, 0 } },
+        .uvs = &.{ .{ 0.25, 0.25 }, .{ 0.75, 0.25 }, .{ 0.25, 0.75 }, .{ 0.75, 0.75 } },
+        .triangles = &.{ 0, 1, 2, 1, 3, 2 },
+    };
+
+    // An empty mesh is checked before anything indexes position 0.
+    var empty = good;
+    empty.positions = &.{};
+    try std.testing.expectError(error.NoMesh, renderSpriteMesh(a, empty, 1, &tex, 2, 2));
+    empty = good;
+    empty.triangles = &.{};
+    try std.testing.expectError(error.NoMesh, renderSpriteMesh(a, empty, 1, &tex, 2, 2));
+    empty = good;
+    empty.uvs = &.{};
+    try std.testing.expectError(error.NoMesh, renderSpriteMesh(a, empty, 1, &tex, 2, 2));
+
+    // The texture must hold the dimensions it declares: one byte short is
+    // rejected, and exactly enough is not.
+    try std.testing.expectError(error.SizeMismatch, renderSpriteMesh(a, good, 1, tex[0 .. tex.len - 1], 2, 2));
+    _ = try renderSpriteMesh(a, good, 1, &tex, 2, 2);
+
+    // Fewer UVs than positions would index past the UV array per vertex.
+    var short_uvs = good;
+    short_uvs.uvs = &.{ .{ 0.25, 0.25 }, .{ 0.75, 0.25 }, .{ 0.25, 0.75 } };
+    try std.testing.expectError(error.BadMesh, renderSpriteMesh(a, short_uvs, 1, &tex, 2, 2));
+
+    // Extents that cannot be converted: NaN, negative, and past the
+    // 65536-pixel bound. The bound is inclusive, so the largest accepted
+    // scale still renders - 2 units at 32768 px/unit is exactly 65536.
+    var nan_pos = good;
+    nan_pos.positions = &.{ .{ std.math.nan(f32), 0, 0 }, .{ 2, 0, 0 }, .{ 0, 2, 0 }, .{ 2, 2, 0 } };
+    try std.testing.expectError(error.BadMesh, renderSpriteMesh(a, nan_pos, 1, &tex, 2, 2));
+    try std.testing.expectError(error.BadMesh, renderSpriteMesh(a, good, -1, &tex, 2, 2));
+    try std.testing.expectError(error.BadMesh, renderSpriteMesh(a, good, 32769, &tex, 2, 2));
+    // Flat in y, so the accepted extreme costs one row rather than a
+    // 65536-square buffer.
+    var flat = good;
+    flat.positions = &.{ .{ 0, 0, 0 }, .{ 2, 0, 0 }, .{ 0, 0, 0 }, .{ 2, 0, 0 } };
+    const widest = try renderSpriteMesh(a, flat, 32768, &tex, 2, 2);
+    try std.testing.expectEqual(@as(u32, 65536), widest.w);
+    try std.testing.expectError(error.BadMesh, renderSpriteMesh(a, flat, 32769, &tex, 2, 2));
+}
+
 test "className covers the UnityPy class ID table" {
     // TextAsset (49) and MonoScript (115) are the ids the enum assigns;
     // 100 is unassigned and 238 is NavMeshData, not ParticleSystem (198).

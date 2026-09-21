@@ -432,6 +432,35 @@ test "rewrite rejects legacy formats and unknown path ids" {
     try std.testing.expectError(error.UnsupportedFormat, rewrite(a, &unsupported, &.{}));
     unsupported.version = 23;
     try std.testing.expectError(error.UnsupportedFormat, rewrite(a, &unsupported, &.{}));
+
+    // An object table bounded by the *declared* file size outlives a
+    // truncated image: the prefix below parses, and only the rewrite
+    // notices that an object's range is not there. It has to say so rather
+    // than report the `OutOfMemory` the missing payload used to raise, and
+    // it must not write a file with the object silently dropped.
+    const v22 = try buildV22Fixture(a);
+    const truncated = try serialized.parse(a, v22[0..@intCast(try dataOffsetOf(v22))]);
+    try std.testing.expect(truncated.objects.len > 0);
+    try std.testing.expect(truncated.objectData(&truncated.objects[0]) == null);
+    try std.testing.expectError(error.TruncatedObjectData, rewrite(a, &truncated, &.{}));
+    // Replacing one object does not excuse the rest: the second object's
+    // range is still missing.
+    try std.testing.expectError(error.TruncatedObjectData, rewrite(a, &truncated, &.{.{
+        .path_id = truncated.objects[0].path_id,
+        .data = "x",
+    }}));
+
+    // The whole point of the error is that the same file rewrites cleanly
+    // once the data section is present, so the rejection is about the
+    // truncation and not about the fixture.
+    const whole = try serialized.parse(a, v22);
+    _ = try rewrite(a, &whole, &.{});
+}
+
+/// The declared start of the data section, so a test can cut a file down to
+/// exactly the metadata a truncated asset still carries.
+fn dataOffsetOf(bytes: []const u8) !u64 {
+    return (try serialized.readHeader(bytes)).data_offset;
 }
 
 test "parse and rewrite a v4 file byte-exactly" {

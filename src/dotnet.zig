@@ -1292,3 +1292,83 @@ test "signature reader bounds its own recursion" {
     var r = streams.Reader.init(&deep);
     try std.testing.expectError(error.Corrupt, readTypeName(a, &r, &td, &heaps, 0));
 }
+
+/// A PE32 image shaped like a managed assembly, up to but not including the
+/// metadata root, so the tests below can walk `parseAssembly` past each of
+/// its container checks one at a time. `magic`, `cli_rva` and `meta_rva` are
+/// the three fields those checks read; every other field is whatever a real
+/// image would hold.
+///
+/// Offsets, all fixed by the PE layout the parser assumes: `e_lfanew` 0x80,
+/// COFF header 0x84, optional header 0x98, data directories 0xf8 (PE32) with
+/// entry 14 at 0x168, section table 0x178 (optional header size 224). The
+/// single section maps RVA 0x2000 onto file offset 0x200.
+fn buildPeFixture(a: std.mem.Allocator, magic: u16, cli_rva: u32, meta_rva: u32) ![]u8 {
+    const bytes = try a.alloc(u8, 0x600);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..2], "MZ");
+    std.mem.writeInt(u32, bytes[0x3c..][0..4], 0x80, .little); // e_lfanew
+    @memcpy(bytes[0x80..][0..4], "PE\x00\x00");
+    std.mem.writeInt(u16, bytes[0x84..][0..2], 0x014c, .little); // machine i386
+    std.mem.writeInt(u16, bytes[0x86..][0..2], 1, .little); // one section
+    std.mem.writeInt(u16, bytes[0x94..][0..2], 224, .little); // optional header size
+    std.mem.writeInt(u16, bytes[0x98..][0..2], magic, .little);
+    std.mem.writeInt(u32, bytes[0x168..][0..4], cli_rva, .little); // data directory 14
+    std.mem.writeInt(u32, bytes[0x16c..][0..4], 72, .little); // ... and its size
+    @memcpy(bytes[0x178..][0..5], ".text");
+    std.mem.writeInt(u32, bytes[0x180..][0..4], 0x400, .little); // virtual size
+    std.mem.writeInt(u32, bytes[0x184..][0..4], 0x2000, .little); // virtual address
+    std.mem.writeInt(u32, bytes[0x188..][0..4], 0x400, .little); // size of raw data
+    std.mem.writeInt(u32, bytes[0x18c..][0..4], 0x200, .little); // pointer to raw data
+    // CLI header at RVA 0x2000 / offset 0x200; metadata RVA at its offset 8.
+    std.mem.writeInt(u32, bytes[0x208..][0..4], meta_rva, .little);
+    std.mem.writeInt(u32, bytes[0x20c..][0..4], 0x100, .little); // metadata size
+    return bytes;
+}
+
+test "parseAssembly reports each malformed container as its own error" {
+    // A .NET assembly reaches this parser out of an asset bundle, so every
+    // offset in it is attacker-controlled. The module contract is that a
+    // malformed one fails with a parse error and never a crash; pin the
+    // specific error at each container boundary, so a check that stops
+    // firing shows up as the wrong error rather than as a later,
+    // harder-to-read failure deeper in the metadata reader.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Too short to hold even `e_lfanew`.
+    try std.testing.expectError(error.OutOfBounds, parseAssembly(a, "x", &.{}));
+    try std.testing.expectError(error.OutOfBounds, parseAssembly(a, "x", &[_]u8{0} ** 16));
+    // Long enough, but no "PE\0\0" where `e_lfanew` points.
+    try std.testing.expectError(error.NotPe, parseAssembly(a, "x", &[_]u8{0} ** 256));
+
+    // A PE whose optional header is neither PE32 (0x10b) nor PE32+ (0x20b):
+    // the data directories are at a different offset in each, so an
+    // unrecognised magic has no directory 14 to read and must not be
+    // guessed at.
+    const bad_magic = try buildPeFixture(a, 0x0107, 0x2000, 0x2100);
+    try std.testing.expectError(error.NotPe, parseAssembly(a, "x", bad_magic));
+
+    // Directory 14 present but its RVA covered by no section: the image is
+    // a plain native PE, not a managed one.
+    const no_cli = try buildPeFixture(a, 0x010b, 0, 0x2100);
+    try std.testing.expectError(error.NoCliHeader, parseAssembly(a, "x", no_cli));
+    const cli_past_sections = try buildPeFixture(a, 0x010b, 0x9000, 0x2100);
+    try std.testing.expectError(error.NoCliHeader, parseAssembly(a, "x", cli_past_sections));
+
+    // CLI header found, metadata RVA not mapped.
+    const no_meta = try buildPeFixture(a, 0x010b, 0x2000, 0x9000);
+    try std.testing.expectError(error.NoMetadata, parseAssembly(a, "x", no_meta));
+
+    // Metadata root mapped but not opening with "BSJB". The fixture leaves
+    // those four bytes zeroed, which is exactly that case.
+    const bad_sig = try buildPeFixture(a, 0x010b, 0x2000, 0x2100);
+    try std.testing.expectError(error.NoMetadata, parseAssembly(a, "x", bad_sig));
+    // With the signature in place the root parses on, and the stream
+    // directory it then reads is empty, so no #Strings heap is found. This
+    // is the case that proves the check above fired on the signature and
+    // not on something earlier.
+    @memcpy(bad_sig[0x300..][0..4], "BSJB");
+    try std.testing.expectError(error.NoMetadata, parseAssembly(a, "x", bad_sig));
+}

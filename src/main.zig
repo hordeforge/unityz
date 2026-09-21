@@ -10924,6 +10924,45 @@ test "writeObjFloat matches Python's %.9g" {
     try std.testing.expectEqual(@as(usize, 0), w.getWritten().len);
 }
 
+test "wavPcm16 rejects clip headers that cannot make a usable WAV" {
+    // Every argument is a clip field straight off disk, and `wav.encode`
+    // below asserts rather than checks, so `wavPcm16` is the only place a
+    // hostile header is turned into an error instead of a panic or a
+    // wrapped field. Exercise both sides of each guard: the largest header
+    // that still encodes, and the smallest one past it.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pcm = [_]u8{ 1, 2, 3, 4 };
+
+    // A plain stereo 16-bit clip encodes, header fields intact.
+    const ok = try wavPcm16(a, &pcm, 2, 44100, 16);
+    try std.testing.expectEqual(@as(usize, 44 + pcm.len), ok.len);
+    try std.testing.expectEqualStrings("RIFF", ok[0..4]);
+    try std.testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, ok[22..24], .little));
+    try std.testing.expectEqual(@as(u32, 44100), std.mem.readInt(u32, ok[24..28], .little));
+    try std.testing.expectEqual(@as(u32, 44100 * 4), std.mem.readInt(u32, ok[28..32], .little));
+    try std.testing.expectEqual(@as(u16, 4), std.mem.readInt(u16, ok[32..34], .little));
+
+    // A rate of 0 is what an FSB5 frequency code FMOD rejects, and an
+    // AudioClip with no `m_Frequency`, both reduce to.
+    try std.testing.expectError(error.WavZeroSampleRate, wavPcm16(a, &pcm, 2, 0, 16));
+    // A sub-byte width floors the block align to 0 from nonzero fields.
+    try std.testing.expectError(error.WavZeroBlockAlign, wavPcm16(a, &pcm, 1, 44100, 4));
+    // `channels` and `bits` are bounded before the products are taken, so
+    // the u16 boundary is where they stop being encodable.
+    try std.testing.expectError(error.WavFieldOverflow, wavPcm16(a, &pcm, std.math.maxInt(u16) + 1, 44100, 16));
+    try std.testing.expectError(error.WavFieldOverflow, wavPcm16(a, &pcm, 2, 44100, std.math.maxInt(u16) + 1));
+    // The block-align transition: 8 channels at 65535 bits lands exactly on
+    // 0xffff and still encodes; one more channel overruns the u16 field.
+    const widest = try wavPcm16(a, &pcm, 8, 1, std.math.maxInt(u16));
+    try std.testing.expectEqual(@as(u16, std.math.maxInt(u16)), std.mem.readInt(u16, widest[32..34], .little));
+    try std.testing.expectError(error.WavFieldOverflow, wavPcm16(a, &pcm, 9, 1, std.math.maxInt(u16)));
+    // The byte rate overruns its u32 field long before the rate itself
+    // overruns the field it is read from.
+    try std.testing.expectError(error.WavFieldOverflow, wavPcm16(a, &pcm, 2, std.math.maxInt(u32), 16));
+}
+
 test "parseFieldPath splits dotted and indexed paths" {
     const p1 = try parseFieldPath(std.heap.page_allocator, "m_Name");
     try std.testing.expectEqual(@as(usize, 1), p1.len);

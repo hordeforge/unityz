@@ -500,6 +500,18 @@ test "rebuildOgg rejects a wrapping data offset and skips unknown setups" {
         .channels = 1,
         .frequency = 8000,
     }));
+
+    // A zero rate is corrupt bank metadata, not a fall-back-to-another-path
+    // null: the identification packet copies it verbatim and Vorbis I calls
+    // such a stream undecodable, so it must be an error even though the
+    // setup header is catalogued and the offsets are in range.
+    try std.testing.expectError(error.Corrupt, rebuildOgg(a, &raw, 0, .{
+        .data_offset = 0,
+        .sample_count = 4,
+        .channels = 1,
+        .frequency = 0,
+        .vorbis_crc = headers.crcs[0],
+    }));
 }
 
 test "ogg stream page framing" {
