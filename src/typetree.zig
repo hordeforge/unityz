@@ -345,14 +345,32 @@ const common_strings = [_][]const u8{
     "Hash128",             "RenderingLayerMask",  "fixed_array",
 };
 
-/// Looks up a common string by its offset (cumulative length + 1).
-pub fn getCommonString(offset: u32) ?[]const u8 {
+/// Offset -> index into `common_strings`, built at compile time. Offsets
+/// are cumulative, so the whole table spans ~1200 of them and one byte
+/// each (index + 1, zero meaning "no string starts here") indexes it
+/// directly. Blob parsing resolves two offsets per node and most of them
+/// hit this table, so the cumulative walk it replaces - half the 111
+/// entries on average - was paid twice per node of every tree read.
+const common_string_index = blk: {
+    @setEvalBranchQuota(20000);
+    std.debug.assert(common_strings.len < std.math.maxInt(u8));
+    var span: u32 = 0;
+    for (common_strings) |s| span += @as(u32, @intCast(s.len)) + 1;
+    var table = [_]u8{0} ** span;
     var cum: u32 = 0;
-    for (common_strings) |s| {
-        if (cum == offset) return s;
+    for (common_strings, 0..) |s, i| {
+        table[cum] = @intCast(i + 1);
         cum += @as(u32, @intCast(s.len)) + 1;
     }
-    return null;
+    break :blk table;
+};
+
+/// Looks up a common string by its offset (cumulative length + 1).
+pub fn getCommonString(offset: u32) ?[]const u8 {
+    if (offset >= common_string_index.len) return null;
+    const slot = common_string_index[offset];
+    if (slot == 0) return null;
+    return common_strings[slot - 1];
 }
 
 /// Name -> offset over `common_strings`, built at compile time. The table
