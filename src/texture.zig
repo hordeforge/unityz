@@ -1487,6 +1487,12 @@ fn decodePvrtc(out: []u8, w: usize, h: usize, data: []const u8, is2bpp: bool) Er
     const num_blocks_y = ceilDiv(h, 4);
     const num_blocks = num_blocks_x * num_blocks_y;
     const min_num_blocks = @min(num_blocks_x, num_blocks_y);
+    // A zero dimension leaves zero blocks on that side, and `n - 1` below
+    // underflows on it. `m_Width`/`m_Height` are read straight out of the
+    // asset and default to 0 when the field is absent, so a crafted
+    // Texture2D reaches here with one - reject it as a bad size rather
+    // than panicking mid-extract.
+    if (num_blocks_x == 0 or num_blocks_y == 0) return error.BadSize;
     // PVRTC requires each side's block count to be a power of two
     if (num_blocks_x & (num_blocks_x - 1) != 0 or num_blocks_y & (num_blocks_y - 1) != 0)
         return error.UnsupportedFormat;
