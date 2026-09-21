@@ -31,7 +31,7 @@ jobs:
       # new ruff release adding rules cannot turn a green tree red on an
       # unrelated PR, and so a local run matches what CI enforces.
       - name: Lint Python scripts
-        run: pipx run ruff==0.16.6 check scripts
+        run: pipx run ruff==0.16.8 check scripts
 
   # The README names four targets beyond the two runners below as "known to
   # build". A platform that is only asserted is not supported: compile each of

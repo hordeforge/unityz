@@ -52,7 +52,7 @@ generator scripts:
 ```bash
 zig fmt --check build.zig build.zig.zon src
 shellcheck scripts/*.sh
-pipx run ruff==0.16.6 check scripts
+pipx run ruff==0.16.8 check scripts
 ```
 
 ## What you can do
