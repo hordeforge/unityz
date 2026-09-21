@@ -33,6 +33,11 @@ pub const Error = error{
     UnsupportedFormat,
     ObjectNotFound,
     MissingTypeIndex,
+    /// An object's declared byte range falls outside the file. The object
+    /// table is validated against the file size the *header* declares,
+    /// which a truncated file may set past the bytes actually present, so
+    /// such a range survives the parse and only fails here.
+    TruncatedObjectData,
     OutOfMemory,
 };
 
@@ -82,7 +87,11 @@ pub fn rewrite(allocator: std.mem.Allocator, sf: *const serialized.SerializedFil
                 break;
             }
         }
-        if (!replaced_obj) payload = sf.objectData(o) orelse return error.OutOfMemory;
+        // A range outside the file is a truncated asset, not an
+        // allocation failure. `readEditableObject` already reports it that
+        // way on the read side; calling it `OutOfMemory` here sent the
+        // operator looking at the machine instead of at the file.
+        if (!replaced_obj) payload = sf.objectData(o) orelse return error.TruncatedObjectData;
         new_sizes[i] = @intCast(payload.len);
         try data.writeBytes(payload);
     }

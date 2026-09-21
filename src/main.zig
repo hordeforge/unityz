@@ -2196,7 +2196,18 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
         if (path_filter) |pf| {
             if (o.path_id != pf) continue;
         }
-        const data = sf.objectData(o) orelse continue;
+        // A declared range outside the file is a truncated asset, not an
+        // object to pass over in silence: the object table is bounded by
+        // the file size the *header* declares, so a truncated file drops
+        // objects here. Dropping them without a word made `extract` report
+        // "N assets extracted, 0 skipped" over a file it had only partly
+        // read - the count looked like the whole file.
+        const data = sf.objectData(o) orelse {
+            try stdout.print("  object {d} (class {d}): serialized data range is outside the file\n", .{ o.path_id, o.class_id });
+            if (summary) |sm| sm.skipped += 1;
+            skipped += 1;
+            continue;
+        };
         if (raw) {
             // raw mode: dump every object's serialized bytes as-is
             var name_buf: [object_file_name_len]u8 = undefined;
@@ -2206,8 +2217,21 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
             extracted += 1;
             continue;
         }
-        const type_index = o.type_index orelse continue;
-        if (type_index >= sf.types.len) continue;
+        // Same reasoning as the range check above: a missing or
+        // out-of-range type index is corrupt metadata, and `show` already
+        // reports both by name rather than skipping the object quietly.
+        const type_index = o.type_index orelse {
+            try stdout.print("  object {d} (class {d}): missing type index\n", .{ o.path_id, o.class_id });
+            if (summary) |sm| sm.skipped += 1;
+            skipped += 1;
+            continue;
+        };
+        if (type_index >= sf.types.len) {
+            try stdout.print("  object {d} (class {d}): type index is out of range\n", .{ o.path_id, o.class_id });
+            if (summary) |sm| sm.skipped += 1;
+            skipped += 1;
+            continue;
+        }
         var tree = sf.types[type_index].type_tree;
         if (tree.roots.len == 0) {
             if (o.class_id == 128 or o.class_id == 72) {
@@ -3178,9 +3202,22 @@ fn writeFileToCwd(name: []const u8, contents: []const u8) !void {
     // One extracted object per call, so keeping the joined path would leak a
     // page-rounded allocation per file written.
     defer if (full_owned) std.heap.page_allocator.free(full);
-    const file = try dir.createFile(io, full, .{});
+    // Name the output file and the failing step here. A bare `try` sent the
+    // error up to main(), which prints the *input* path - "unityz:
+    // bundle.unity3d: AccessDenied" about a file that read fine. And a
+    // failed write raises `error.WriteFailed`, the same error a closed
+    // stdout pipe raises, which main() answers with a silent exit 141: a
+    // full disk mid-extract looked exactly like `| head` and said nothing.
+    // `error.OutputWriteFailed` keeps the two apart.
+    const file = dir.createFile(io, full, .{}) catch |err| {
+        diagnostic("unityz: {s}: cannot create output file: {s}\n", .{ full, @errorName(err) });
+        return error.OutputWriteFailed;
+    };
     defer file.close(io);
-    try file.writeStreamingAll(io, contents);
+    file.writeStreamingAll(io, contents) catch |err| {
+        diagnostic("unityz: {s}: write failed: {s}\n", .{ full, @errorName(err) });
+        return error.OutputWriteFailed;
+    };
 }
 
 /// Memoizes the path-id index the per-object lookups resolve through.
@@ -9891,7 +9928,14 @@ fn cmdTrees(path: []const u8, rest: []const []const u8, bytes: []const u8, stdou
             return;
         };
         defer file.close(io);
-        try file.writeStreamingAll(io, out_bytes);
+        // `error.WriteFailed` from the output file is the same error a
+        // closed stdout pipe raises, and main() answers that with a silent
+        // exit 141. Report it here so a full disk is not mistaken for
+        // `| head`.
+        file.writeStreamingAll(io, out_bytes) catch |err| {
+            failure("unityz: {s}: write failed: {s}\n", .{ op, @errorName(err) });
+            return;
+        };
         try stdout.print("trees: {d} class tree(s), {d} script tree(s) written to {s}\n", .{ class_trees.count(), script_trees.count(), op });
     } else {
         try stdout.writeAll(out_bytes);
@@ -9980,7 +10024,14 @@ fn cmdTreesBuiltin(rest: []const []const u8, stdout: *Io.Writer) !void {
             return;
         };
         defer file.close(io);
-        try file.writeStreamingAll(io, out_bytes);
+        // `error.WriteFailed` from the output file is the same error a
+        // closed stdout pipe raises, and main() answers that with a silent
+        // exit 141. Report it here so a full disk is not mistaken for
+        // `| head`.
+        file.writeStreamingAll(io, out_bytes) catch |err| {
+            failure("unityz: {s}: write failed: {s}\n", .{ op, @errorName(err) });
+            return;
+        };
         try stdout.print("trees: {d} built-in class tree(s) for Unity {s} written to {s}\n", .{ if (class_filter != null) @as(usize, 1) else db.classes.len, release, op });
     } else {
         try stdout.writeAll(out_bytes);
@@ -10319,7 +10370,12 @@ fn buildManagedTrees(arena: std.mem.Allocator, path: []const u8, files: *const M
         return;
     };
     defer file.close(io);
-    try file.writeStreamingAll(io, out_bytes);
+    // See the `--out` writers above: a bare `try` here reaches main() as
+    // `error.WriteFailed` and exits 141 without a word.
+    file.writeStreamingAll(io, out_bytes) catch |err| {
+        failure("unityz: {s}: write failed: {s}\n", .{ out_path, @errorName(err) });
+        return;
+    };
     try stdout.print("wrote {s} ({d} script tree(s), {d} mono-script mapping(s))\n", .{ out_path, trees_written, monos.items.len });
 }
 
