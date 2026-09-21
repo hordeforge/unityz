@@ -4,6 +4,35 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // The two target families README documents as unsupported, refused here
+    // rather than only asserted in prose. Both come from the vendored LZHAM
+    // decoder (src/vendor/lzham), which UnityFS block compression type 4
+    // needs, and neither is something a user can discover for themselves:
+    //
+    // - Big-endian. `lzham_core.h` takes its `__GNUC__` branch for every
+    //   target Zig compiles and that branch hardcodes
+    //   `LZHAM_LITTLE_ENDIAN_CPU 1` with no architecture test, so a
+    //   big-endian build succeeds and then decodes type 4 blocks to wrong
+    //   bytes with no diagnostic anywhere. Silent wrong output is the worst
+    //   outcome available, so it has to fail at configure time.
+    // - Windows. `lzham_platform.cpp` defines `sprintf_s` / `vsprintf_s`
+    //   for every compiler that is not MSVC, and mingw-w64's
+    //   `sec_api/stdio_s.h` already defines both. That build does fail on
+    //   its own, but as a redefinition error deep in vendored C++ that says
+    //   nothing about the project not supporting the target.
+    if (target.result.cpu.arch.endian() != .little) std.debug.panic(
+        "unsupported target {s}: unityz builds little-endian only, because the " ++
+            "vendored LZHAM decoder in src/vendor/lzham hardcodes a little-endian " ++
+            "CPU and would decode UnityFS block compression type 4 to wrong bytes",
+        .{@tagName(target.result.cpu.arch)},
+    );
+    if (target.result.os.tag == .windows) std.debug.panic(
+        "unsupported target: unityz does not build for Windows, because the " ++
+            "vendored LZHAM decoder in src/vendor/lzham defines sprintf_s and " ++
+            "vsprintf_s for every non-MSVC compiler and mingw-w64 already defines both",
+        .{},
+    );
+
     // Public library module; consumers import it as `@import("unityz")`.
     const lib = b.addModule("unityz", .{
         .root_source_file = b.path("src/lib.zig"),

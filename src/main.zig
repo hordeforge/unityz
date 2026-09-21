@@ -422,16 +422,35 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.eql(u8, r, "--json")) break true;
         } else false;
         var it = dir.iterate();
+        // The whole directory is listed and sorted before the first file is
+        // read: `iterate` yields entries in the filesystem's own order, so
+        // `unityz info dir/` over one directory printed its files in one
+        // order on ext4 and another on APFS, and a batch run was not
+        // diffable against the same run on the other CI platform. Only the
+        // names are held - the contents still go through `batch_arena` one
+        // file at a time - and they go in the process arena because
+        // `batch_arena` is reset between files.
+        var entries: std.ArrayList([]const u8) = .empty;
         // An iteration error is not propagated: leaving `main` with it would
-        // drop the buffered stdout of every file already processed and print
-        // a bare error name that never says which directory stopped being
-        // readable. Report the directory, keep what was written, fail the run.
+        // print a bare error name that never says which directory stopped
+        // being readable. Report the directory and fail the run.
         while (it.next(io) catch |err| {
             bailFlush(stdout);
             try stderr.print("unityz: {s}: directory scan failed: {s}\n", .{ path, @errorName(err) });
             try stderr.flush();
             std.process.exit(1);
         }) |entry| {
+            if (entry.kind != .file) continue;
+            // `entry.name` borrows the iterator's buffer, which the next
+            // `next()` overwrites.
+            try entries.append(arena, try arena.dupe(u8, entry.name));
+        }
+        std.mem.sort([]const u8, entries.items, {}, struct {
+            fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+                return std.mem.lessThan(u8, x, y);
+            }
+        }.lessThan);
+        for (entries.items) |entry_name| {
             defer {
                 // Every arena the memoizing lookups parse into is created
                 // and destroyed inside `runCommand`, at the same stack
@@ -444,8 +463,7 @@ pub fn main(init: std.process.Init) !void {
                 dropAllCached();
                 _ = batch_arena_state.reset(.retain_capacity);
             }
-            if (entry.kind != .file) continue;
-            const full = try std.fmt.allocPrint(batch_arena, "{s}/{s}", .{ path, entry.name });
+            const full = try std.fmt.allocPrint(batch_arena, "{s}/{s}", .{ path, entry_name });
             var mapped = if (command == .info and !infoNeedsPayloads(rest))
                 mapFileRead(full) catch null
             else
@@ -6361,6 +6379,19 @@ fn diffDirectories(io: std.Io, dir_a: []const u8, dir_b: []const u8, json: bool,
         try files_b.append(std.heap.page_allocator, .{ .name = full[dir_b.len + 1 ..], .hash = std.hash.Wyhash.hash(0, data), .size = data.len });
         std.heap.page_allocator.free(data);
     }
+
+    // `iterate` hands entries back in the filesystem's own order, which is
+    // not the same on ext4 as on APFS, so the same two trees diffed on
+    // Linux and on macOS produced differently ordered reports - and,
+    // because the text output stops after ten lines, a different ten.
+    // Sort by name so a tree diff is a function of the trees alone.
+    const byName = struct {
+        fn lessThan(_: void, x: DirFile, y: DirFile) bool {
+            return std.mem.lessThan(u8, x.name, y.name);
+        }
+    }.lessThan;
+    std.mem.sort(DirFile, files_a.items, {}, byName);
+    std.mem.sort(DirFile, files_b.items, {}, byName);
 
     var unchanged: usize = 0;
     var changed: usize = 0;
