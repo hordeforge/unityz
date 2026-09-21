@@ -473,6 +473,11 @@ pub fn main(init: std.process.Init) !void {
                 try stderr.print("unityz: {s}: {s}\n", .{ full, @errorName(err) });
                 try stderr.flush();
                 command_failed_flag = true;
+                // `--json` is one line per file: dropping the line for a file
+                // that could not be opened at all (permissions, a race with a
+                // writer) left the consumer with no record of it, while the
+                // same file failing to decode got a line carrying "error".
+                if (json_batch) try writeBatchJson(stdout, full, "", err);
                 continue;
             };
             // In --json batch mode each file's output is captured and wrapped
