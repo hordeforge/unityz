@@ -543,8 +543,8 @@ pub fn decode(allocator: std.mem.Allocator, tex_format: i32, width: u32, height:
         format.bc5 => try decodeBc5(out, w, h, data),
         format.bc7 => try decodeBc7(out, w, h, data),
         format.bc6h => decodeBc6(out, w, h, data),
-        format.pvrtc_rgb2, format.pvrtc_rgba2 => try decodePvrtc(out, w, h, data, true),
-        format.pvrtc_rgb4, format.pvrtc_rgba4 => try decodePvrtc(out, w, h, data, false),
+        format.pvrtc_rgb2, format.pvrtc_rgba2 => try decodePvrtc(allocator, out, w, h, data, true),
+        format.pvrtc_rgb4, format.pvrtc_rgba4 => try decodePvrtc(allocator, out, w, h, data, false),
         format.atc_rgb4 => try decodeAtc(out, w, h, data, false),
         format.atc_rgba8 => try decodeAtc(out, w, h, data, true),
         format.eac_r => try decodeEac(out, w, h, data, .r_unsigned),
@@ -1481,9 +1481,9 @@ fn pvrtcApplicate2(info: [*]*PvrtcTexelInfo, buf: *[32]u32) void {
     }
 }
 
-fn decodePvrtc(out: []u8, w: usize, h: usize, data: []const u8, is2bpp: bool) Error!void {
+fn decodePvrtc(allocator: std.mem.Allocator, out: []u8, w: usize, h: usize, data: []const u8, is2bpp: bool) Error!void {
     const bw: usize = if (is2bpp) 8 else 4;
-    const num_blocks_x = if (is2bpp) ceilDiv(w, 8) else ceilDiv(w, 4);
+    const num_blocks_x = ceilDiv(w, bw);
     const num_blocks_y = ceilDiv(h, 4);
     const num_blocks = num_blocks_x * num_blocks_y;
     const min_num_blocks = @min(num_blocks_x, num_blocks_y);
@@ -1498,8 +1498,8 @@ fn decodePvrtc(out: []u8, w: usize, h: usize, data: []const u8, is2bpp: bool) Er
         return error.UnsupportedFormat;
     if (data.len < num_blocks * 8) return error.BadSize;
 
-    const texel_info = try std.heap.page_allocator.alloc(PvrtcTexelInfo, num_blocks);
-    defer std.heap.page_allocator.free(texel_info);
+    const texel_info = try allocator.alloc(PvrtcTexelInfo, num_blocks);
+    defer allocator.free(texel_info);
     for (0..num_blocks) |i| {
         pvrtcGetTexelColors(data[i * 8 ..][0..8], &texel_info[i]);
         if (is2bpp) pvrtcGetTexelWeights2(data[i * 8 ..][0..8], &texel_info[i]) else pvrtcGetTexelWeights4(data[i * 8 ..][0..8], &texel_info[i]);

@@ -4095,7 +4095,7 @@ fn writeMeshObj(
     v: unityz.value.Value,
     mesh: *const unityz.classes.Mesh,
 ) ![]const u8 {
-    if (unityz.classes.intField(v, "m_MeshCompression") orelse 0 != 0) return &.{};
+    if ((unityz.classes.intField(v, "m_MeshCompression") orelse 0) != 0) return &.{};
     const vch = mesh.channel(0) orelse return &.{};
     if (vch.format != 0 or vch.dimension < 3) return &.{};
     const vcount: usize = mesh.vertex_count;
@@ -4233,7 +4233,7 @@ fn writeMeshGlb(
     mesh: *const unityz.classes.Mesh,
     bone_names: ?[]const []const u8,
 ) ![]const u8 {
-    if (unityz.classes.intField(v, "m_MeshCompression") orelse 0 != 0) return &.{};
+    if ((unityz.classes.intField(v, "m_MeshCompression") orelse 0) != 0) return &.{};
     const vch = mesh.channel(0) orelse return &.{};
     if (vch.format != 0 or vch.dimension < 3) return &.{};
     const vcount: usize = mesh.vertex_count;
@@ -8589,16 +8589,14 @@ fn editSerializedObject(arena: std.mem.Allocator, bytes: []const u8, path_id: i6
             diagnostic("unityz: bad value '{s}': {s}\n", .{ pairs[pair + 1], @errorName(err) });
             return err;
         };
-        const segs = parseFieldPath(pairs[pair]) catch |err| {
+        const segs = parseFieldPath(arena, pairs[pair]) catch |err| {
             diagnostic("unityz: bad field path '{s}'\n", .{pairs[pair]});
             return err;
         };
         edited = setFieldPath(arena, edited, segs, 0, new_value) catch |err| {
-            std.heap.page_allocator.free(segs);
             diagnostic("unityz: object {d} has no field '{s}'\n", .{ path_id, pairs[pair] });
             return err;
         };
-        std.heap.page_allocator.free(segs);
     }
 
     const written = try writeEditedObject(arena, &sf, obj, edited);
@@ -8978,12 +8976,8 @@ fn editSerializedPatches(arena: std.mem.Allocator, bytes: []const u8, entries: [
         const obj = try readEditableObject(arena, &sf, path_id, own_name, injected);
         var edited = obj.value;
         for (fields) |f| {
-            const segs = try parseFieldPath(f.name);
-            edited = setFieldPath(arena, edited, segs, 0, f.value) catch |err| {
-                std.heap.page_allocator.free(segs);
-                return err;
-            };
-            std.heap.page_allocator.free(segs);
+            const segs = try parseFieldPath(arena, f.name);
+            edited = try setFieldPath(arena, edited, segs, 0, f.value);
         }
         try replacements.append(arena, .{ .path_id = path_id, .data = try writeEditedObject(arena, &sf, obj, edited) });
     }
@@ -9104,16 +9098,14 @@ fn cmdEdit(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
             failure("unityz: bad value '{s}': {s}\n", .{ value_text, @errorName(err) });
             return;
         };
-        const segs = parseFieldPath(field) catch {
+        const segs = parseFieldPath(arena, field) catch {
             failure("unityz: bad field path '{s}'\n", .{field});
             return;
         };
         edited = setFieldPath(arena, edited, segs, 0, new_value) catch {
-            std.heap.page_allocator.free(segs);
             failure("unityz: object {d} has no field '{s}'\n", .{ sel.path_id, field });
             return;
         };
-        std.heap.page_allocator.free(segs);
     }
 
     var out: unityz.streams.Writer = .init(arena);
@@ -9149,8 +9141,7 @@ const PathSeg = struct {
 /// Splits a dotted edit path into segments; each segment may carry any
 /// number of `[N]` index groups. `m_Container[0][1].preloadSize` becomes
 /// [{m_Container}, {index 0}, {index 1}, {preloadSize}].
-fn parseFieldPath(text: []const u8) ![]const PathSeg {
-    const allocator = std.heap.page_allocator;
+fn parseFieldPath(allocator: std.mem.Allocator, text: []const u8) ![]const PathSeg {
     var segs: std.ArrayList(PathSeg) = .empty;
     defer segs.deinit(allocator);
     var it = std.mem.splitScalar(u8, text, '.');
@@ -10827,25 +10818,25 @@ test "writeObjFloat matches Python's %.9g" {
 }
 
 test "parseFieldPath splits dotted and indexed paths" {
-    const p1 = try parseFieldPath("m_Name");
+    const p1 = try parseFieldPath(std.heap.page_allocator, "m_Name");
     try std.testing.expectEqual(@as(usize, 1), p1.len);
     try std.testing.expectEqualStrings("m_Name", p1[0].name);
     try std.testing.expect(p1[0].index == null);
 
-    const p2 = try parseFieldPath("m_Container[0][1].preloadSize");
+    const p2 = try parseFieldPath(std.heap.page_allocator, "m_Container[0][1].preloadSize");
     try std.testing.expectEqual(@as(usize, 4), p2.len);
     try std.testing.expectEqualStrings("m_Container", p2[0].name);
     try std.testing.expectEqual(@as(usize, 0), p2[1].index.?);
     try std.testing.expectEqual(@as(usize, 1), p2[2].index.?);
     try std.testing.expectEqualStrings("preloadSize", p2[3].name);
 
-    const p3 = try parseFieldPath("[2].asset.m_PathID");
+    const p3 = try parseFieldPath(std.heap.page_allocator, "[2].asset.m_PathID");
     try std.testing.expectEqual(@as(usize, 3), p3.len);
     try std.testing.expectEqual(@as(usize, 2), p3[0].index.?);
 
-    try std.testing.expectError(error.BadPath, parseFieldPath("a..b"));
-    try std.testing.expectError(error.BadPath, parseFieldPath("a["));
-    try std.testing.expectError(error.BadPath, parseFieldPath("[]"));
+    try std.testing.expectError(error.BadPath, parseFieldPath(std.heap.page_allocator, "a..b"));
+    try std.testing.expectError(error.BadPath, parseFieldPath(std.heap.page_allocator, "a["));
+    try std.testing.expectError(error.BadPath, parseFieldPath(std.heap.page_allocator, "[]"));
 }
 
 test "sanitizeComponent confines a file-supplied name to one path component" {
@@ -10930,7 +10921,7 @@ test "setFieldPath rebuilds the tree copy-on-write and rejects missing segments"
 
     const set = struct {
         fn apply(a: std.mem.Allocator, v: unityz.value.Value, path: []const u8, new_value: unityz.value.Value) !unityz.value.Value {
-            return setFieldPath(a, v, try parseFieldPath(path), 0, new_value);
+            return setFieldPath(a, v, try parseFieldPath(a, path), 0, new_value);
         }
     }.apply;
 

@@ -1273,12 +1273,11 @@ pub fn decodeCodeRecord(arena: std.mem.Allocator, data: []const u8, rec: Record,
     const sp = parseSubProgram(data, off) catch return null;
     const rec_end: usize = off + @as(usize, rec.length);
     const data_end = (sp.data_offset + sp.size + 3) & ~@as(usize, 3);
-    // trailing ParserBindChannels
+    // trailing ParserBindChannels. `data_end + 8 <= rec_end <= data.len` is
+    // what makes the slice in-bounds; the other orderings follow from it.
     var bind: ?BindChannels = null;
-    if (rec_end > data_end and data_end >= 8 and data_end <= data.len and rec_end <= data.len) {
-        if (data_end + 8 <= rec_end) {
-            bind = parseBindChannels(arena, data[data_end..rec_end]) catch null;
-        }
+    if (data_end >= 8 and rec_end <= data.len and data_end + 8 <= rec_end) {
+        bind = parseBindChannels(arena, data[data_end..rec_end]) catch null;
     }
     var header: []const u8 = &.{};
     var is_dxbc = false;
