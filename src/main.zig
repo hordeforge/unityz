@@ -1372,19 +1372,18 @@ fn tallySummary(arena: std.mem.Allocator, s: *ExtractSummary, class_id: i32, byt
 /// (objects + bytes, largest first), then totals. With `--json` the same
 /// data is emitted machine-readable instead.
 fn printExtractSummary(arena: std.mem.Allocator, s: *const ExtractSummary, json: bool, stdout: *Io.Writer) !void {
+    var total: usize = 0;
+    var bytes_total: usize = 0;
+    var totals_it = s.classes.iterator();
+    while (totals_it.next()) |e| {
+        total += e.value_ptr.count;
+        bytes_total += e.value_ptr.bytes;
+    }
     if (json) {
-        try stdout.writeAll("{\"objects\":");
-        var total: usize = 0;
-        var bytes_total: usize = 0;
+        try stdout.print("{{\"objects\":{d},\"bytes\":{d},\"classes\":{{", .{ total, bytes_total });
+        var first = true;
         var it = s.classes.iterator();
         while (it.next()) |e| {
-            total += e.value_ptr.count;
-            bytes_total += e.value_ptr.bytes;
-        }
-        try stdout.print("{d},\"bytes\":{d},\"classes\":{{", .{ total, bytes_total });
-        var first = true;
-        var it2 = s.classes.iterator();
-        while (it2.next()) |e| {
             if (!first) try stdout.writeByte(',');
             first = false;
             try stdout.print("\"{d}\":{{\"count\":{d},\"bytes\":{d}}}", .{ e.key_ptr.*, e.value_ptr.count, e.value_ptr.bytes });
@@ -1394,12 +1393,8 @@ fn printExtractSummary(arena: std.mem.Allocator, s: *const ExtractSummary, json:
     }
     const Entry = struct { class_id: i32, count: usize, bytes: usize };
     var list: std.ArrayList(Entry) = .empty;
-    var total: usize = 0;
-    var bytes_total: usize = 0;
     var it = s.classes.iterator();
     while (it.next()) |e| {
-        total += e.value_ptr.count;
-        bytes_total += e.value_ptr.bytes;
         try list.append(arena, .{ .class_id = e.key_ptr.*, .count = e.value_ptr.count, .bytes = e.value_ptr.bytes });
     }
     std.sort.insertion(Entry, list.items, {}, struct {
@@ -5648,12 +5643,7 @@ fn cmdVerify(path: []const u8, rest: []const []const u8, bytes: []const u8, stdo
             for (try diskSidecars(path)) |sc| try sidecars.append(arena, sc);
             const entry_label: []const u8 = if (kind == .bundle) "node" else "entry";
             for (nodes) |n| {
-                if (unityz.container.sniff(n.data).container != .serialized) continue;
-                if (path_filter) |pf| {
-                    if (pf.node) |sn| {
-                        if (!std.mem.eql(u8, n.path, sn)) continue;
-                    }
-                }
+                if (!selectorAdmits(n, path_filter)) continue;
                 if (!json) try stdout.print("{s} {s}:\n", .{ entry_label, n.path });
                 _ = try verifySerializedBytes(arena, n.data, n.path, class_filter, if (path_filter) |pf| pf.path_id else null, json, &report, stdout, sidecars.items, basename(n.path), injected);
             }
@@ -6604,12 +6594,7 @@ fn cmdHash(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
                 return;
             };
             for (nodes) |n| {
-                if (unityz.container.sniff(n.data).container != .serialized) continue;
-                if (path_filter) |pf| {
-                    if (pf.node) |sn| {
-                        if (!std.mem.eql(u8, n.path, sn)) continue;
-                    }
-                }
+                if (!selectorAdmits(n, path_filter)) continue;
                 try hashSerializedBytes(arena, n.data, n.path, if (path_filter) |pf| pf.path_id else null, class_filter, json, &entries, stdout);
             }
         },
@@ -7665,6 +7650,15 @@ fn collectRawNodes(arena: std.mem.Allocator, bytes: []const u8, out: *std.ArrayL
 /// The node names a container entry (bundle node / webfile entry path),
 /// so colliding path ids in different nodes can be targeted individually.
 const Selector = struct { node: ?[]const u8, path_id: i64 };
+
+/// Whether a container entry is a serialized file the selector's node part
+/// names. A selector without a node part, and no selector at all, admit
+/// every serialized entry; a non-serialized entry is never admitted.
+fn selectorAdmits(n: ContainerEntry, selector: ?Selector) bool {
+    if (unityz.container.sniff(n.data).container != .serialized) return false;
+    const node = (selector orelse return true).node orelse return true;
+    return std.mem.eql(u8, n.path, node);
+}
 
 fn parseSelector(text: []const u8) !Selector {
     if (std.mem.indexOfScalar(u8, text, ':')) |i| {

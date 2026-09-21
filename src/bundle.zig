@@ -227,16 +227,7 @@ fn parseLegacy(allocator: std.mem.Allocator, data: []const u8, signature: []cons
         n.offset = try dr.readInt(u32);
         n.size = try dr.readInt(u32);
     }
-    for (nodes) |*n| {
-        // offset/size are u32 fields of the file table, so their sum needs
-        // 33 bits: on a 32-bit target `off + len` overflows usize and panics
-        // instead of rejecting the range, the way the v6+ loop below does.
-        if (n.offset < 0 or n.size < 0) continue;
-        const off = std.math.cast(usize, n.offset) orelse continue;
-        const len = std.math.cast(usize, n.size) orelse continue;
-        const end = std.math.add(usize, off, len) catch continue;
-        if (end <= stream.len) n.data = stream[off..end];
-    }
+    pointNodesAt(nodes, stream);
 
     const header_info = allocator.alloc(u8, 0) catch return error.OutOfMemory;
     return .{
@@ -441,19 +432,24 @@ fn decompressAll(
         out_pos += b.uncompressed_size;
     }
 
+    pointNodesAt(nodes, stream);
+    return stream;
+}
+
+/// Points each node at its byte range inside `stream`, leaving a node whose
+/// range does not fit entirely inside it as the empty slice it was
+/// initialized to. `offset`/`size` come from the file and are `i64`, so a
+/// negative or past-`maxInt(usize)` value has to be rejected rather than
+/// cast: `@intCast` would fault on a 32-bit target, and `off + len` would
+/// wrap a u32 pair's 33-bit sum into an in-bounds slice.
+fn pointNodesAt(nodes: []Node, stream: []const u8) void {
     for (nodes) |*n| {
-        // offset/size come straight from the header info; a negative or
-        // overflowing range must not wrap into an in-bounds slice. They are
-        // i64 fields, so a value past `maxInt(usize)` has to be rejected the
-        // way `parseLegacy` and `webfile.parse` reject theirs - an `@intCast`
-        // would fault on a 32-bit target instead of skipping the node.
         if (n.offset < 0 or n.size < 0) continue;
         const off = std.math.cast(usize, n.offset) orelse continue;
         const len = std.math.cast(usize, n.size) orelse continue;
         const end = std.math.add(usize, off, len) catch continue;
         if (end <= stream.len) n.data = stream[off..end];
     }
-    return stream;
 }
 
 fn nodeByteSpan(n: Node, total: usize) ?struct { off: usize, len: usize } {
