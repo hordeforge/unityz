@@ -75,9 +75,17 @@ pub const SerializedFile = struct {
 
     /// Returns the raw bytes of an object, or null when the declared range
     /// falls outside the file.
+    ///
+    /// `byte_start` is a 64-bit file offset — `readObjectInfo` bounds it by
+    /// the *declared* `file_size`, which format 9+ never checks against the
+    /// image actually in memory, and format 22 reads as an i64. So the value
+    /// here can exceed `maxInt(usize)` on a 32-bit target, where an
+    /// `@intCast` faults and `start + byte_size` wraps into an in-bounds
+    /// slice. Reject both the way `bundle.nodeByteSpan` rejects its node
+    /// ranges: out of range is the same answer as past the end of the file.
     pub fn objectData(self: *const SerializedFile, o: *const ObjectInfo) ?[]const u8 {
-        const start: usize = @intCast(o.byte_start);
-        const end = start + o.byte_size;
+        const start = std.math.cast(usize, o.byte_start) orelse return null;
+        const end = std.math.add(usize, start, @as(usize, o.byte_size)) catch return null;
         if (end > self.source.len) return null;
         return self.source[start..end];
     }
