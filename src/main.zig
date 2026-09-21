@@ -5242,15 +5242,25 @@ fn shaderDisplayName(v: unityz.value.Value) []const u8 {
 /// `info` uses this to report whether each shader skins. Entries are printed
 /// one per object; undetermined shaders (no d3d11 blob or multi-tier) report
 /// `skins:null`.
-fn emitShaderSkinsJson(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, stdout: *Io.Writer, first: *bool) !void {
+fn emitShaderSkinsJson(sf: *const unityz.serialized.SerializedFile, stdout: *Io.Writer, first: *bool) !void {
+    // A shader's value tree and the platform blob `skinInfo` decompresses
+    // out of it are both written out and then dead, but the caller's arena
+    // spans every node of the container, so taking them from it made peak
+    // memory the sum of every shader in it - and a decompressed blob dwarfs
+    // the object. A scratch arena reset per shader bounds it by the largest
+    // one.
+    var obj_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer obj_arena_state.deinit();
+    const obj_arena = obj_arena_state.allocator();
     for (sf.objects) |*o| {
+        defer _ = obj_arena_state.reset(.retain_capacity);
         if (o.class_id != 48) continue;
-        const v = decodeObject(arena, sf, o, "", null) orelse continue;
+        const v = decodeObject(obj_arena, sf, o, "", null) orelse continue;
         const name = shaderDisplayName(v);
         if (!first.*) try stdout.writeByte(',');
         first.* = false;
 
-        const info = (try unityz.shader.skinInfo(arena, v)) orelse {
+        const info = (try unityz.shader.skinInfo(obj_arena, v)) orelse {
             try stdout.print("{{\"name\":", .{});
             try writeJsonString(stdout, name);
             try stdout.print(",\"skins\":null,\"determined\":false}}", .{});
@@ -5284,7 +5294,7 @@ fn emitShadersJson(arena: std.mem.Allocator, nodes: anytype, stdout: *Io.Writer)
     for (nodes) |n| {
         if (unityz.container.sniff(n.data).container != .serialized) continue;
         const ns = unityz.serialized.parse(arena, n.data) catch continue;
-        try emitShaderSkinsJson(arena, &ns, stdout, &first);
+        try emitShaderSkinsJson(&ns, stdout, &first);
     }
     try stdout.print("]", .{});
 }
@@ -5371,7 +5381,7 @@ fn printSerialized(bytes: []const u8, dump: bool, objects: bool, json: bool, std
         try stdout.print("]", .{});
         try stdout.print(",\"shaders\":[", .{});
         var first_shader = true;
-        try emitShaderSkinsJson(arena, &sf, stdout, &first_shader);
+        try emitShaderSkinsJson(&sf, stdout, &first_shader);
         try stdout.print("]}}\n", .{});
         return;
     }
@@ -5546,6 +5556,12 @@ fn dumpObjects(sf: *const unityz.serialized.SerializedFile, stdout: *Io.Writer) 
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     for (sf.objects) |*o| {
+        // Each object's value tree is written out and then dead, but the
+        // arena spans the whole dump, so keeping them made peak memory the
+        // sum of every decoded object in the file. Resetting per object
+        // bounds it by the largest single one, as the object-table and
+        // `find` listings already do.
+        defer _ = arena_state.reset(.retain_capacity);
         const type_index = o.type_index orelse continue;
         if (type_index >= sf.types.len) continue;
         const tree = sf.types[type_index].type_tree;
@@ -6200,6 +6216,13 @@ fn skinSerializedBytes(
     // per reference. Null caches "no verdict" so a shader that cannot be
     // decided is not retried either.
     var verdicts: std.AutoHashMapUnmanaged(i64, ?ShaderSkinVerdict) = .empty;
+    // Renderers share materials the same way materials share shaders, so
+    // the material step had the problem the shader step already solved: a
+    // full value tree decoded into `arena`, and kept there, once per
+    // reference rather than once per material. Caching the single field the
+    // walk reads decodes each material once. Null caches "no usable
+    // m_Shader" so an undecodable material is not retried either.
+    var material_shaders: std.AutoHashMapUnmanaged(i64, ?unityz.value.PPtr) = .empty;
     for (sf.objects) |*o| {
         if (o.class_id != 137) continue;
         const rv = decodeObject(arena, &sf, o, own_name, injected) orelse continue;
@@ -6211,8 +6234,14 @@ fn skinSerializedBytes(
         for (arr) |mat_ref| {
             const mp = asPPtr(mat_ref) orelse continue;
             if (mp.file_id != 0 or mp.path_id == 0) continue; // external or null
-            const mv = readObjectValue(arena, &sf, mp.path_id, "", null) orelse continue;
-            const sp = unityz.classes.pptrField(mv, "m_Shader") orelse continue;
+            const sp = (if (material_shaders.get(mp.path_id)) |cached| cached else blk: {
+                const fresh: ?unityz.value.PPtr = if (readObjectValue(arena, &sf, mp.path_id, "", null)) |mv|
+                    unityz.classes.pptrField(mv, "m_Shader")
+                else
+                    null;
+                try material_shaders.put(arena, mp.path_id, fresh);
+                break :blk fresh;
+            }) orelse continue;
             if (sp.file_id != 0 or sp.path_id == 0) continue;
             const verdict = (if (verdicts.get(sp.path_id)) |cached| cached else blk: {
                 const fresh: ?ShaderSkinVerdict = decide: {
@@ -6650,7 +6679,17 @@ fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
         failure("  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
     };
+    // `--json` names every object, and naming one can cost a whole decoded
+    // value tree. In `arena` - which spans every object of every node - that
+    // made peak memory the sum of the file's decoded objects; a scratch
+    // arena reset per object bounds it by the largest one, as the object
+    // table and `find` already do. The name itself survives the reset: a
+    // string value borrows the serialized source, not the arena.
+    var name_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer name_arena_state.deinit();
+    const name_arena = name_arena_state.allocator();
     for (sf.objects) |*o| {
+        defer _ = name_arena_state.reset(.retain_capacity);
         if (path_filter) |pf| {
             if (o.path_id != pf) continue;
         }
@@ -6666,7 +6705,7 @@ fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
                 .hash = h,
                 .size = @intCast(data.len),
                 .node = node,
-                .name = objectName(arena, &sf, o),
+                .name = objectName(name_arena, &sf, o),
             });
         } else {
             try stdout.print("{d}\t{x:0>16}\t{s} (class {d})\t{d} bytes\n", .{
@@ -10384,6 +10423,12 @@ fn printHierarchy(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8
         }
     }
 
+    // Sorted once so the per-transform "is this a bone?" test can binary
+    // search it. The linear scan it replaces ran over every bone of every
+    // SkinnedMeshRenderer in the file once per printed transform, which is
+    // quadratic on a rigged scene - both counts run to the thousands.
+    std.mem.sort(i64, bones.items, {}, std.sort.asc(i64));
+
     var roots_printed: usize = 0;
     var skipped_children: usize = 0;
     var index = try HierarchyIndex.build(arena, nodes.items, gos.items);
@@ -10486,6 +10531,8 @@ const max_hierarchy_depth: usize = 512;
 
 fn printHierarchyNode(
     index: *HierarchyIndex,
+    /// Bone transform path ids, ascending; the caller sorts them so the
+    /// membership test below is a binary search rather than a full scan.
     bones: []const i64,
     path_id: i64,
     depth: usize,
@@ -10498,7 +10545,11 @@ fn printHierarchyNode(
     const tn = index.findNode(path_id) orelse return;
     try index.markPrinted(path_id);
     const go = index.findGo(tn.go);
-    const bone = std.mem.indexOfScalar(i64, bones, path_id) != null;
+    const bone = std.sort.binarySearch(i64, bones, path_id, struct {
+        fn order(needle: i64, item: i64) std.math.Order {
+            return std.math.order(needle, item);
+        }
+    }.order) != null;
     if (json) {
         try stdout.writeAll("{\"name\":");
         try writeJsonString(stdout, if (go) |g| g.name else "");
