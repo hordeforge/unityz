@@ -1791,9 +1791,27 @@ fn wavPcm16(arena: std.mem.Allocator, pcm: []const u8, channels: u32, rate: u32,
     // in a safe build before either check below can reject it. Once both are
     // u16-sized the u64 product cannot overflow.
     if (channels > std.math.maxInt(u16) or bits > std.math.maxInt(u16)) return error.WavFieldOverflow;
+    // A zero sample rate is not a wrapping concern but an unusable one: it
+    // reaches `rate` from an FSB5 sample whose frequency nibble is one of
+    // the codes FMOD rejects (11-15, which `fsb5.parse` reports as 0) or
+    // from a FREQUENCY chunk holding 0, and from an AudioClip whose
+    // `m_Frequency` is absent or 0 - the path that defaults `m_Channels`
+    // and `m_BitsPerSample` leaves the rate alone. WAVEFORMATEX requires a
+    // nonzero rate, and every consumer divides by it to get a duration or a
+    // seek position, so writing the header anyway hands out a .wav that
+    // divides by zero downstream. `durationMs` in the FSB5 metadata already
+    // guards the same field; report it here the way the range checks
+    // report theirs, so the clip is skipped with a message instead.
+    if (rate == 0) return error.WavZeroSampleRate;
     const block_align = @as(u64, channels) * bits / 8;
     const byte_rate = @as(u64, rate) * channels * bits / 8;
     if (block_align > std.math.maxInt(u16) or byte_rate > std.math.maxInt(u32)) return error.WavFieldOverflow;
+    // `bits / 8` floors, so a clip declaring a sub-byte width (the raw
+    // AudioClip path passes `m_BitsPerSample` through once it is nonzero)
+    // yields a zero block align and a zero byte rate from nonzero inputs -
+    // the same unusable header, reached by truncation rather than by a
+    // zero field.
+    if (block_align == 0) return error.WavZeroBlockAlign;
     if (pcm.len > std.math.maxInt(u32) - 36) return error.WavFieldOverflow;
     return unityz.wav.encode(arena, pcm, @intCast(channels), rate, @intCast(bits));
 }

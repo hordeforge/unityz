@@ -323,6 +323,14 @@ pub fn rebuildOgg(
 ) Error!?[]u8 {
     const crc = sample.vorbis_crc orelse return null;
     const setup = setupFor(crc) orelse return null;
+    // The identification packet carries the rate verbatim, and Vorbis I
+    // (4.2.2) calls a stream with audio_sample_rate 0 undecodable. The
+    // field reaches here as 0 from a bank whose frequency nibble is one of
+    // the codes FMOD rejects (11-15, which `fsb5.parse` reports as 0) or
+    // from a FREQUENCY chunk holding 0, so emitting the header anyway
+    // writes an .ogg every decoder refuses - and one that divides by the
+    // rate to seek. Corrupt bank metadata, reported like the rest.
+    if (sample.frequency == 0) return error.Corrupt;
     const flags = (try BlockFlags.parse(allocator, setup.header, setup.seek_bit)) orelse return error.Corrupt;
     defer allocator.free(flags.flags);
 
