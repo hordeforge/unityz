@@ -536,6 +536,36 @@ pub const Texture2D = struct {
     }
 };
 
+/// Texture2DArray (class 187): dimensions, layer count, format and where the
+/// pixels live.
+///
+/// The serialized format field is `m_Format`, a `GraphicsFormat`, not the
+/// `m_TextureFormat` a Texture2D carries. `texture.fromGraphicsFormat`
+/// translates it. The payload holds every layer's full mip chain,
+/// layer-major; `texture.arrayLayerStride` gives one layer's size.
+pub const Texture2DArray = struct {
+    width: u32 = 0,
+    height: u32 = 0,
+    /// Layer count (`m_Depth`), not mip count.
+    depth: u32 = 0,
+    format: i32 = 0,
+    mip_count: u32 = 0,
+    image_data: []const u8 = &.{},
+    stream: StreamingInfo = .{},
+
+    pub fn fromValue(v: value.Value) Texture2DArray {
+        return .{
+            .width = narrow(u32, intField(v, "m_Width") orelse 0),
+            .height = narrow(u32, intField(v, "m_Height") orelse 0),
+            .depth = narrow(u32, intField(v, "m_Depth") orelse 0),
+            .format = narrow(i32, intField(v, "m_Format") orelse 0),
+            .mip_count = narrow(u32, intField(v, "m_MipCount") orelse 1),
+            .image_data = bytesField(v, "image data") orelse bytesField(v, "m_ImageData") orelse &.{},
+            .stream = StreamingInfo.fromValue(v),
+        };
+    }
+};
+
 /// TextAsset (class 49): name plus the raw `m_Script` bytes, text or binary.
 pub const TextAsset = struct {
     name: []const u8 = "",
