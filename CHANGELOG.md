@@ -11,6 +11,8 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-10-25
+
 ### Added
 
 - `extract` exports `Texture2DArray` (class 187) as one image per layer,
