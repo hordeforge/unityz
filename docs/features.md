@@ -95,6 +95,13 @@ Texture pixels can be embedded, streamed inside the serialized file, or
 streamed from a sibling `.resS` / `.resource` sidecar, resolved
 automatically.
 
+`Texture2DArray` (class 187) exports one image per layer. Its `m_Format` is a
+`GraphicsFormat`, not the `TextureFormat` a `Texture2D` carries, so the ids
+are translated first (96 = DXT1 sRGB, 100/101 = DXT5 sRGB/linear, and the
+other block-compressed graphics formats); the payload is layer-major, each
+layer a full mip chain, and the tool slices it by that stride. See
+[PRD 0001](prds/0001-texture2darray-export.md).
+
 ## Extraction by class
 
 - Textures (28), sprites (213), cubemap faces (89, `_posx`... `_negz`
@@ -293,9 +300,10 @@ skipped and why.
 unityz embeds a release-indexed database of Unity's built-in class type
 trees (`src/builtin_trees/<release>.bin`, served by
 `src/builtin_trees.zig`). Each file is one release's AssetRipper
-TypeTreeDumps StructsDump packed by `scripts/structsdump-to-builtin.py`;
-the shipped releases are listed by every "no built-in type trees"
-diagnostic. Currently shipped: `2022.3.62f2`, `2021.3.45f2`, `2019.4.41f2`,
+TypeTreeDumps StructsDump packed by `scripts/structsdump-to-builtin.py`.
+
+The shipped releases are listed by every "no built-in type trees" diagnostic.
+Currently shipped: `2022.3.62f2`, `2021.3.45f2`, `2019.4.41f2`,
 `2020.3.49f1`, `2021.3.58f1`, `2022.3.76f1`, and `2023.2.18f1`. Matching
 is by exact release string: there is no
 nearest-version fallback, because a neighbouring release's tree can
@@ -305,7 +313,9 @@ class the release has no tree for is an error, never a guess.
 `unityz trees --builtin` with no release prints `{"releases":[...]}` of
 the dumps this binary ships. `unityz trees --builtin <release>
 [--class <id>] [--out <file.json>]` exports the database in the `--trees`
-JSON shape. Every node carries
+JSON shape.
+
+Every node carries
 `m_Type`, `m_Name`, `m_Level`, `m_MetaFlag` plus `m_ByteSize`,
 `m_Version`, `m_TypeFlags` (Unity's array flag) and `m_Index`, so a
 consumer can write the tree back into a SerializedFile with Unity's own

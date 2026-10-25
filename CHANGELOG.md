@@ -11,6 +11,16 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+### Added
+
+- `extract` exports `Texture2DArray` (class 187) as one image per layer,
+  `texture_<path_id>_<w>x<h>_layer<N>.png`. The array's `m_Format` is a
+  `GraphicsFormat` (96 = DXT1 sRGB, 100/101 = DXT5 sRGB/linear), not the
+  `TextureFormat` a `Texture2D` carries, so it is translated before decoding,
+  and the layer-major payload is sliced by its full mip chain. Formats
+  outside DXT1/DXT3/DXT5/BC4/BC5/BC6H/BC7 are reported undecodable rather
+  than guessed.
+
 ### Changed
 
 - A command run over a directory processes its files in name order, and

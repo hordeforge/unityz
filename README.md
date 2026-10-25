@@ -63,7 +63,8 @@ pipx run ruff==0.16.8 check scripts
 
 - **Look inside any Unity asset** - open a bundle, `.assets` file, or
   sidecar and see its containers, objects, and type trees (`info`, `show`).
-- **Extract everything** - textures and sprites as images, meshes as OBJ
+- **Extract everything** - textures and sprites as images, `Texture2DArray`
+  layers as one image each, meshes as OBJ
   and glTF/GLB (skinned rigs included), straight out of a bundle or a
   bare `.assets` file,
   audio as playable files (OGG/FSB/WAV), video cutscenes as MP4, terrain

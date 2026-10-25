@@ -738,6 +738,55 @@ pub fn expectedSize(tex_format: i32, width: u32, height: u32) ?usize {
     };
 }
 
+/// GraphicsFormat id to TextureFormat id for the formats a `Texture2DArray`
+/// ships in.
+///
+/// Texture2D serializes `m_TextureFormat` as the older `TextureFormat`
+/// enum, but Texture2DArray serializes `m_Format` as `GraphicsFormat`, and
+/// the two number the same codecs differently: graphics 96/100/101 are
+/// DXT1 sRGB / DXT5 sRGB / DXT5 linear, while texture 10/12 are DXT1/DXT5.
+/// Values are from UnityCsReference `GraphicsEnums.cs` for the 2022.3 pin.
+/// Only block-compressed formats are mapped: arrays of raw formats are
+/// rare, and guessing a mapping for one that is not in use would be worse
+/// than reporting it undecodable.
+pub fn fromGraphicsFormat(graphics_format: i32) ?i32 {
+    return switch (graphics_format) {
+        96, 97 => format.dxt1,
+        98, 99 => format.dxt3,
+        100, 101 => format.dxt5,
+        102, 103 => format.bc4,
+        104, 105 => format.bc5,
+        106, 107 => format.bc6h,
+        108, 109 => format.bc7,
+        else => null,
+    };
+}
+
+/// Bytes one layer of a texture array occupies: every mip level, in order.
+///
+/// Unity writes a `Texture2DArray` layer-major, each layer carrying its full
+/// mip chain, so the offset of layer N is `N * arrayLayerStride()`. Returns
+/// null when the format has no fixed size (a crunched stream) or the mip
+/// count is impossible, rather than computing a stride the caller would use
+/// to slice the payload in the wrong place.
+pub fn arrayLayerStride(tex_format: i32, width: u32, height: u32, mip_count: u32) ?usize {
+    const mips = @max(mip_count, 1);
+    // Unity generates at most one level per halving down to 1x1.
+    if (mips > 32) return null;
+    var total: usize = 0;
+    var w = width;
+    var h = height;
+    var level: u32 = 0;
+    while (level < mips) : (level += 1) {
+        const size = expectedSize(tex_format, w, h) orelse return null;
+        if (size == 0) return null;
+        total = std.math.add(usize, total, size) catch return null;
+        if (w > 1) w /= 2;
+        if (h > 1) h /= 2;
+    }
+    return total;
+}
+
 // --- BC6H (BPTC HDR) ---
 
 const bc6h_mode_info = [_]Bc6hModeInfo{
@@ -4685,6 +4734,38 @@ test "flipVertical mirrors rows" {
     try std.testing.expectEqual(@as(u8, 1), flipped[8]); // row 1 = old row 1
     try std.testing.expectEqual(@as(u8, 0), flipped[16]); // row 2 = old row 0
     try std.testing.expectError(error.BadSize, flipVertical(a, rgba, 2, 4));
+}
+
+test "texture array layer stride matches the stock block atlases" {
+    // The three colour arrays in blocktextureatlases_assets_all.bundle are
+    // 512/256/128 with 10/9/8 mips, and the payload sizes divide exactly by
+    // these strides: 71,133,832 / 174,776 = 407 layers, and the same for the
+    // other two resolutions. A wrong stride slices every layer after the
+    // first into the middle of its neighbour, which decodes without an error
+    // and shows up only as garbage images.
+    try std.testing.expectEqual(@as(?usize, 174776), arrayLayerStride(format.dxt1, 512, 512, 10));
+    try std.testing.expectEqual(@as(?usize, 43704), arrayLayerStride(format.dxt1, 256, 256, 9));
+    try std.testing.expectEqual(@as(?usize, 10936), arrayLayerStride(format.dxt1, 128, 128, 8));
+    try std.testing.expectEqual(@as(?usize, 349552), arrayLayerStride(format.dxt5, 512, 512, 10));
+    // A zero mip count is data, not an instruction to produce nothing: Unity
+    // always writes at least mip 0, so the stride is one level.
+    try std.testing.expectEqual(expectedSize(format.dxt1, 512, 512), arrayLayerStride(format.dxt1, 512, 512, 0));
+    // Impossible mip counts and formats with no fixed size are refusals, not
+    // a stride the caller would use to slice in the wrong place.
+    try std.testing.expectEqual(@as(?usize, null), arrayLayerStride(format.dxt1, 512, 512, 33));
+    try std.testing.expectEqual(@as(?usize, null), arrayLayerStride(format.dxt1_crunched, 512, 512, 10));
+}
+
+test "graphics formats map to the decoder's texture formats" {
+    // Texture2DArray serializes m_Format as GraphicsFormat; Texture2D uses
+    // TextureFormat. These four ids are what the stock block atlases carry.
+    try std.testing.expectEqual(@as(?i32, format.dxt1), fromGraphicsFormat(96));
+    try std.testing.expectEqual(@as(?i32, format.dxt5), fromGraphicsFormat(100));
+    try std.testing.expectEqual(@as(?i32, format.dxt5), fromGraphicsFormat(101));
+    try std.testing.expectEqual(@as(?i32, format.bc7), fromGraphicsFormat(108));
+    // A texture-format number is not a graphics-format number; 10 is DXT1
+    // in TextureFormat and must not be accepted here by accident.
+    try std.testing.expectEqual(@as(?i32, null), fromGraphicsFormat(format.dxt1));
 }
 
 test "crunched formats route to the crash-stable decompressor" {

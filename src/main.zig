@@ -1094,7 +1094,7 @@ fn injectedTreeFor(
 /// `--trees` supplies the class trees a Mono build stripped. `--summary`
 /// is a dry run: it reports per class and writes nothing. Bundles and
 /// webfiles extract the assets inside their serialized nodes as well as
-/// the raw nodes.
+/// the raw nodes. A `Texture2DArray` writes one image per layer.
 fn cmdExtract(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout: *Io.Writer) !void {
     var raw = false;
     // Bundles and webfiles extract the assets inside their serialized nodes
@@ -2389,6 +2389,103 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try extractFile(subdir, name, image);
                 try stdout.print("extracted {s} ({s})\n", .{ name, unityz.texture.format.name(t.format) });
                 extracted += 1;
+            },
+            187 => { // Texture2DArray
+                const t = unityz.classes.Texture2DArray.fromValue(v);
+                if (t.width == 0 or t.height == 0 or t.depth == 0) continue;
+                // The array's `m_Format` is a GraphicsFormat, not the
+                // TextureFormat a Texture2D carries, so it needs translating
+                // before the decoder sees it.
+                const tex_format = unityz.texture.fromGraphicsFormat(t.format) orelse {
+                    try stdout.print(
+                        "  texture array {d}: GraphicsFormat {d} is not decodable\n",
+                        .{ o.path_id, t.format },
+                    );
+                    skipped += 1;
+                    continue;
+                };
+                var pixels: []const u8 = t.image_data;
+                if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len == 0) {
+                    pixels = inFileStream(&sf, t.stream.offset, t.stream.size);
+                }
+                if (pixels.len == 0 and t.stream.size > 0 and t.stream.path.len != 0) {
+                    pixels = resolveSidecar(sidecars, t.stream.path, t.stream.offset, t.stream.size);
+                }
+                if (pixels.len == 0) {
+                    if (t.stream.size > 0) {
+                        try reportUnresolvedStream("texture array", o.path_id, t.stream.path, t.stream.offset, t.stream.size, stdout);
+                        skipped += 1;
+                    }
+                    continue;
+                }
+                // One layer is a full mip chain; the payload is layer-major.
+                const stride = unityz.texture.arrayLayerStride(tex_format, t.width, t.height, t.mip_count) orelse {
+                    try stdout.print("  texture array {d}: mip layout is not computable\n", .{o.path_id});
+                    skipped += 1;
+                    continue;
+                };
+                const layer_size = unityz.texture.expectedSize(tex_format, t.width, t.height) orelse {
+                    skipped += 1;
+                    continue;
+                };
+                const needed = std.math.mul(usize, stride, t.depth) catch 0;
+                if (needed == 0 or pixels.len < needed) {
+                    try stdout.print(
+                        "  texture array {d}: {d} layer(s) need {d} bytes, the stream has {d}\n",
+                        .{ o.path_id, t.depth, needed, pixels.len },
+                    );
+                    skipped += 1;
+                    continue;
+                }
+                var written: u32 = 0;
+                var layer: u32 = 0;
+                while (layer < t.depth) : (layer += 1) {
+                    // Per layer, so peak memory is one image rather than the
+                    // whole array: a 512x512x407 RGBA array is 426 MB decoded.
+                    var tex_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+                    defer tex_arena_state.deinit();
+                    const tex_arena = tex_arena_state.allocator();
+                    const start: usize = @as(usize, layer) * stride;
+                    const rgba = unityz.texture.decode(tex_arena, tex_format, t.width, t.height, pixels[start .. start + layer_size]) catch |err| {
+                        try stdout.print(
+                            "  texture array {d} layer {d}: {s} decode failed: {s}\n",
+                            .{ o.path_id, layer, unityz.texture.format.name(tex_format), @errorName(err) },
+                        );
+                        skipped += 1;
+                        break;
+                    };
+                    const flipped = unityz.texture.flipVertical(tex_arena, rgba, t.width, t.height) catch |err| {
+                        try stdout.print("  texture array {d} layer {d}: flip failed: {s}\n", .{ o.path_id, layer, @errorName(err) });
+                        skipped += 1;
+                        break;
+                    };
+                    const image = encodeImage(tex_arena, format, t.width, t.height, flipped) catch |err| {
+                        try stdout.print("  texture array {d} layer {d}: image encode failed: {s}\n", .{ o.path_id, layer, @errorName(err) });
+                        skipped += 1;
+                        break;
+                    };
+                    var name_buf: [128]u8 = undefined;
+                    const name = try std.fmt.bufPrint(
+                        &name_buf,
+                        "texture_{d}_{d}x{d}_layer{d}.{s}",
+                        .{ o.path_id, t.width, t.height, layer, formatExtension(format) },
+                    );
+                    try extractFile(subdir, name, image);
+                    written += 1;
+                }
+                if (written > 0) {
+                    try stdout.print(
+                        "extracted texture_{d}_{d}x{d}_layer* ({d} of {d} layer(s), {s})\n",
+                        .{ o.path_id, t.width, t.height, written, t.depth, unityz.texture.format.name(tex_format) },
+                    );
+                    try manifest.append(arena, .{
+                        .path_id = o.path_id,
+                        .class_id = o.class_id,
+                        .name = unityz.classes.stringField(v, "m_Name") orelse "",
+                        .subdir = subdir,
+                    });
+                    extracted += 1;
+                }
             },
             49 => { // TextAsset
                 const ta = unityz.classes.TextAsset.fromValue(v);
