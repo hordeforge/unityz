@@ -2073,7 +2073,13 @@ pub const Mesh = struct {
     name: []const u8 = "",
     vertex_count: u32 = 0,
     index_format: i32 = 0,
+    /// Inline vertex buffer (`m_VertexData.m_DataSize`), empty for a mesh whose
+    /// vertices are streamed.
     vertex_data: []const u8 = "",
+    /// Streamed vertex buffer range (`m_VertexData.m_StreamData`); the bytes live
+    /// in a `.resS` sidecar named here. Most non-tree decoration meshes use this
+    /// form, so an exporter that reads `vertex_data` alone writes nothing for them.
+    stream: StreamingInfo = .{},
     index_buffer: []const u8 = "",
     /// Fixed-size channel table (Unity writes at most 14); `channel_count`
     /// is the populated length.
@@ -2185,6 +2191,11 @@ pub const Mesh = struct {
     pub fn readVertexData(self: *Mesh, vd: value.Value) void {
         if (intField(vd, "m_VertexCount")) |n| self.vertex_count = narrow(u32, n);
         self.vertex_data = bytesField(vd, "m_DataSize") orelse "";
+        // A `Mesh` carries the stream range at its own top level; a `Sprite`'s
+        // tight mesh puts the same shape under `m_RD`. Either source is fine, and
+        // `fromValue` lets the Mesh's own field win.
+        const stream_from_vd = StreamingInfo.fromValue(vd);
+        if (stream_from_vd.size != 0) self.stream = stream_from_vd;
 
         if (fieldOf(vd, "m_Channels")) |chans| {
             if (chans == .array) {
@@ -2207,6 +2218,11 @@ pub const Mesh = struct {
         var m = Mesh{ .name = stringField(v, "m_Name") orelse "" };
         if (intField(v, "m_IndexFormat")) |f| m.index_format = narrow(i32, f);
         m.index_buffer = bytesField(v, "m_IndexBuffer") orelse "";
+        // The streamed vertex range is a field of the Mesh object itself, not of
+        // `m_VertexData`: a mesh written that way has an empty `m_DataSize` and
+        // only `m_StreamData` naming the `.resS` sidecar and its byte range.
+        const stream = StreamingInfo.fromValue(v);
+        if (stream.size != 0) m.stream = stream;
 
         const vd = fieldOf(v, "m_VertexData") orelse return m;
         m.readVertexData(vd);

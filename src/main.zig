@@ -2830,13 +2830,32 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try manifest.append(arena, .{ .path_id = o.path_id, .class_id = 115, .name = ms.name, .subdir = subdir });
             },
             43 => { // Mesh -> Wavefront OBJ + glTF/GLB
-                const mesh = unityz.classes.Mesh.fromValue(v);
+                var mesh = unityz.classes.Mesh.fromValue(v);
+                // Unity empties `m_DataSize` when it moves the vertex buffer into
+                // the `.resS` sidecar, and `m_StreamData` is then the only copy.
+                // Most decoration meshes ship this way: without the range the
+                // exporter writes nothing, so resolving it is not an optimisation.
+                if (mesh.vertex_data.len == 0 and mesh.stream.size > 0) {
+                    mesh.vertex_data = resolveSidecar(sidecars, mesh.stream.path, mesh.stream.offset, mesh.stream.size);
+                }
                 const obj = writeMeshObj(arena, &sf, v, &mesh) catch |err| {
                     try stdout.print("  mesh {d}: OBJ conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
                 };
-                if (obj.len == 0) continue; // unsupported layout, nothing written
+                if (obj.len == 0) {
+                    // Silent before: a container could report "0 skipped" while
+                    // most of its meshes were absent.
+                    try stdout.print("  mesh {d}: no exportable geometry ({s})\n", .{
+                        o.path_id,
+                        if (mesh.vertex_data.len == 0)
+                            if (mesh.stream.size > 0) "streamed vertex data not found in the sidecars" else "no vertex data"
+                        else
+                            "unsupported channel layout",
+                    });
+                    skipped += 1;
+                    continue;
+                }
                 var name_buf: [160]u8 = undefined;
                 const mesh_name = unityz.streams.trimNul(mesh.name);
                 const name = sanitizeComponent(if (mesh_name.len != 0)
@@ -2855,6 +2874,8 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                         try extractFile(subdir, glb_name, g);
                         try stdout.print("extracted {s} ({d} bytes, glTF binary)\n", .{ glb_name, g.len });
                         extracted += 1;
+                    } else {
+                        try stdout.print("  mesh {d}: no GLB (compressed mesh or unsupported channel layout)\n", .{o.path_id});
                     }
                 } else |err| {
                     try stdout.print("  mesh {d}: GLB conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
