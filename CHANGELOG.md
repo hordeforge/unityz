@@ -11,6 +11,10 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.12] - 2026-10-29
+
 ### Added
 
 - `extract` resolves a Mesh's streamed vertex data from the `.resS` sidecar
