@@ -11,6 +11,26 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+### Added
+
+- `extract` resolves a Mesh's streamed vertex data from the `.resS` sidecar
+  named by `m_StreamData`, so the decoration meshes whose `m_DataSize` is
+  empty export instead of being dropped, and it decodes Float16 vertex
+  channels alongside Float32.
+
+### Fixed
+
+- A class-43 object that produces no output now says why and counts as
+  skipped; a container used to report "0 skipped" while most of its meshes
+  were absent.
+- A channel table whose `dimension` byte packs the unpadded component count
+  into its top nibble (Float16 normals, byte `0x34`) now decodes to the
+  stride the vertex buffer really has, instead of a 116-byte stride that made
+  the exporter refuse the mesh. See
+  [ADR 0001](docs/adrs/0001-mesh-channel-dimension-nibbles.md).
+- A GLB for an unskinned mesh no longer carries an empty `skins` array, which
+  a glTF validator reports as `EMPTY_ENTITY`.
+
 ## [0.1.11] - 2026-10-25
 
 ### Added

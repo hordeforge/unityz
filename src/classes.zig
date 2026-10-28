@@ -2055,11 +2055,27 @@ pub const AssetBundle = struct {
 };
 
 /// One vertex channel layout entry (`Mesh.m_VertexData.m_Channels`).
+///
+/// The file's `dimension` byte is two nibbles. The low one is the number of
+/// components actually stored per vertex, which is what the vertex stride
+/// accounts for; the high one is the number of components that carry data,
+/// written only when Unity padded the attribute to keep the next channel
+/// 4-byte aligned. Unity's own UnityDataTools analyzer reads it the same
+/// way: "The dimension can be padded. In that case, the real dimension is
+/// encoded in the top nibble." A Float16 normal is the case that shows it -
+/// three components would put the following channel at an offset that is not
+/// 4-byte aligned, so Unity stores four (the fourth is always 0) and writes
+/// byte 0x34.
 pub const MeshChannel = struct {
     stream: u32 = 0,
     offset: u32 = 0,
     format: i32 = 0,
+    /// Components stored per vertex; drives the stride and the next
+    /// channel's offset.
     dimension: u32 = 0,
+    /// Components that carry data: the padded byte's top nibble when it is
+    /// set, `dimension` otherwise.
+    real_dimension: u32 = 0,
 };
 
 /// Typed view over a Mesh object's serialized form.
@@ -2090,8 +2106,9 @@ pub const Mesh = struct {
         return self.channels[0..self.channel_count];
     }
 
-    /// The channel's layout, or null when absent (dimension 0). The channel
-    /// may live in any vertex stream; use [`channelByteOffset`] to read it.
+    /// The channel's layout, or null when absent (no stored component). The
+    /// channel may live in any vertex stream; use [`channelByteOffset`] to
+    /// read it.
     pub fn channel(self: *const Mesh, index: usize) ?MeshChannel {
         if (index >= self.channel_count) return null;
         const c = self.channels[index];
@@ -2202,11 +2219,15 @@ pub const Mesh = struct {
                 const arr = chans.array;
                 const n = @min(arr.len, self.channels.len);
                 for (arr[0..n], 0..) |c, i| {
+                    const raw = narrow(u32, intField(c, "dimension") orelse 0);
+                    const stored = raw & 0x0f;
+                    const real = (raw >> 4) & 0x0f;
                     self.channels[i] = .{
                         .stream = narrow(u32, intField(c, "stream") orelse 0),
                         .offset = narrow(u32, intField(c, "offset") orelse 0),
                         .format = narrow(i32, intField(c, "format") orelse 0),
-                        .dimension = narrow(u32, intField(c, "dimension") orelse 0),
+                        .dimension = stored,
+                        .real_dimension = if (real != 0) real else stored,
                     };
                 }
                 self.channel_count = n;
@@ -2607,6 +2628,57 @@ test "mesh multi-stream layout and per-vertex reads" {
     // vertex 1 uv (channel 4, stream 1) = (0.75, 0.125)
     try std.testing.expectEqual(@as(f32, 0.75), @as(f32, @bitCast(std.mem.readInt(u32, data[56..][0..4], endian))));
     try std.testing.expectEqual(@as(f32, 0.125), @as(f32, @bitCast(std.mem.readInt(u32, data[60..][0..4], endian))));
+}
+
+/// Builds one `m_Channels` entry for the layout tests. The parameters are
+/// comptime so the field array lives in constant storage - a runtime array
+/// would leave `obj` dangling once the call returns.
+fn testChannel(comptime stream: i64, comptime offset: i64, comptime format: i64, comptime dimension: i64) value.Value {
+    const fields = [_]value.Field{
+        .{ .name = "stream", .value = .{ .int = stream } },
+        .{ .name = "offset", .value = .{ .int = offset } },
+        .{ .name = "format", .value = .{ .int = format } },
+        .{ .name = "dimension", .value = .{ .int = dimension } },
+    };
+    return .{ .obj = &fields };
+}
+
+test "packed channel byte splits into stored and real component counts" {
+    // The channel table of a real 2022.3 streamed decoration mesh: Float32
+    // position, Float16 normal, Float16 tangent, Float16 UV0, 32 bytes per
+    // vertex. The normal's byte is 0x34 - four stored components, of which
+    // three are the normal - because three Float16 components would leave
+    // the tangent off a 4-byte boundary. Reading 0x34 as a count gives a
+    // 116-byte stride, which no vertex buffer in the file matches.
+    const vd = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_VertexCount", .value = .{ .int = 2 } },
+        .{ .name = "m_Channels", .value = .{ .array = &[_]value.Value{
+            testChannel(0, 0, 0, 3),
+            testChannel(0, 12, 1, 0x34),
+            testChannel(0, 20, 1, 4),
+            testChannel(0, 0, 0, 0),
+            testChannel(0, 28, 1, 2),
+        } } },
+        .{ .name = "m_DataSize", .value = .{ .bytes = &[_]u8{0} ** 64 } },
+    } };
+    var m = Mesh{};
+    m.readVertexData(vd);
+
+    try std.testing.expectEqual(@as(u32, 3), m.channel(0).?.dimension);
+    try std.testing.expectEqual(@as(u32, 3), m.channel(0).?.real_dimension);
+    try std.testing.expectEqual(@as(u32, 4), m.channel(1).?.dimension);
+    try std.testing.expectEqual(@as(u32, 3), m.channel(1).?.real_dimension);
+    try std.testing.expectEqual(@as(u32, 4), m.channel(2).?.dimension);
+    try std.testing.expectEqual(@as(u32, 4), m.channel(2).?.real_dimension);
+    try std.testing.expect(m.channel(3) == null);
+    try std.testing.expectEqual(@as(u32, 2), m.channel(4).?.real_dimension);
+
+    // 3*4 + 4*2 + 4*2 + 2*2 = 32, not the 116 the raw nibble pair implies.
+    try std.testing.expectEqual(@as(usize, 32), m.stride().?);
+    // Vertex 1's normal starts after one whole 32-byte vertex.
+    try std.testing.expectEqual(@as(usize, 12 + 32), m.channelByteOffset(1, 1).?);
+    // Vertex 1's UV starts at 28 in the second vertex.
+    try std.testing.expectEqual(@as(usize, 28 + 32), m.channelByteOffset(4, 1).?);
 }
 
 test "font fromValue reads the type-tree fields" {
