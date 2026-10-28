@@ -2830,13 +2830,32 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 try manifest.append(arena, .{ .path_id = o.path_id, .class_id = 115, .name = ms.name, .subdir = subdir });
             },
             43 => { // Mesh -> Wavefront OBJ + glTF/GLB
-                const mesh = unityz.classes.Mesh.fromValue(v);
+                var mesh = unityz.classes.Mesh.fromValue(v);
+                // Unity empties `m_DataSize` when it moves the vertex buffer into
+                // the `.resS` sidecar, and `m_StreamData` is then the only copy.
+                // Most decoration meshes ship this way: without the range the
+                // exporter writes nothing, so resolving it is not an optimisation.
+                if (mesh.vertex_data.len == 0 and mesh.stream.size > 0) {
+                    mesh.vertex_data = resolveSidecar(sidecars, mesh.stream.path, mesh.stream.offset, mesh.stream.size);
+                }
                 const obj = writeMeshObj(arena, &sf, v, &mesh) catch |err| {
                     try stdout.print("  mesh {d}: OBJ conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
                 };
-                if (obj.len == 0) continue; // unsupported layout, nothing written
+                if (obj.len == 0) {
+                    // Silent before: a container could report "0 skipped" while
+                    // most of its meshes were absent.
+                    try stdout.print("  mesh {d}: no exportable geometry ({s})\n", .{
+                        o.path_id,
+                        if (mesh.vertex_data.len == 0)
+                            if (mesh.stream.size > 0) "streamed vertex data not found in the sidecars" else "no vertex data"
+                        else
+                            "unsupported channel layout",
+                    });
+                    skipped += 1;
+                    continue;
+                }
                 var name_buf: [160]u8 = undefined;
                 const mesh_name = unityz.streams.trimNul(mesh.name);
                 const name = sanitizeComponent(if (mesh_name.len != 0)
@@ -2855,6 +2874,8 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                         try extractFile(subdir, glb_name, g);
                         try stdout.print("extracted {s} ({d} bytes, glTF binary)\n", .{ glb_name, g.len });
                         extracted += 1;
+                    } else {
+                        try stdout.print("  mesh {d}: no GLB (compressed mesh or unsupported channel layout)\n", .{o.path_id});
                     }
                 } else |err| {
                     try stdout.print("  mesh {d}: GLB conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
@@ -4003,6 +4024,13 @@ fn readF32(data: []const u8, pos: usize, endian: std.builtin.Endian) f32 {
     return @bitCast(bits);
 }
 
+/// IEEE 754 binary16 (Unity's `VertexChannelFormat.Float16`) at
+/// `data[pos..pos+2]` widened to f32.
+fn readF16(data: []const u8, pos: usize, endian: std.builtin.Endian) f32 {
+    const bits = std.mem.readInt(u16, data[pos..][0..2], endian);
+    return @floatCast(@as(f16, @bitCast(bits)));
+}
+
 /// A mesh plus its vertex-stream layout, derived once.
 /// `Mesh.channelByteOffset` re-derives the whole layout on every call, so
 /// reading channels per vertex component makes layout derivation, not the
@@ -4031,7 +4059,8 @@ const MeshView = struct {
 
 /// Reads component `comp` of vertex channel `channel_index` for `vertex` as a
 /// float32, honoring the mesh's per-stream layout. Null when the channel is
-/// absent, non-float32, or the read would run past the vertex buffer.
+/// absent, neither Float32 nor Float16, or the read would run past the vertex
+/// buffer.
 fn meshF32(
     view: *const MeshView,
     channel_index: usize,
@@ -4041,10 +4070,24 @@ fn meshF32(
 ) ?f32 {
     const mesh = view.mesh;
     const c = mesh.channel(channel_index) orelse return null;
-    if (c.format != 0 or comp >= c.dimension) return null;
+    if (comp >= c.dimension) return null;
+    const fs = unityz.classes.Mesh.formatSize(c.format) orelse return null;
     const off = view.channelByteOffset(channel_index, vertex) orelse return null;
-    if (off +| (comp + 1) * 4 > mesh.vertex_data.len) return null;
-    return readF32(mesh.vertex_data, off + comp * 4, endian);
+    if (off +| (comp + 1) * fs > mesh.vertex_data.len) return null;
+    return switch (c.format) {
+        0 => readF32(mesh.vertex_data, off + comp * 4, endian),
+        1 => readF16(mesh.vertex_data, off + comp * 2, endian),
+        else => null,
+    };
+}
+
+/// True when `c` is present, readable as floats (Float32 or Float16), and
+/// carries at least `n` components that hold data - the padded nibble of a
+/// Float16 normal, for instance, stores four components but only three of
+/// them are a normal.
+fn channelHas(c: ?unityz.classes.MeshChannel, n: usize) bool {
+    const ch = c orelse return false;
+    return (ch.format == 0 or ch.format == 1) and ch.real_dimension >= n;
 }
 
 /// Reads one component of a vertex channel as an unsigned integer, for the
@@ -4221,8 +4264,10 @@ fn unityMajor(version: []const u8) u32 {
 
 /// Wavefront OBJ export for a Mesh: vertices, normals, UVs, and triangle
 /// faces from the index buffer. Handles multi-stream vertex layouts (each
-/// channel read from its own stream's stride/offset). Returns an empty slice
-/// when the layout is unsupported (compressed mesh, non-float32 channel).
+/// channel read from its own stream's stride/offset). Positions must be
+/// Float32; normals and UVs may be Float32 or Float16 (the formats streamed
+/// meshes use). Returns an empty slice when the layout is unsupported
+/// (compressed mesh, a position channel of another format).
 fn writeMeshObj(
     arena: std.mem.Allocator,
     sf: *const unityz.serialized.SerializedFile,
@@ -4271,7 +4316,7 @@ fn writeMeshObj(
         try w.print("\n", .{});
     }
     if (uv) |t| {
-        if (t.format == 0 and t.dimension >= 2 and meshF32(&mv, uv_index, 0, 0, sf.endian) != null) {
+        if (channelHas(t, 2) and meshF32(&mv, uv_index, 0, 0, sf.endian) != null) {
             for (0..vcount) |i| {
                 try w.print("vt ", .{});
                 try writeObjFloat(&w, @as(f64, meshF32(&mv, uv_index, i, 0, sf.endian) orelse 0));
@@ -4282,7 +4327,7 @@ fn writeMeshObj(
         }
     }
     if (nrm) |n| {
-        if (n.format == 0 and n.dimension >= 3 and meshF32(&mv, 1, 0, 0, sf.endian) != null) {
+        if (channelHas(n, 3) and meshF32(&mv, 1, 0, 0, sf.endian) != null) {
             for (0..vcount) |i| {
                 try w.print("vn ", .{});
                 try writeObjFloat(&w, -@as(f64, meshF32(&mv, 1, i, 0, sf.endian) orelse 0));
@@ -4297,8 +4342,8 @@ fn writeMeshObj(
 
     // faces, grouped by submesh (triangles and quads); each submesh gets
     // its own `g <name>_<N>` group line, matching UnityPy
-    const has_n = nrm != null and nrm.?.format == 0 and nrm.?.dimension >= 3;
-    const has_t = uv != null and uv.?.format == 0 and uv.?.dimension >= 2;
+    const has_n = channelHas(nrm, 3);
+    const has_t = channelHas(uv, 2);
     var index_cursor: usize = 0;
     if (unityz.classes.fieldOf(v, "m_SubMeshes")) |subs| {
         if (subs == .array) {
@@ -4384,8 +4429,8 @@ fn writeMeshGlb(
     const uv_major = unityMajor(sf.unity_version);
     const uv_index: usize = if (uv_major >= 2018) 4 else 3;
     const uv = mesh.channel(uv_index);
-    const has_n = nrm != null and nrm.?.format == 0 and nrm.?.dimension >= 3;
-    const has_t = uv != null and uv.?.format == 0 and uv.?.dimension >= 2;
+    const has_n = channelHas(nrm, 3);
+    const has_t = channelHas(uv, 2);
 
     // -------- skin detection --------
     // Unity 2019+ keeps per-vertex skin data in vertex channels 12 (blend
@@ -4637,14 +4682,17 @@ fn writeMeshGlb(
             try js.writeAll("]}");
         }
     }
-    try js.writeAll("],\"skins\":[");
+    // glTF's `skins` array requires at least one entry, so an unskinned mesh
+    // must omit it rather than write an empty array (the Khronos validator
+    // reports EMPTY_ENTITY for `"skins":[]`).
+    try js.writeAll("]");
     if (has_skin) {
-        try js.print("{{\"inverseBindMatrices\":{d},\"skeleton\":1,\"joints\":[1", .{ib_acc});
+        try js.print(",\"skins\":[{{\"inverseBindMatrices\":{d},\"skeleton\":1,\"joints\":[1", .{ib_acc});
         var bi: usize = 2;
         while (bi <= n_bones) : (bi += 1) try js.print(",{d}", .{bi});
-        try js.writeAll("]}");
+        try js.writeAll("]}]");
     }
-    try js.writeAll("],\"meshes\":[{\"name\":");
+    try js.writeAll(",\"meshes\":[{\"name\":");
     try writeJsonString(js, name);
     try js.writeAll(",\"primitives\":[{\"attributes\":{\"POSITION\":0");
     var acc_next: usize = 1;
@@ -11019,6 +11067,127 @@ test "writeObjFloat matches Python's %.9g" {
     try std.testing.expectError(error.NonFinite, writeObjFloat(&w, std.math.nan(f64)));
     // Nothing was emitted for a rejected value.
     try std.testing.expectEqual(@as(usize, 0), w.getWritten().len);
+}
+
+test "a packed Float16 channel table exports geometry instead of being refused" {
+    // The real streamed layout (see classes.zig's packed-dimension test):
+    // Float32 position at 0, Float16 normal at 12 (packed byte 0x34),
+    // Float16 tangent at 20, Float16 UV0 at 28 - 32 bytes per vertex. With
+    // the byte read as a count the stride would be 116 and every buffer
+    // would be refused; with the stored nibble the mesh exports.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const half = struct {
+        fn of(x: f32) u16 {
+            return @bitCast(@as(f16, @floatCast(x)));
+        }
+    };
+    const positions = [_][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 } };
+    const uvs = [_][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 } };
+    var data: [3 * 32]u8 = undefined;
+    for (0..3) |i| {
+        const base = i * 32;
+        for (0..3) |c| {
+            std.mem.writeInt(u32, data[base + c * 4 ..][0..4], @bitCast(positions[i][c]), .little);
+        }
+        // normal (0,0,1,0): a Float16 x4 with the padded fourth component
+        std.mem.writeInt(u16, data[base + 12 ..][0..2], half.of(0), .little);
+        std.mem.writeInt(u16, data[base + 14 ..][0..2], half.of(0), .little);
+        std.mem.writeInt(u16, data[base + 16 ..][0..2], half.of(1), .little);
+        std.mem.writeInt(u16, data[base + 18 ..][0..2], half.of(0), .little);
+        // tangent (1,0,0,-1)
+        std.mem.writeInt(u16, data[base + 20 ..][0..2], half.of(1), .little);
+        std.mem.writeInt(u16, data[base + 22 ..][0..2], half.of(0), .little);
+        std.mem.writeInt(u16, data[base + 24 ..][0..2], half.of(0), .little);
+        std.mem.writeInt(u16, data[base + 26 ..][0..2], half.of(-1), .little);
+        std.mem.writeInt(u16, data[base + 28 ..][0..2], half.of(uvs[i][0]), .little);
+        std.mem.writeInt(u16, data[base + 30 ..][0..2], half.of(uvs[i][1]), .little);
+    }
+    const indices = [_]u8{ 0, 0, 1, 0, 2, 0 }; // u16: 0, 1, 2
+    const chan = struct {
+        fn make(comptime offset: i64, comptime format: i64, comptime dimension: i64) unityz.value.Value {
+            const fields = [_]unityz.value.Field{
+                .{ .name = "stream", .value = .{ .int = 0 } },
+                .{ .name = "offset", .value = .{ .int = offset } },
+                .{ .name = "format", .value = .{ .int = format } },
+                .{ .name = "dimension", .value = .{ .int = dimension } },
+            };
+            return .{ .obj = &fields };
+        }
+    };
+    const v = unityz.value.Value{ .obj = &[_]unityz.value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "packed" } },
+        .{ .name = "m_MeshCompression", .value = .{ .int = 0 } },
+        .{ .name = "m_IndexFormat", .value = .{ .int = 0 } },
+        .{ .name = "m_IndexBuffer", .value = .{ .bytes = &indices } },
+        .{ .name = "m_SubMeshes", .value = .{ .array = &[_]unityz.value.Value{
+            .{ .obj = &[_]unityz.value.Field{
+                .{ .name = "topology", .value = .{ .int = 0 } },
+                .{ .name = "indexCount", .value = .{ .int = 3 } },
+            } },
+        } } },
+        .{ .name = "m_VertexData", .value = .{ .obj = &[_]unityz.value.Field{
+            .{ .name = "m_VertexCount", .value = .{ .int = 3 } },
+            .{ .name = "m_Channels", .value = .{ .array = &[_]unityz.value.Value{
+                chan.make(0, 0, 3),
+                chan.make(12, 1, 0x34),
+                chan.make(20, 1, 4),
+                chan.make(0, 0, 0),
+                chan.make(28, 1, 2),
+            } } },
+            .{ .name = "m_DataSize", .value = .{ .bytes = &data } },
+        } } },
+    } };
+    var mesh = unityz.classes.Mesh.fromValue(v);
+    try std.testing.expectEqual(@as(u32, 3), mesh.channel(1).?.real_dimension);
+    try std.testing.expectEqual(@as(usize, 32), mesh.stride().?);
+
+    const sf = unityz.serialized.SerializedFile{
+        .version = 22,
+        .file_size = 0,
+        .data_offset = 0,
+        .metadata_size = 0,
+        .endian = .little,
+        .unity_version = "2022.3.62f2",
+        .types = &.{},
+        .objects = &.{},
+        .script_types = &.{},
+        .externals = &.{},
+        .ref_types = &.{},
+        .source = "",
+    };
+
+    // OBJ carries all three channels; the normal is readable because the
+    // Float16 format and the real dimension are honoured.
+    const obj = try writeMeshObj(a, &sf, v, &mesh);
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, obj, "\nv "));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, obj, "\nvn "));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, obj, "\nvt "));
+    try std.testing.expect(std.mem.indexOf(u8, obj, "\nvn -0 0 1\n") != null);
+
+    // The GLB carries POSITION/NORMAL/TEXCOORD_0 with three of each and one
+    // triangle, and no empty `skins` array (glTF requires at least one).
+    const glb = try writeMeshGlb(a, &sf, v, &mesh, null);
+    try std.testing.expectEqualStrings("glTF", glb[0..4]);
+    const json_len = std.mem.readInt(u32, glb[12..16], .little);
+    const json = glb[20 .. 20 + json_len];
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"NORMAL\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"TEXCOORD_0\":2") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, json, "\"count\":3,\"type\":\"VEC3\""));
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"count\":3,\"type\":\"VEC2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"count\":3,\"type\":\"SCALAR\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"skins\"") == null);
+    try std.testing.expectEqual(@as(u32, @intCast(glb.len)), std.mem.readInt(u32, glb[8..12], .little));
+
+    // BIN: 3 positions, then 3 normals - the half-float (0,0,1) widens to
+    // f32 and X is mirrored, so the first one is (-0, 0, 1).
+    const bin = glb[20 + json_len + 8 ..];
+    const nrm = bin[3 * 12 + 12 ..];
+    try std.testing.expectApproxEqAbs(@as(f32, 0), std.mem.bytesToValue(f32, nrm[0..4]), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), std.mem.bytesToValue(f32, nrm[4..8]), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), std.mem.bytesToValue(f32, nrm[8..12]), 1e-6);
 }
 
 test "wavPcm16 rejects clip headers that cannot make a usable WAV" {
