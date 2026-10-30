@@ -11,6 +11,10 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.15] - 2026-10-31
+
 ### Fixed
 
 - A skinned mesh whose joints have several roots gets an armature node over them.
