@@ -11,7 +11,12 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- A character GLB carries the joint hierarchy. Each joint is parented from its
+  Unity Transform's `m_Father`, its matrix is written relative to its parent,
+  and only the mesh node is a scene root. With the joints as flat scene roots
+  an importer built a one-bone skeleton, which cannot skin a 63-joint body.
 
 ## [0.1.13] - 2026-10-31
 
