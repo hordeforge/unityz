@@ -11,6 +11,18 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+### Fixed
+
+- A skinned character's joints form one tree again when the renderer's `m_Bones` leaves a
+  bone out. Stock's Boe rig weights its torso on `Spine3` and omits `Spine`, `Spine1` and
+  `Spine2`, so `Spine3` and `Hips` were sibling roots and a consumer that promotes one
+  joint to the skeleton root put the hips in the wrong frame: Unreal imports the body
+  folded. The class-137 export now adds the missing ancestors, each at the bind world its
+  child implies, so the chain runs `Hips`, `Spine`, `Spine1`, `Spine2`, `Spine3` and the
+  body has one root. Measured on `boe.bundle`: 58 joints for 55 listed bones, one root.
+  A chain that runs out above the rig's root is still dropped, so the topmost bone stays
+  a root as before.
+
 ### Added
 
 - Avatar (class 90) exports as `avatar_<id>_<name>.json`: the human map (rig bone to human
