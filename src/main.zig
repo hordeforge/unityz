@@ -4143,13 +4143,35 @@ fn meshU32(
     if (off +| (comp + 1) * fs > mesh.vertex_data.len) return null;
     const b = mesh.vertex_data[off + comp * fs ..];
     return switch (c.format) {
-        6, 8, 10 => switch (fs) {
+        2, 4, 6, 8, 10 => switch (fs) {
             1 => b[0],
             2 => std.mem.readInt(u16, b[0..2], endian),
             else => std.mem.readInt(u32, b[0..4], endian),
         },
         // signed variants carry no legal bone index; report null
         else => null,
+    };
+}
+
+/// A packed weight as a fraction of its format's maximum.
+///
+/// Unity stores blend weights as Float32, Float16, or a normalized integer (UNorm8, UNorm16).
+/// Reading a UNorm16 weight as raw bits turns 0.5 into 32768, so the integer forms are divided
+/// by their maximum. Null for a format that is not a weight.
+fn normalizedWeight(format: i32, raw: u32) ?f32 {
+    return switch (format) {
+        2, 6 => @as(f32, @floatFromInt(raw)) / 255.0,
+        4, 8 => @as(f32, @floatFromInt(raw & 0xFFFF)) / 65535.0,
+        else => null,
+    };
+}
+
+/// One blend weight of one vertex, in the mesh's own format.
+fn meshWeight(view: *const MeshView, vertex: usize, comp: usize, endian: std.builtin.Endian) f32 {
+    const channel = view.mesh.channel(12) orelse return 0;
+    return switch (channel.format) {
+        0, 1 => meshF32(view, 12, vertex, comp, endian) orelse 0,
+        else => normalizedWeight(channel.format, meshU32(view, 12, vertex, comp, endian) orelse 0) orelse 0,
     };
 }
 
@@ -4600,7 +4622,17 @@ fn writeMeshGlb(
     };
     const wch = mesh.channel(12);
     const ich = mesh.channel(13);
-    const channel_skin = wch != null and wch.?.format == 0 and wch.?.dimension >= 4 and ich != null and ich.?.dimension >= 4;
+    // Unity packs blend weights as floats, halves or normalized integers depending on the
+    // build; `crawler.bundle`'s body stores UNorm16 weights, and requiring Float32 made the
+    // whole skin invisible.
+    const packed_weight = if (wch) |channel|
+        switch (channel.format) {
+            0, 1, 2, 4, 6, 8 => true,
+            else => false,
+        }
+    else
+        false;
+    const channel_skin = wch != null and packed_weight and wch.?.dimension >= 4 and ich != null and ich.?.dimension >= 4;
     const legacy_skin = blk: {
         if (channel_skin) break :blk &.{};
         const arr = blk2: {
@@ -4775,7 +4807,7 @@ fn writeMeshGlb(
                 const w = if (legacy_skin.len != 0)
                     legacySkinWeight(legacy_skin[vi], k) orelse 0
                 else
-                    meshF32(&mv, 12, vi, k, sf.endian) orelse 0;
+                    meshWeight(&mv, vi, k, sf.endian);
                 try bin.writeFloat(f32, w);
             }
         }
@@ -11404,6 +11436,22 @@ test "a packed Float16 channel table exports geometry instead of being refused" 
     try std.testing.expectApproxEqAbs(@as(f32, 0), std.mem.bytesToValue(f32, nrm[0..4]), 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 0), std.mem.bytesToValue(f32, nrm[4..8]), 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1), std.mem.bytesToValue(f32, nrm[8..12]), 1e-6);
+}
+
+test "packed weights normalize by their format's maximum" {
+    try std.testing.expectEqual(@as(?f32, 1.0), normalizedWeight(2, 255));
+    try std.testing.expectEqual(@as(?f32, 1.0), normalizedWeight(4, 65535));
+    try std.testing.expectEqual(@as(?f32, null), normalizedWeight(0, 65535));
+    if (normalizedWeight(4, 32768)) |half| {
+        try std.testing.expect(@abs(half - 0.5) < 0.001);
+    } else {
+        return error.TestUnexpectedResult;
+    }
+    if (normalizedWeight(6, 128)) |half| {
+        try std.testing.expect(@abs(half - 0.502) < 0.01);
+    } else {
+        return error.TestUnexpectedResult;
+    }
 }
 
 test "the vertex format table follows the file's Unity version" {

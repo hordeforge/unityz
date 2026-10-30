@@ -11,7 +11,12 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- Blend weights stored as a normalized integer are read as such. Unity packs weights as
+  Float32, Float16, UNorm8 or UNorm16 depending on the build, and requiring Float32 hid the
+  whole skin of a mesh whose weights are UNorm16 (`crawler.bundle`'s body exported static, with
+  no skeleton); the integer forms are divided by their maximum instead of being read as bits.
 
 ## [0.1.16] - 2026-10-31
 
