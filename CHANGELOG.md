@@ -11,6 +11,10 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.17] - 2026-10-31
+
 ### Fixed
 
 - Blend weights stored as a normalized integer are read as such. Unity packs weights as
