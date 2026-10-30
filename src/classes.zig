@@ -2085,6 +2085,35 @@ pub const MeshChannel = struct {
 /// `offset` with `format`/`dimension` components), and `index_buffer` holds
 /// `m_IndexFormat`-sized indices. Channel formats follow Unity's
 /// `VertexChannelFormat` enum (0 = Float32 ... 10 = UInt32Normalized).
+/// Which vertex-format id table a mesh's channels use.
+///
+/// Unity changed the ids in 2019: format 2 is `Color` (4 bytes) before 2019 and `UNorm8`
+/// (1 byte) after it, and 4..9 move the same way. Reading a 2022 mesh with the old table
+/// overstates a packed tangent by three bytes per vertex, so every later stream shifts and the
+/// skin data is read from the wrong offsets: that is what made a 92-bone body export as
+/// non-finite and lose its skeleton.
+pub const VertexFormats = enum {
+    legacy,
+    modern,
+
+    pub fn size(self: VertexFormats, format: i32) ?usize {
+        return switch (self) {
+            .modern => switch (format) {
+                0, 10, 11 => 4, // Float, UInt32, SInt32
+                1, 4, 5, 8, 9 => 2, // Float16, UNorm16, SNorm16, UInt16, SInt16
+                2, 3, 6, 7 => 1, // UNorm8, SNorm8, UInt8, SInt8
+                else => null,
+            },
+            .legacy => switch (format) {
+                0, 2, 4, 5, 10, 11 => 4,
+                1, 6, 7, 9 => 2,
+                3, 8 => 1,
+                else => null,
+            },
+        };
+    }
+};
+
 pub const Mesh = struct {
     name: []const u8 = "",
     vertex_count: u32 = 0,
@@ -2101,6 +2130,9 @@ pub const Mesh = struct {
     /// is the populated length.
     channels: [14]MeshChannel = [_]MeshChannel{.{}} ** 14,
     channel_count: usize = 0,
+    /// The format id table this mesh's channels use; the default is the shipping build's
+    /// (2022.3). A caller reading an older file sets `.legacy` from its Unity version.
+    formats: VertexFormats = .modern,
 
     pub fn channelSlice(self: *const Mesh) []const MeshChannel {
         return self.channels[0..self.channel_count];
@@ -2131,7 +2163,7 @@ pub const Mesh = struct {
         for (self.channelSlice()) |c| {
             if (c.dimension == 0) continue;
             if (c.stream > max_stream) max_stream = @intCast(c.stream);
-            _ = formatSize(c.format) orelse return null;
+            _ = self.formatSize(c.format) orelse return null;
         }
         if (max_stream >= 4) return null; // Unity writes at most 3
         const vcount: usize = self.vertex_count;
@@ -2140,7 +2172,7 @@ pub const Mesh = struct {
             var max_end: usize = 0;
             for (self.channelSlice()) |c| {
                 if (c.dimension == 0 or c.stream != s) continue;
-                const fs = formatSize(c.format) orelse return null;
+                const fs = self.formatSize(c.format) orelse return null;
                 max_end = @max(max_end, @as(usize, c.offset) +| fs *| @as(usize, c.dimension));
             }
             const stream_stride = (max_end +| 3) / 4 * 4;
@@ -2161,7 +2193,7 @@ pub const Mesh = struct {
     /// know, or the layout is bad.
     pub fn channelByteOffset(self: *const Mesh, index: usize, vertex: usize) ?usize {
         const c = self.channel(index) orelse return null;
-        _ = formatSize(c.format) orelse return null;
+        _ = self.formatSize(c.format) orelse return null;
         var layout: [4]StreamLayout = undefined;
         const nstreams = self.streamLayout(&layout) orelse return null;
         if (@as(usize, c.stream) >= nstreams) return null;
@@ -2169,14 +2201,9 @@ pub const Mesh = struct {
         return st.offset +| @as(usize, c.offset) +| vertex *| st.stride;
     }
 
-    /// Size in bytes of one component for a `VertexChannelFormat` value.
-    pub fn formatSize(format: i32) ?usize {
-        return switch (format) {
-            0, 2, 4, 5, 10, 11 => 4,
-            1, 6, 7, 9 => 2,
-            3, 8 => 1,
-            else => null,
-        };
+    /// Size in bytes of one component for this mesh's format table.
+    pub fn formatSize(self: *const Mesh, format: i32) ?usize {
+        return self.formats.size(format);
     }
 
     /// The interleaved vertex stride: the furthest byte any channel
@@ -2186,7 +2213,7 @@ pub const Mesh = struct {
         for (self.channelSlice()) |c| {
             if (c.dimension == 0) continue;
             if (c.stream != 0) return null;
-            const fs = formatSize(c.format) orelse return null;
+            const fs = self.formatSize(c.format) orelse return null;
             // offset and dimension are raw u32s from the file; saturate
             // instead of wrapping so a bogus channel yields an impossibly
             // large stride (which the callers' size check then rejects)
