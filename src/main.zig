@@ -2831,6 +2831,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
             },
             43 => { // Mesh -> Wavefront OBJ + glTF/GLB
                 var mesh = unityz.classes.Mesh.fromValue(v);
+                mesh.formats = formatsFor(sf.unity_version);
                 // Unity empties `m_DataSize` when it moves the vertex buffer into
                 // the `.resS` sidecar, and `m_StreamData` is then the only copy.
                 // Most decoration meshes ship this way: without the range the
@@ -2892,7 +2893,8 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const mesh_path = if (unityz.classes.fieldOf(v, "m_Mesh")) |mv| pptrPathId(mv) orelse null else null;
                 if (mesh_path == null or mesh_path.? == 0) continue;
                 const mval = readObjectValue(arena, &sf, mesh_path.?, basename(path), injected) orelse continue;
-                const mesh = unityz.classes.Mesh.fromValue(mval);
+                var mesh = unityz.classes.Mesh.fromValue(mval);
+                mesh.formats = formatsFor(sf.unity_version);
                 var names: std.ArrayList([]const u8) = .empty;
                 // Each joint's parent, as an index into `names` (null when the father is not a
                 // bone). The GLB needs the tree: with the joints flat, Unreal imports a
@@ -4083,7 +4085,7 @@ const MeshView = struct {
 
     fn channelByteOffset(self: *const MeshView, index: usize, vertex: usize) ?usize {
         const c = self.mesh.channel(index) orelse return null;
-        _ = unityz.classes.Mesh.formatSize(c.format) orelse return null;
+        _ = self.mesh.formatSize(c.format) orelse return null;
         if (@as(usize, c.stream) >= self.nstreams) return null;
         const st = self.layout[c.stream];
         return st.offset +| @as(usize, c.offset) +| vertex *| st.stride;
@@ -4104,7 +4106,7 @@ fn meshF32(
     const mesh = view.mesh;
     const c = mesh.channel(channel_index) orelse return null;
     if (comp >= c.dimension) return null;
-    const fs = unityz.classes.Mesh.formatSize(c.format) orelse return null;
+    const fs = view.mesh.formatSize(c.format) orelse return null;
     const off = view.channelByteOffset(channel_index, vertex) orelse return null;
     if (off +| (comp + 1) * fs > mesh.vertex_data.len) return null;
     return switch (c.format) {
@@ -4136,7 +4138,7 @@ fn meshU32(
     const mesh = view.mesh;
     const c = mesh.channel(channel_index) orelse return null;
     if (comp >= c.dimension) return null;
-    const fs = unityz.classes.Mesh.formatSize(c.format) orelse return null;
+    const fs = view.mesh.formatSize(c.format) orelse return null;
     const off = view.channelByteOffset(channel_index, vertex) orelse return null;
     if (off +| (comp + 1) * fs > mesh.vertex_data.len) return null;
     const b = mesh.vertex_data[off + comp * fs ..];
@@ -4291,6 +4293,12 @@ fn writeValueJson(arena: std.mem.Allocator, v: unityz.value.Value) ![]const u8 {
 /// the file carries no readable version. The parse itself belongs to the
 /// library (`classes.unityVersionPart`), which the class decoders read the
 /// same version through; this only pins the exporters' fallback.
+/// The vertex-format id table a file uses: Unity changed it in 2019, and a mesh read with the
+/// wrong table shifts every stream after a packed channel.
+fn formatsFor(version: []const u8) unityz.classes.VertexFormats {
+    return if (unityMajor(version) >= 2019) .modern else .legacy;
+}
+
 fn unityMajor(version: []const u8) u32 {
     return unityz.classes.unityVersionPart(version, 0) orelse 0;
 }
@@ -11347,6 +11355,8 @@ test "a packed Float16 channel table exports geometry instead of being refused" 
         } } },
     } };
     var mesh = unityz.classes.Mesh.fromValue(v);
+    // The fixture's channels are the 2019+ ids (Float16 normal, Float16 uv).
+    mesh.formats = .modern;
     try std.testing.expectEqual(@as(u32, 3), mesh.channel(1).?.real_dimension);
     try std.testing.expectEqual(@as(usize, 32), mesh.stride().?);
 
@@ -11394,6 +11404,24 @@ test "a packed Float16 channel table exports geometry instead of being refused" 
     try std.testing.expectApproxEqAbs(@as(f32, 0), std.mem.bytesToValue(f32, nrm[0..4]), 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 0), std.mem.bytesToValue(f32, nrm[4..8]), 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1), std.mem.bytesToValue(f32, nrm[8..12]), 1e-6);
+}
+
+test "the vertex format table follows the file's Unity version" {
+    // 2019 changed the ids: format 2 is Color at 4 bytes before it and UNorm8 at 1 after,
+    // and reading a 2022 mesh with the old table shifts every stream past a packed channel.
+    const modern = unityz.classes.VertexFormats.modern;
+    const legacy = unityz.classes.VertexFormats.legacy;
+    try std.testing.expectEqual(@as(?usize, 1), modern.size(2));
+    try std.testing.expectEqual(@as(?usize, 4), legacy.size(2));
+    try std.testing.expectEqual(@as(?usize, 2), modern.size(4));
+    try std.testing.expectEqual(@as(?usize, 4), legacy.size(4));
+    try std.testing.expectEqual(@as(?usize, 1), modern.size(6));
+    try std.testing.expectEqual(@as(?usize, 2), legacy.size(6));
+    try std.testing.expectEqual(@as(?usize, 4), modern.size(10));
+    try std.testing.expectEqual(@as(?usize, null), modern.size(12));
+    try std.testing.expectEqual(unityz.classes.VertexFormats.modern, formatsFor("2022.3.62f2"));
+    try std.testing.expectEqual(unityz.classes.VertexFormats.legacy, formatsFor("5.6.7f1"));
+    try std.testing.expectEqual(unityz.classes.VertexFormats.legacy, formatsFor("2018.4.36f1"));
 }
 
 test "a bone forest becomes glTF children lists" {
