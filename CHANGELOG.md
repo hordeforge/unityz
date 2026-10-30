@@ -11,6 +11,10 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.14] - 2026-10-31
+
 ### Fixed
 
 - A character GLB carries the joint hierarchy. Each joint is parented from its
