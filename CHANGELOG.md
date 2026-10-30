@@ -11,6 +11,10 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.16] - 2026-10-31
+
 ### Added
 
 - An AnimationClip's muscle data is written to its JSON: `space` (`muscle`),
@@ -19,6 +23,15 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
   no curve keys at all (a 1.33 s clip is 42 frames by 84 muscles, 3528 samples),
   so this is the animation itself, in muscle space; turning it into bone
   transforms needs Unity's muscle solver.
+
+### Fixed
+
+- A mesh's vertex-format table follows the file's Unity version. 2019 changed the
+  ids: format 2 is `Color` (4 bytes) before it and `UNorm8` (1 byte) after, and 4
+  through 9 moved the same way. A 2022 mesh read with the old table overstates a
+  packed tangent by three bytes per vertex, so every stream after it shifts and the
+  skin data comes from the wrong offsets (`screamer.bundle` mesh 7389628092942612418
+  failed with `NonFinite` and its 92-bone body exported without a skeleton).
 
 ## [0.1.15] - 2026-10-31
 
