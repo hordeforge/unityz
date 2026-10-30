@@ -4575,6 +4575,23 @@ fn writeMuscleClipData(w: *std.Io.Writer, v: unityz.value.Value) !void {
     const start = if (unityz.classes.fieldOf(muscle, "m_StartTime")) |t| t.asFloat() orelse 0 else 0;
     const stop = if (unityz.classes.fieldOf(muscle, "m_StopTime")) |t| t.asFloat() orelse 0 else 0;
     try w.print(",\"space\":\"muscle\",\"start\":{f},\"stop\":{f}", .{ jsonFloat(start), jsonFloat(stop) });
+    // The mapping a sampler reads first: `m_IndexArray` has one slot per muscle curve and holds
+    // the dense clip's curve index, or -1 for a curve that is not in the dense clip. Without it
+    // a dense frame is just "some curves" with no idea which muscle each one is.
+    if (unityz.classes.fieldOf(muscle, "m_IndexArray")) |indices| {
+        if (indices == .array) {
+            try w.writeAll(",\"index_array\":[");
+            for (indices.array, 0..) |index, i| {
+                if (i != 0) try w.writeByte(',');
+                try w.print("{d}", .{switch (index) {
+                    .int => |n| n,
+                    .uint => |n| @as(i64, @intCast(n)),
+                    else => 0,
+                }});
+            }
+            try w.writeAll("]");
+        }
+    }
     const clip = unityz.classes.fieldOf(muscle, "m_Clip") orelse return;
     const data = unityz.classes.fieldOf(clip, "data") orelse return;
 
