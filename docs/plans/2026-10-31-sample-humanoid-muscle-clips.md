@@ -1,8 +1,22 @@
 # Plan - sample Unity humanoid muscle clips
 
 **Date:** 2026-10-31  
-**Status:** Draft  
+**Status:** Superseded  
 **Related:** the exported clip data (CHANGELOG 0.1.16, `AnimationClip` JSON)
+
+## Status
+
+Superseded as a route, not as research. The measurements below stand, and they are why the route
+changed: the dense array does not behave like plain muscle values under any test applied (every
+column varies in almost every clip, `m_ValueArrayDelta.m_Start` changes nothing, and the largest
+columns do not match the bone a clip moves), and Unity will not hand the muscle values back in
+batchmode (`AnimationHumanStream.GetMuscle` returns zero even with a valid humanoid stream).
+
+The consumer now takes its animation from the **oracle** instead: sample each clip inside the stock
+engine's own Unity version, one entry per frame, and import those bone rotations. That is stock
+ground truth, needs no decoding of Unity's internal encoding, and the sampling tool is committed
+(`make clip-sample --all-frames`). A muscle-space decoder would still be worth having for
+inspection, so this plan stays as the record of what it would take and of what was measured.
 
 ## Outcome
 
