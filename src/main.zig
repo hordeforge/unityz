@@ -2867,7 +2867,7 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 extracted += 1;
                 // GLB (glTF 2.0 binary) alongside the OBJ: self-contained
                 // and material/UV/bone-friendly for modern pipelines.
-                if (writeMeshGlb(arena, &sf, v, &mesh, null)) |g| {
+                if (writeMeshGlb(arena, &sf, v, &mesh, null, null)) |g| {
                     if (g.len != 0) {
                         var glb_buf: [160]u8 = undefined;
                         const glb_name = sanitizeComponent(try std.fmt.bufPrint(&glb_buf, "{s}.glb", .{name[0 .. name.len - 4]}));
@@ -2894,13 +2894,22 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const mval = readObjectValue(arena, &sf, mesh_path.?, basename(path), injected) orelse continue;
                 const mesh = unityz.classes.Mesh.fromValue(mval);
                 var names: std.ArrayList([]const u8) = .empty;
+                // Each joint's parent, as an index into `names` (null when the father is not a
+                // bone). The GLB needs the tree: with the joints flat, Unreal imports a
+                // one-bone skeleton and the mesh cannot skin.
+                var father_ids: std.ArrayList(i64) = .empty;
+                var bone_ids: std.ArrayList(i64) = .empty;
                 if (unityz.classes.fieldOf(v, "m_Bones")) |b| {
                     if (b == .array) {
                         for (b.array) |bone| {
                             var nm: []const u8 = "";
+                            var father: i64 = 0;
                             if (pptrPathId(bone)) |bid| {
                                 if (bid != 0) {
                                     if (readObjectValue(arena, &sf, bid, basename(path), injected)) |tv| {
+                                        if (unityz.classes.fieldOf(tv, "m_Father")) |fv| {
+                                            father = pptrPathId(fv) orelse 0;
+                                        }
                                         if (unityz.classes.fieldOf(tv, "m_GameObject")) |gv| {
                                             if (pptrPathId(gv)) |gid| {
                                                 if (gid != 0) {
@@ -2914,10 +2923,25 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                                 }
                             }
                             try names.append(arena, nm);
+                            try bone_ids.append(arena, if (pptrPathId(bone)) |bid| bid else 0);
+                            try father_ids.append(arena, father);
                         }
                     }
                 }
-                const g = writeMeshGlb(arena, &sf, mval, &mesh, names.items) catch |err| {
+                var parents: std.ArrayList(?u32) = .empty;
+                for (father_ids.items) |father| {
+                    var parent: ?u32 = null;
+                    if (father != 0) {
+                        for (bone_ids.items, 0..) |id, index| {
+                            if (id == father) {
+                                parent = @intCast(index);
+                                break;
+                            }
+                        }
+                    }
+                    try parents.append(arena, parent);
+                }
+                const g = writeMeshGlb(arena, &sf, mval, &mesh, names.items, parents.items) catch |err| {
                     try stdout.print("  renderer {d}: character GLB conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
                     continue;
@@ -4406,11 +4430,11 @@ fn roundHalfEven(x: f64) f64 {
 /// bind world transform (bindPose^-1) and inverseBindMatrices hold the raw
 /// bind poses — the per-vertex rest pose then round-trips unchanged.
 /// The `nodes` list of glTF's single scene: the mesh, then every joint when the mesh is
-/// skinned. A joint that sits in no scene is invisible to an importer: Unreal's translator
-/// aborted on a body whose joints were all detached and imported nothing from it, while the
-/// same file imports as a skeletal mesh plus skeleton once the joints are scene roots. Each
-/// joint keeps its bind world transform as its local transform, which a root may do; a
-/// nested hierarchy needs the Unity parents, which this writer does not carry yet.
+/// skinned and has no hierarchy. A joint that sits in no scene is invisible to an importer:
+/// Unreal's translator aborted on a body whose joints were all detached and imported nothing
+/// from it, while the same file imports as a skeletal mesh plus skeleton once the joints are
+/// scene roots. With `bone_parents` the joints hang from the mesh node instead, which is a
+/// tree an importer can turn into a skeleton of every bone.
 fn writeSceneRootList(w: *std.Io.Writer, has_skin: bool, joints: usize) !void {
     try w.writeAll("[0");
     if (has_skin) {
@@ -4421,12 +4445,43 @@ fn writeSceneRootList(w: *std.Io.Writer, has_skin: bool, joints: usize) !void {
     try w.writeAll("]");
 }
 
+/// Row-major 4x4 product, the same convention `mat4Inverse` and the joint matrices use.
+fn mat4Multiply(a: [16]f32, b: [16]f32) [16]f32 {
+    var out: [16]f32 = undefined;
+    for (0..4) |r| {
+        for (0..4) |c| {
+            var sum: f32 = 0;
+            for (0..4) |k| sum += a[r * 4 + k] * b[k * 4 + c];
+            out[r * 4 + c] = sum;
+        }
+    }
+    return out;
+}
+
+/// The children of each glTF node in a bone forest: element 0 is the mesh node, element i+1
+/// is bone i, and a bone whose parent is null hangs from the mesh node. Without the tree an
+/// importer saw every joint as a root and built a one-bone skeleton.
+fn boneChildren(
+    arena: std.mem.Allocator,
+    parents: []const ?u32,
+) ![]std.ArrayList(u32) {
+    const lists = try arena.alloc(std.ArrayList(u32), parents.len + 1);
+    for (lists) |*list| list.* = .empty;
+    for (parents, 0..) |parent, index| {
+        const child: u32 = @intCast(index + 1);
+        const owner: usize = if (parent) |p| @as(usize, p) + 1 else 0;
+        try lists[owner].append(arena, child);
+    }
+    return lists;
+}
+
 fn writeMeshGlb(
     arena: std.mem.Allocator,
     sf: *const unityz.serialized.SerializedFile,
     v: unityz.value.Value,
     mesh: *const unityz.classes.Mesh,
     bone_names: ?[]const []const u8,
+    bone_parents: ?[]const ?u32,
 ) ![]const u8 {
     if ((unityz.classes.intField(v, "m_MeshCompression") orelse 0) != 0) return &.{};
     const vch = mesh.channel(0) orelse return &.{};
@@ -4673,17 +4728,50 @@ fn writeMeshGlb(
     const name = unityz.streams.trimNul(mesh.name);
     var jaw = std.Io.Writer.Allocating.init(arena);
     const js = &jaw.writer;
+    // The joint tree, when the caller resolved the bones' parents. A node matrix is local, so
+    // each bone's local is its world transform relative to its parent's; a root keeps its world
+    // transform. Without the tree the joints are separate scene roots and an importer builds a
+    // one-bone skeleton from them, which cannot skin the mesh.
+    const has_tree = has_skin and bone_parents != null and bone_parents.?.len == joint_matrices.len;
+    var locals: [][16]f32 = joint_matrices;
+    var children: []std.ArrayList(u32) = &.{};
+    if (has_tree) {
+        const parents = bone_parents.?;
+        children = try boneChildren(arena, parents);
+        const local = try arena.alloc([16]f32, joint_matrices.len);
+        for (joint_matrices, 0..) |world, bi| {
+            if (parents[bi]) |parent| {
+                const parent_inverse = mat4Inverse(joint_matrices[parent]) orelse world;
+                local[bi] = mat4Multiply(parent_inverse, world);
+            } else {
+                local[bi] = world;
+            }
+        }
+        locals = local;
+    }
     try js.writeAll("{\"asset\":{\"version\":\"2.0\",\"generator\":\"unityz\"},\"scene\":0,\"scenes\":[{\"nodes\":");
-    try writeSceneRootList(js, has_skin, joint_matrices.len);
+    if (has_tree) {
+        // The mesh is the only scene root; the joints hang from it.
+        try js.writeAll("[0]");
+    } else {
+        try writeSceneRootList(js, has_skin, joint_matrices.len);
+    }
     try js.writeAll("}],\"nodes\":[{\"mesh\":0,\"name\":");
     try writeJsonString(js, name);
     if (has_skin) try js.writeAll(",\"skin\":0");
+    if (has_tree and children[0].items.len != 0) {
+        try js.writeAll(",\"children\":[");
+        for (children[0].items, 0..) |child, index| {
+            if (index != 0) try js.writeAll(",");
+            try js.print("{d}", .{child});
+        }
+        try js.writeAll("]");
+    }
     try js.writeAll("}");
     if (has_skin) {
-        // joint nodes: each sits at its bone's bind world transform
-        // (row-major inverse bind pose, printed column-major for glTF);
-        // named from the armature when the caller resolved m_Bones
-        for (joint_matrices, 0..) |jm, bi| {
+        // joint nodes: each sits at its bone's transform relative to its parent; named from
+        // the armature when the caller resolved m_Bones
+        for (locals, 0..) |jm, bi| {
             const jname = if (bone_names != null and bi < bone_names.?.len and bone_names.?[bi].len != 0) bone_names.?[bi] else blk: {
                 var nb: [24]u8 = undefined;
                 break :blk std.fmt.bufPrint(&nb, "Bone{d}", .{bi}) catch "Bone";
@@ -4695,6 +4783,13 @@ fn writeMeshGlb(
                 for (0..4) |r| {
                     if (c != 0 or r != 0) try js.writeAll(",");
                     try js.print("{d}", .{jm[r * 4 + c]});
+                }
+            }
+            if (has_tree and children[bi + 1].items.len != 0) {
+                try js.writeAll("],\"children\":[");
+                for (children[bi + 1].items, 0..) |child, index| {
+                    if (index != 0) try js.writeAll(",");
+                    try js.print("{d}", .{child});
                 }
             }
             try js.writeAll("]}");
@@ -11189,7 +11284,7 @@ test "a packed Float16 channel table exports geometry instead of being refused" 
 
     // The GLB carries POSITION/NORMAL/TEXCOORD_0 with three of each and one
     // triangle, and no empty `skins` array (glTF requires at least one).
-    const glb = try writeMeshGlb(a, &sf, v, &mesh, null);
+    const glb = try writeMeshGlb(a, &sf, v, &mesh, null, null);
     try std.testing.expectEqualStrings("glTF", glb[0..4]);
     const json_len = std.mem.readInt(u32, glb[12..16], .little);
     const json = glb[20 .. 20 + json_len];
@@ -11208,6 +11303,31 @@ test "a packed Float16 channel table exports geometry instead of being refused" 
     try std.testing.expectApproxEqAbs(@as(f32, 0), std.mem.bytesToValue(f32, nrm[0..4]), 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 0), std.mem.bytesToValue(f32, nrm[4..8]), 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1), std.mem.bytesToValue(f32, nrm[8..12]), 1e-6);
+}
+
+test "a bone forest becomes glTF children lists" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Bones 0..4, where 1 and 2 hang from 0, 3 hangs from 1, and 4 is a second root.
+    const parents = [_]?u32{ null, 0, 0, 1, null };
+    const lists = try boneChildren(a, &parents);
+    // Element 0 is the mesh node, which takes the roots; bone i is node i+1.
+    try std.testing.expectEqualSlices(u32, &.{ 1, 5 }, lists[0].items);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 3 }, lists[1].items);
+    try std.testing.expectEqualSlices(u32, &.{4}, lists[2].items);
+    try std.testing.expectEqual(@as(usize, 0), lists[3].items.len);
+}
+
+test "mat4Multiply composes row-major transforms" {
+    const identity = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    try std.testing.expectEqualSlices(f32, &identity, &mat4Multiply(identity, identity));
+    var translated = identity;
+    translated[12] = 5;
+    translated[13] = 2;
+    const product = mat4Multiply(translated, identity);
+    try std.testing.expectEqual(@as(f32, 5), product[12]);
+    try std.testing.expectEqual(@as(f32, 2), product[13]);
 }
 
 test "a skinned glTF lists every joint as a scene root" {
