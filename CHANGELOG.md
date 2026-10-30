@@ -11,6 +11,8 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-10-31
+
 ### Fixed
 
 - A skinned character's joints form one tree again when the renderer's `m_Bones` leaves a
