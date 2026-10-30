@@ -156,9 +156,11 @@ layer a full mip chain, and the tool slices it by that stride. See
   with time/value/slopes). A humanoid clip has no curve keys: its motion is in
   the muscle clip, so the JSON also carries `space: "muscle"`, `start`/`stop`,
   `dense` (frames, curves, sample rate, begin time and the sample array),
-  `constant` values, the streamed clip's shape, `muscleClipSize`, event counts
-  and generic bindings. The samples are muscle space, not bone rotations; a
-  solver is what turns them into a pose.
+  `constant` values, `index_array` (one slot per muscle curve: the dense curve
+  index, or `value - denseCurves` into the constants, or -1 when the clip does
+  not animate it), the streamed clip's shape, `muscleClipSize`, event counts and
+  generic bindings. The samples are muscle space, not bone rotations; a solver is
+  what turns them into a pose.
 - Avatars (90): the human description as JSON (the rig-to-human bone map, the skeleton with
   parent names, muscle limits, scale, translation and extra-root flags), which is what a
   humanoid clip sampler reads
