@@ -41,15 +41,24 @@ Known from the avatar export (`avatar_-7101528791746256914_ZAnimBaseAvatar.json`
   character GLB already carries;
 - `scale` is 0.01, `has_translation_dof` and `has_extra_root` are false.
 
-Settled for the curve layout (step 2, measured on `leftArmB` in `zombie.bundle`):
+Partly settled for the curve layout (step 2, measured across **all 376** clips in
+`zombie.bundle`):
 
-- `m_MuscleClip.m_IndexArray` has **200 slots**, one per muscle curve, and each slot holds the
-  curve's source or `-1` for a curve the clip does not animate;
-- the non-negative values are **0..129** and there are **130** of them, which is exactly the 81
-  dense curves plus the 49 constant values. So slot → value `v`: if `v < dense.curves` the value
-  is `dense.samples[frame * curves + v]`, otherwise it is `constant[v - dense.curves]`;
-- the frame is `samples[frame * curves ..][curve]`, frame 0 included, and the clip's `start`/`stop`
-  date it.
+- `m_MuscleClip.m_IndexArray` has **200 slots**, one per muscle curve, holding the curve's source
+  or `-1`;
+- **358 of 376** clips bind exactly **130** slots, always `7..136`; **13** also bind the root
+  (`0..136`, 137 slots) and **5** bind none. So the mask is a property of the rig, not of the clip,
+  and slots `0..6` are the root;
+- on `leftArmB` the bound sources are `0..129`, exactly its 81 dense curves plus 49 constants, so a
+  source below `dense.curves` is dense and the rest are constant. **That does not generalise**:
+  bound equals dense-plus-constant for only 219 of the 376 clips, so the dense/constant split needs
+  its own rule (likely `m_StreamedClip`, which is empty for these, plus `m_ValueArrayDelta`);
+- a frame is `dense.samples[frame * curves + source]`, frame 0 included, dated by `start`/`stop`.
+
+What that leaves for the layout is a ground-truth experiment rather than more inference: a Unity
+2022.3 editor can load a stock bundle (`AssetBundle.LoadFromFile`, the same engine version that
+built it), read the `AnimationClip`, and sample it with the runtime's own API. That gives the exact
+numbers to compare a transcription against, for the slot order and the dense/constant split both.
 
 Still unknown, and each blocks the solver:
 
