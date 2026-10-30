@@ -4445,6 +4445,15 @@ fn writeSceneRootList(w: *std.Io.Writer, has_skin: bool, joints: usize) !void {
     try w.writeAll("]");
 }
 
+/// How many extra nodes an armature needs: one when the joints have more than one root.
+///
+/// An importer builds a skeleton only from a single tree. A body whose joint list had ten
+/// roots imported as a static mesh; the same file with one armature node over them imports as
+/// a skeletal mesh, so the roots get a parent of their own.
+fn extraRootNodes(root_count: usize) usize {
+    return if (root_count > 1) 1 else 0;
+}
+
 /// Row-major 4x4 product, the same convention `mat4Inverse` and the joint matrices use.
 fn mat4Multiply(a: [16]f32, b: [16]f32) [16]f32 {
     var out: [16]f32 = undefined;
@@ -4749,6 +4758,12 @@ fn writeMeshGlb(
         }
         locals = local;
     }
+    // An importer builds a skeleton only when a mesh's joints form one tree: a body whose
+    // joint list has several roots imported as a static mesh until an armature node was put
+    // over them, and the same file imports as a skeletal mesh with it. The extra node sits
+    // between the mesh and the roots, so every joint's node index moves by one.
+    const extra_root: usize = if (has_tree) extraRootNodes(children[0].items.len) else 0;
+    const first_bone: usize = 1 + extra_root;
     try js.writeAll("{\"asset\":{\"version\":\"2.0\",\"generator\":\"unityz\"},\"scene\":0,\"scenes\":[{\"nodes\":");
     if (has_tree) {
         // The mesh is the only scene root; the joints hang from it.
@@ -4759,15 +4774,25 @@ fn writeMeshGlb(
     try js.writeAll("}],\"nodes\":[{\"mesh\":0,\"name\":");
     try writeJsonString(js, name);
     if (has_skin) try js.writeAll(",\"skin\":0");
-    if (has_tree and children[0].items.len != 0) {
+    if (has_tree and extra_root == 1) {
+        try js.writeAll(",\"children\":[1]");
+    } else if (has_tree and children[0].items.len != 0) {
         try js.writeAll(",\"children\":[");
         for (children[0].items, 0..) |child, index| {
             if (index != 0) try js.writeAll(",");
-            try js.print("{d}", .{child});
+            try js.print("{d}", .{child + extra_root});
         }
         try js.writeAll("]");
     }
     try js.writeAll("}");
+    if (extra_root == 1) {
+        try js.writeAll(",{\"name\":\"Armature\",\"children\":[");
+        for (children[0].items, 0..) |child, index| {
+            if (index != 0) try js.writeAll(",");
+            try js.print("{d}", .{child + extra_root});
+        }
+        try js.writeAll("]}");
+    }
     if (has_skin) {
         // joint nodes: each sits at its bone's transform relative to its parent; named from
         // the armature when the caller resolved m_Bones
@@ -4789,7 +4814,7 @@ fn writeMeshGlb(
                 try js.writeAll("],\"children\":[");
                 for (children[bi + 1].items, 0..) |child, index| {
                     if (index != 0) try js.writeAll(",");
-                    try js.print("{d}", .{child});
+                    try js.print("{d}", .{child + extra_root});
                 }
             }
             try js.writeAll("]}");
@@ -4802,9 +4827,9 @@ fn writeMeshGlb(
     if (has_skin) {
         // No `skeleton`: glTF makes it optional, and it must name an ancestor of every
         // joint, which a flat set of scene roots does not have. Importers derive the root.
-        try js.print(",\"skins\":[{{\"inverseBindMatrices\":{d},\"joints\":[1", .{ib_acc});
-        var bi: usize = 2;
-        while (bi <= n_bones) : (bi += 1) try js.print(",{d}", .{bi});
+        try js.print(",\"skins\":[{{\"inverseBindMatrices\":{d},\"joints\":[{d}", .{ ib_acc, first_bone });
+        var bi: usize = first_bone + 1;
+        while (bi < first_bone + n_bones) : (bi += 1) try js.print(",{d}", .{bi});
         try js.writeAll("]}]");
     }
     try js.writeAll(",\"meshes\":[{\"name\":");
@@ -11317,6 +11342,13 @@ test "a bone forest becomes glTF children lists" {
     try std.testing.expectEqualSlices(u32, &.{ 2, 3 }, lists[1].items);
     try std.testing.expectEqualSlices(u32, &.{4}, lists[2].items);
     try std.testing.expectEqual(@as(usize, 0), lists[3].items.len);
+}
+
+test "several joint roots need an armature node" {
+    try std.testing.expectEqual(@as(usize, 0), extraRootNodes(0));
+    try std.testing.expectEqual(@as(usize, 0), extraRootNodes(1));
+    try std.testing.expectEqual(@as(usize, 1), extraRootNodes(2));
+    try std.testing.expectEqual(@as(usize, 1), extraRootNodes(10));
 }
 
 test "mat4Multiply composes row-major transforms" {

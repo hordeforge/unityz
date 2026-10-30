@@ -11,7 +11,12 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- A skinned mesh whose joints have several roots gets an armature node over them.
+  Importers build a skeleton only from one tree, so such a body imported as a
+  static mesh even with the joint hierarchy in place; with the armature it
+  imports as a skeletal mesh, a skeleton and a physics asset.
 
 ## [0.1.14] - 2026-10-31
 
