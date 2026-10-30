@@ -56,6 +56,18 @@ Still unknown, and each blocks the solver:
 - **Which muscle each slot is.** The 200 slots are in Unity's muscle order; the order and each
   slot's component role (rotation x/y/z, stretch, or a translation DoF) must be established, not
   assumed.
+- **The muscle tables are native.** `HumanTrait.MuscleName`, `HumanTrait.GetMuscleDefaultMin` and
+  `GetMuscleDefaultMax` are `extern` methods
+  ([HumanTrait.bindings.cs](https://github.com/Unity-Technologies/UnityCsReference/blob/master/Modules/Animation/ScriptBindings/HumanTrait.bindings.cs)),
+  so neither the order nor the ranges are in Unity's C# reference: the implementation lives in
+  `Modules/Animation/HumanTrait.cpp`, which is not published.
+  - The reproducible way to get them is a one-off dump from any Unity install: a script that
+    prints `HumanTrait.MuscleName`, `GetMuscleDefaultMin(i)` and `GetMuscleDefaultMax(i)` for
+    every i, committed as a table with the Unity version that produced it. That is a five-minute
+    run and needs no reverse engineering, and it is exact where a transcription from another
+    project would be a copy of someone else's table.
+  - `unityz` cannot produce it (it reads files, not Unity APIs), so the dump belongs with the
+    consumer or with the research corpus, not here.
 - ~~Per-muscle ranges.~~ Measured: the avatar stores none (all limits zero, unmodified), so the
   ranges are Unity's built-in `HumanTrait` tables. They are public in UnityCsReference and have to
   be transcribed exactly, because a wrong range is a wrong pose.
