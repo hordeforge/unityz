@@ -63,15 +63,21 @@ first half of it is already proven on this host:
   clips**, each reporting its length, frame rate and `isHumanMotion`;
 - the stock `Avatar` loads from the same bundle and its human description is readable in the
   editor, so the bone map a sampler needs is available from Unity too;
-- building a rig from the exported GLB's joint tree and handing it that description is where it
-  stops for now: `AvatarBuilder.BuildHumanAvatar` returns `isValid == false` with the description
-  reduced to 55 of its 78 skeleton entries, and a clip sampled through an invalid avatar leaves
-  every bone at identity.
+- the mechanism is `clip.SampleAnimation` on **the preview rig the bundle already ships**: four of
+  its 1286 GameObjects carry an `Animator` whose avatar validates as human (`ZAnimBase`,
+  `fall5mToLand`, `fall5mToBoost`, `fall5mToCatLandBoost`), so no rig has to be built at all. On
+  `ZAnimBase`, `idle` samples to `Hips (-0.2071, 0.0708, 0.0296, 0.9753)` at t=0 and
+  `(-0.1755, 0.1072, 0.0782, 0.9755)` at t=4.45. That oracle is now a tool in the consumer
+  (`make clip-sample CLIP= idle TIMES=0,2.4` writes every human bone's local rotation and position);
+- reading the **muscle values** directly does not work in batchmode: an `AnimationScriptPlayable`
+  with an `IAnimationJob` and `MuscleHandle.GetMuscleHandles` runs and reports the clip time, but
+  `AnimationHumanStream.GetMuscle` returns zero for every handle at every time, with the matching
+  avatar and an instantiated, active rig. So the slot ordering has to be settled through bone
+  rotations (the oracle above), not through muscle values.
 
-The next experiment is therefore narrow: reconcile the rig with the description's 78 skeleton
-entries (the 23 the filtered list drops are what invalidates the avatar), then `BuildHumanAvatar`
-should succeed and `clip.SampleAnimation` will produce per-bone rotations to check any transcription
-against. The probe scripts live in the consumer's `work/` and are not committed.
+The next experiment is therefore: pick a clip that moves one body part, sample it per bone with the
+oracle, and match the dense curve that changes against the bone that moves. The probe scripts live
+in the consumer's `work/` and are not committed.
 
 Still unknown, and each blocks the solver:
 
