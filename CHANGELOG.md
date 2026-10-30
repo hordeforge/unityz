@@ -11,7 +11,15 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Avatar (class 90) exports as `avatar_<id>_<name>.json`: the human map (rig bone to human
+  name), the human description's skeleton with its parent names, the muscle limits, and the
+  scale, translation-DoF, extra-root and skeleton-has-parents flags. This is the input a
+  humanoid clip sampler needs and the clip does not carry. Measured on stock's avatars: 52 human
+  parts, 78 skeleton bones, every muscle limit zero and unmodified (so the ranges are Unity's
+  built-in tables), `m_SkeletonHasParents` false (the hierarchy comes from the rig) and scale
+  0.01.
 
 ## [0.1.17] - 2026-10-31
 

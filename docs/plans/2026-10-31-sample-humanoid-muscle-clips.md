@@ -29,17 +29,27 @@ Known from the export and a real clip (`zombie.bundle`, `animation_9206265066114
 - `constant`: 46 values; `streamed`: 2 words and no curves, so the dense clip is the only motion;
 - the curve count is fixed per rig, so 84 curves is a property of this avatar, not of the clip.
 
+Known from the avatar export (`avatar_-7101528791746256914_ZAnimBaseAvatar.json`, 0.1.18):
+
+- 52 human parts map a rig bone to a human name (`Hips` to `Hips`, `LeftArm` to `LeftUpperArm`),
+  which is the bone map a sampler needs;
+- **every muscle limit is zero and `m_Modified` is false**, so the per-muscle ranges are Unity's
+  built-in `HumanTrait` tables, not something the file carries;
+- `m_SkeletonHasParents` is **false** and every `m_ParentName` is empty, so the human
+  description's skeleton has no hierarchy: the parents come from the rig itself, which the
+  character GLB already carries;
+- `scale` is 0.01, `has_translation_dof` and `has_extra_root` are false.
+
 Unknown, and each one blocks the solver:
 
 - **Curve to muscle mapping.** Unity orders dense curves by muscle index, with several components
   per muscle; which order and how many components each muscle has must be established against a
   reference, not assumed from 84.
-- **Per-muscle ranges.** A muscle value is a float that maps to a rotation through a per-muscle
-  range (the humanoid muscle limits). Unity's own tables are the reference; they are public in
-  UnityCsReference and have to be transcribed exactly, because a wrong range is a wrong pose.
-- **Where the human description lives.** The clip JSON carries no avatar reference. The rig's
-  human map (which transform is which bone) must come from the `Avatar` or `Animator` in the same
-  container, which `unityz` can read but does not export yet.
+- ~~Per-muscle ranges.~~ Measured: the avatar stores none (all limits zero, unmodified), so the
+  ranges are Unity's built-in `HumanTrait` tables. They are public in UnityCsReference and have to
+  be transcribed exactly, because a wrong range is a wrong pose.
+- ~~Where the human description lives.~~ Measured: the Animator names its `Avatar`, and the
+  `Avatar` carries the 52-part human map. Both are exported now.
 - **The sampling math.** Unity converts the per-muscle values into a local rotation per bone,
   including the handedness and the "muscle is in avatar space" convention. The acceptance check
   below is what settles whether the transcription is right.
