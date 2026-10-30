@@ -55,10 +55,23 @@ Partly settled for the curve layout (step 2, measured across **all 376** clips i
   its own rule (likely `m_StreamedClip`, which is empty for these, plus `m_ValueArrayDelta`);
 - a frame is `dense.samples[frame * curves + source]`, frame 0 included, dated by `start`/`stop`.
 
-What that leaves for the layout is a ground-truth experiment rather than more inference: a Unity
-2022.3 editor can load a stock bundle (`AssetBundle.LoadFromFile`, the same engine version that
-built it), read the `AnimationClip`, and sample it with the runtime's own API. That gives the exact
-numbers to compare a transcription against, for the slot order and the dense/constant split both.
+What that leaves for the layout is a ground-truth experiment rather than more inference, and the
+first half of it is already proven on this host:
+
+- the stock game's own Unity version (2022.3.62f2) is installed, and the editor loads a stock
+  bundle with `AssetBundle.LoadFromFile`: `zombie.bundle` gives **340 assets and 376 humanoid
+  clips**, each reporting its length, frame rate and `isHumanMotion`;
+- the stock `Avatar` loads from the same bundle and its human description is readable in the
+  editor, so the bone map a sampler needs is available from Unity too;
+- building a rig from the exported GLB's joint tree and handing it that description is where it
+  stops for now: `AvatarBuilder.BuildHumanAvatar` returns `isValid == false` with the description
+  reduced to 55 of its 78 skeleton entries, and a clip sampled through an invalid avatar leaves
+  every bone at identity.
+
+The next experiment is therefore narrow: reconcile the rig with the description's 78 skeleton
+entries (the 23 the filtered list drops are what invalidates the avatar), then `BuildHumanAvatar`
+should succeed and `clip.SampleAnimation` will produce per-bone rotations to check any transcription
+against. The probe scripts live in the consumer's `work/` and are not committed.
 
 Still unknown, and each blocks the solver:
 
