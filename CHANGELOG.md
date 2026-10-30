@@ -11,7 +11,13 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- A skinned mesh's GLB lists every joint as a scene root and no longer writes
+  `skeleton`. The joints were detached nodes that appeared in no scene, so an
+  importer could not resolve a skeleton: Unreal's glTF translator aborted on
+  `SkeletonNodeUid` and imported nothing at all from the file. The same GLB now
+  imports as a skeletal mesh, a skeleton and a physics asset.
 
 ## [0.1.12] - 2026-10-29
 

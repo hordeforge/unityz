@@ -4405,6 +4405,22 @@ fn roundHalfEven(x: f64) f64 {
 /// are the inverse bone matrices, so each glTF joint node sits at the bone's
 /// bind world transform (bindPose^-1) and inverseBindMatrices hold the raw
 /// bind poses — the per-vertex rest pose then round-trips unchanged.
+/// The `nodes` list of glTF's single scene: the mesh, then every joint when the mesh is
+/// skinned. A joint that sits in no scene is invisible to an importer: Unreal's translator
+/// aborted on a body whose joints were all detached and imported nothing from it, while the
+/// same file imports as a skeletal mesh plus skeleton once the joints are scene roots. Each
+/// joint keeps its bind world transform as its local transform, which a root may do; a
+/// nested hierarchy needs the Unity parents, which this writer does not carry yet.
+fn writeSceneRootList(w: *std.Io.Writer, has_skin: bool, joints: usize) !void {
+    try w.writeAll("[0");
+    if (has_skin) {
+        for (0..joints) |joint| {
+            try w.print(",{d}", .{joint + 1});
+        }
+    }
+    try w.writeAll("]");
+}
+
 fn writeMeshGlb(
     arena: std.mem.Allocator,
     sf: *const unityz.serialized.SerializedFile,
@@ -4657,7 +4673,9 @@ fn writeMeshGlb(
     const name = unityz.streams.trimNul(mesh.name);
     var jaw = std.Io.Writer.Allocating.init(arena);
     const js = &jaw.writer;
-    try js.print("{{\"asset\":{{\"version\":\"2.0\",\"generator\":\"unityz\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0,\"name\":", .{});
+    try js.writeAll("{\"asset\":{\"version\":\"2.0\",\"generator\":\"unityz\"},\"scene\":0,\"scenes\":[{\"nodes\":");
+    try writeSceneRootList(js, has_skin, joint_matrices.len);
+    try js.writeAll("}],\"nodes\":[{\"mesh\":0,\"name\":");
     try writeJsonString(js, name);
     if (has_skin) try js.writeAll(",\"skin\":0");
     try js.writeAll("}");
@@ -4687,7 +4705,9 @@ fn writeMeshGlb(
     // reports EMPTY_ENTITY for `"skins":[]`).
     try js.writeAll("]");
     if (has_skin) {
-        try js.print(",\"skins\":[{{\"inverseBindMatrices\":{d},\"skeleton\":1,\"joints\":[1", .{ib_acc});
+        // No `skeleton`: glTF makes it optional, and it must name an ancestor of every
+        // joint, which a flat set of scene roots does not have. Importers derive the root.
+        try js.print(",\"skins\":[{{\"inverseBindMatrices\":{d},\"joints\":[1", .{ib_acc});
         var bi: usize = 2;
         while (bi <= n_bones) : (bi += 1) try js.print(",{d}", .{bi});
         try js.writeAll("]}]");
@@ -11188,6 +11208,26 @@ test "a packed Float16 channel table exports geometry instead of being refused" 
     try std.testing.expectApproxEqAbs(@as(f32, 0), std.mem.bytesToValue(f32, nrm[0..4]), 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 0), std.mem.bytesToValue(f32, nrm[4..8]), 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1), std.mem.bytesToValue(f32, nrm[8..12]), 1e-6);
+}
+
+test "a skinned glTF lists every joint as a scene root" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var plain = std.Io.Writer.Allocating.init(a);
+    try writeSceneRootList(&plain.writer, false, 0);
+    try std.testing.expectEqualStrings("[0]", plain.written());
+
+    var skinned = std.Io.Writer.Allocating.init(a);
+    try writeSceneRootList(&skinned.writer, true, 3);
+    try std.testing.expectEqualStrings("[0,1,2,3]", skinned.written());
+
+    // No `skeleton`: it must name an ancestor of every joint, and a flat set of roots has
+    // none. Importers derive the root themselves.
+    var none = std.Io.Writer.Allocating.init(a);
+    try writeSceneRootList(&none.writer, true, 0);
+    try std.testing.expectEqualStrings("[0]", none.written());
 }
 
 test "wavPcm16 rejects clip headers that cannot make a usable WAV" {
