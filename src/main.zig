@@ -3031,6 +3031,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const muscle_size = unityz.classes.intField(v, "m_MuscleClipSize") orelse 0;
                 const events = if (unityz.classes.fieldOf(v, "m_Events")) |ev| (if (ev == .array) ev.array.len else 0) else 0;
                 try w.print(",\"muscleClipSize\":{d},\"events\":{d}", .{ muscle_size, events });
+                // A humanoid clip stores its motion in the muscle clip, not in curve keys: the
+                // sample array is muscle space, per frame and curve, and turning it into bone
+                // transforms needs Unity's muscle solver. The data is written out anyway, with
+                // the timing that dates it, so a solver has a file to read instead of a bundle.
+                try writeMuscleClipData(w, v);
                 if (unityz.classes.fieldOf(v, "m_ClipBindingConstant")) |cbc| {
                     if (unityz.classes.fieldOf(cbc, "genericBindings")) |gb| {
                         if (gb == .array and gb.array.len != 0) {
@@ -3060,7 +3065,11 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 var name_buf: [192]u8 = undefined;
                 const fname = try std.fmt.bufPrint(&name_buf, "animation_{d}_{s}.json", .{ o.path_id, if (clean_name.len != 0) clean_name else "unnamed" });
                 try extractFile(subdir, fname, out.items);
-                try stdout.print("extracted {s} ({d} curves)\n", .{ fname, curve_count });
+                if (curve_count == 0 and unityz.classes.fieldOf(v, "m_MuscleClip") != null) {
+                    try stdout.print("extracted {s} ({d} curves, muscle data)\n", .{ fname, curve_count });
+                } else {
+                    try stdout.print("extracted {s} ({d} curves)\n", .{ fname, curve_count });
+                }
                 try manifest.append(arena, .{ .path_id = o.path_id, .class_id = o.class_id, .name = clip_name, .subdir = subdir });
                 extracted += 1;
             },
@@ -4435,6 +4444,63 @@ fn roundHalfEven(x: f64) f64 {
 /// from it, while the same file imports as a skeletal mesh plus skeleton once the joints are
 /// scene roots. With `bone_parents` the joints hang from the mesh node instead, which is a
 /// tree an importer can turn into a skeleton of every bone.
+/// Emits a humanoid AnimationClip's muscle data: timing, the dense sample array and the
+/// constant values beside it.
+///
+/// `space` says `muscle` because that is what the numbers are: nine muscle groups per frame
+/// with their own x/y/z scaling, not bone rotations. A consumer that treats them as bone
+/// curves gets nonsense, so the label is part of the contract.
+fn writeMuscleClipData(w: *std.Io.Writer, v: unityz.value.Value) !void {
+    const muscle = unityz.classes.fieldOf(v, "m_MuscleClip") orelse return;
+    if (muscle != .obj) return;
+    const start = if (unityz.classes.fieldOf(muscle, "m_StartTime")) |t| t.asFloat() orelse 0 else 0;
+    const stop = if (unityz.classes.fieldOf(muscle, "m_StopTime")) |t| t.asFloat() orelse 0 else 0;
+    try w.print(",\"space\":\"muscle\",\"start\":{f},\"stop\":{f}", .{ jsonFloat(start), jsonFloat(stop) });
+    const clip = unityz.classes.fieldOf(muscle, "m_Clip") orelse return;
+    const data = unityz.classes.fieldOf(clip, "data") orelse return;
+
+    if (unityz.classes.fieldOf(data, "m_DenseClip")) |dense| {
+        if (dense == .obj) {
+            const frames = unityz.classes.intField(dense, "m_FrameCount") orelse 0;
+            const curves = unityz.classes.intField(dense, "m_CurveCount") orelse 0;
+            const rate = unityz.classes.intField(dense, "m_SampleRate") orelse 0;
+            const begin = unityz.classes.intField(dense, "m_BeginTime") orelse 0;
+            try w.print(",\"dense\":{{\"frames\":{d},\"curves\":{d},\"sample_rate\":{d},\"begin\":{d},\"samples\":[", .{ frames, curves, rate, begin });
+            if (unityz.classes.fieldOf(dense, "m_SampleArray")) |samples| {
+                if (samples == .array) {
+                    for (samples.array, 0..) |sample, i| {
+                        if (i != 0) try w.writeByte(',');
+                        try unityz.value.jsonWrite(sample, w);
+                    }
+                }
+            }
+            try w.writeAll("]}");
+        }
+    }
+    if (unityz.classes.fieldOf(data, "m_ConstantClip")) |constant| {
+        if (constant == .obj) {
+            try w.writeAll(",\"constant\":[");
+            if (unityz.classes.fieldOf(constant, "data")) |values| {
+                if (values == .array) {
+                    for (values.array, 0..) |value, i| {
+                        if (i != 0) try w.writeByte(',');
+                        try unityz.value.jsonWrite(value, w);
+                    }
+                }
+            }
+            try w.writeAll("]");
+        }
+    }
+    if (unityz.classes.fieldOf(data, "m_StreamedClip")) |streamed| {
+        if (streamed == .obj) {
+            const curves = unityz.classes.intField(streamed, "curveCount") orelse 0;
+            const discrete = unityz.classes.intField(streamed, "discreteCurveCount") orelse 0;
+            const words = if (unityz.classes.fieldOf(streamed, "data")) |wordsV| (if (wordsV == .array) wordsV.array.len else 0) else 0;
+            try w.print(",\"streamed\":{{\"curves\":{d},\"discrete_curves\":{d},\"words\":{d}}}", .{ curves, discrete, words });
+        }
+    }
+}
+
 fn writeSceneRootList(w: *std.Io.Writer, has_skin: bool, joints: usize) !void {
     try w.writeAll("[0");
     if (has_skin) {
