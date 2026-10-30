@@ -79,6 +79,20 @@ The next experiment is therefore: pick a clip that moves one body part, sample i
 oracle, and match the dense curve that changes against the bone that moves. The probe scripts live
 in the consumer's `work/` and are not committed.
 
+Two numbers to carry into it, so the mapping is not assumed again:
+
+- the avatar's `muscleFromBone` has a muscle on **95 of its 165** bone-and-axis pairs, and the
+  muscle indices are not in bone order (`LeftUpperLeg` is `[23, 22, 21]`, `RightUpperLeg`
+  `[31, 30, 29]`);
+- a clip binds **130** slots but the rig has 95 muscles, so a slot is not a muscle: the extra 35
+  has to come from somewhere (a fourth degree of freedom on some parts, or curves the muscle table
+  does not name), and that is a thing to measure with the oracle, not to guess.
+
+The method that settles it: for a set of clips that each move one body part, take the dense columns
+whose values change over the clip, take the bones whose sampled rotation changes with the oracle,
+and pair them up. Three or four such clips should be enough to name most of the slots, and the rest
+can be confirmed by sampling a clip that moves everything at once.
+
 Still unknown, and each blocks the solver:
 
 - **Which muscle each slot is.** The 200 slots are in Unity's muscle order; the order and each
