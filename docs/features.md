@@ -159,6 +159,9 @@ layer a full mip chain, and the tool slices it by that stride. See
   `constant` values, the streamed clip's shape, `muscleClipSize`, event counts
   and generic bindings. The samples are muscle space, not bone rotations; a
   solver is what turns them into a pose.
+- Avatars (90): the human description as JSON (the rig-to-human bone map, the skeleton with
+  parent names, muscle limits, scale, translation and extra-root flags), which is what a
+  humanoid clip sampler reads
 - AnimatorControllers (91), AnimatorOverrideControllers (221),
   Animators (95): JSON summaries with names resolved through TOS hash
   tables and the file's objects

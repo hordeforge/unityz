@@ -2819,6 +2819,12 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 const oc = try unityz.classes.AnimatorOverrideController.fromValue(arena, v);
                 try writeOverrideFiles(arena, subdir, o.path_id, oc, &sf, basename(path), injected, manifest, &extracted, stdout);
             },
+            90 => { // Avatar -> human description JSON
+                // The input a humanoid clip sampler needs and the clip itself lacks: a dense
+                // clip says "84 curves of muscle values" and nothing about which bone or which
+                // range. The avatar's human description carries both.
+                try writeAvatarJson(arena, subdir, o.path_id, v, manifest, &extracted, stdout);
+            },
             95 => { // Animator -> component summary JSON
                 const an = unityz.classes.Animator.fromValue(v);
                 try writeAnimatorComponentFiles(arena, subdir, o.path_id, an, &sf, basename(path), injected, manifest, &extracted, stdout);
@@ -4173,6 +4179,89 @@ fn meshWeight(view: *const MeshView, vertex: usize, comp: usize, endian: std.bui
         0, 1 => meshF32(view, 12, vertex, comp, endian) orelse 0,
         else => normalizedWeight(channel.format, meshU32(view, 12, vertex, comp, endian) orelse 0) orelse 0,
     };
+}
+
+/// Writes an Avatar's human description: the skeleton's bone names and parents, the human bone
+/// map with each muscle's limits, and the flags a sampler reads.
+fn writeAvatarJson(
+    arena: std.mem.Allocator,
+    subdir: ?[]const u8,
+    path_id: i64,
+    v: unityz.value.Value,
+    manifest: *std.ArrayList(ManifestEntry),
+    extracted: *usize,
+    stdout: anytype,
+) !void {
+    const name = unityz.streams.trimNul(unityz.classes.stringField(v, "m_Name") orelse "");
+    var aw = std.Io.Writer.Allocating.init(arena);
+    const w = &aw.writer;
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, name);
+    if (unityz.classes.fieldOf(v, "m_HumanDescription")) |description| {
+        if (description == .obj) {
+            try w.print(",\"scale\":{f}", .{jsonFloat(if (unityz.classes.fieldOf(description, "m_GlobalScale")) |g| g.asFloat() orelse 1 else 1)});
+            const flags = [_]struct { field: []const u8, name: []const u8 }{
+                .{ .field = "m_HasTranslationDoF", .name = "has_translation_dof" },
+                .{ .field = "m_HasExtraRoot", .name = "has_extra_root" },
+                .{ .field = "m_SkeletonHasParents", .name = "skeleton_has_parents" },
+            };
+            for (flags) |flag| {
+                const value = if (unityz.classes.fieldOf(description, flag.field)) |f| (f == .bool and f.bool) else false;
+                try w.print(",\"{s}\":{}", .{ flag.name, value });
+            }
+            if (unityz.classes.fieldOf(description, "m_RootMotionBoneName")) |root| {
+                if (root == .string) {
+                    try w.writeAll(",\"root_motion_bone\":");
+                    try writeJsonString(w, unityz.streams.trimNul(root.string));
+                }
+            }
+            try w.writeAll(",\"skeleton\":[");
+            if (unityz.classes.fieldOf(description, "m_Skeleton")) |bones| {
+                if (bones == .array) {
+                    for (bones.array, 0..) |bone, i| {
+                        if (i != 0) try w.writeByte(',');
+                        try w.writeAll("{\"name\":");
+                        try writeJsonString(w, unityz.streams.trimNul(unityz.classes.stringField(bone, "m_Name") orelse ""));
+                        try w.writeAll(",\"parent\":");
+                        try writeJsonString(w, unityz.streams.trimNul(unityz.classes.stringField(bone, "m_ParentName") orelse ""));
+                        try w.writeByte('}');
+                    }
+                }
+            }
+            try w.writeAll("],\"human\":[");
+            if (unityz.classes.fieldOf(description, "m_Human")) |parts| {
+                if (parts == .array) {
+                    for (parts.array, 0..) |part, i| {
+                        if (i != 0) try w.writeByte(',');
+                        try w.writeAll("{\"bone\":");
+                        try writeJsonString(w, unityz.streams.trimNul(unityz.classes.stringField(part, "m_BoneName") orelse ""));
+                        try w.writeAll(",\"human\":");
+                        try writeJsonString(w, unityz.streams.trimNul(unityz.classes.stringField(part, "m_HumanName") orelse ""));
+                        // A muscle's limit is in degrees, per axis; the sampler maps a curve
+                        // value through it, so both ends are written even when they are zero.
+                        const limit = unityz.classes.fieldOf(part, "m_Limit") orelse unityz.value.Value{ .null = {} };
+                        const low = unityz.classes.vec3Field(limit, "m_Min") orelse .{ 0, 0, 0 };
+                        const high = unityz.classes.vec3Field(limit, "m_Max") orelse .{ 0, 0, 0 };
+                        try w.print(",\"min\":[{f},{f},{f}],\"max\":[{f},{f},{f}]}}", .{
+                            jsonFloat(low[0]),  jsonFloat(low[1]),  jsonFloat(low[2]),
+                            jsonFloat(high[0]), jsonFloat(high[1]), jsonFloat(high[2]),
+                        });
+                    }
+                }
+            }
+            try w.writeAll("]");
+        }
+    }
+    try w.writeAll("}\n");
+    const out = aw.toArrayList();
+    var clean_buf: [192]u8 = undefined;
+    const clean = if (name.len != 0) sanitizeComponent(try std.fmt.bufPrint(&clean_buf, "{s}", .{clipName(name)})) else "";
+    var name_buf: [224]u8 = undefined;
+    const file = try std.fmt.bufPrint(&name_buf, "avatar_{d}_{s}.json", .{ path_id, if (clean.len != 0) clean else "unnamed" });
+    try extractFile(subdir, file, out.items);
+    try stdout.print("extracted {s} ({d} bytes)\n", .{ file, out.items.len });
+    try manifest.append(arena, .{ .path_id = path_id, .class_id = 90, .name = name, .subdir = subdir });
+    extracted.* += 1;
 }
 
 /// Looks up one field of a legacy per-vertex skin entry by trying the
