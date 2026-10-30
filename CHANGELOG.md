@@ -11,7 +11,14 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- An AnimationClip's muscle data is written to its JSON: `space` (`muscle`),
+  `start`/`stop`, the dense clip's frame and curve counts with its sample array,
+  the constant values, and the streamed clip's shape. A stock humanoid clip has
+  no curve keys at all (a 1.33 s clip is 42 frames by 84 muscles, 3528 samples),
+  so this is the animation itself, in muscle space; turning it into bone
+  transforms needs Unity's muscle solver.
 
 ## [0.1.15] - 2026-10-31
 

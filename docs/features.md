@@ -153,8 +153,12 @@ layer a full mip chain, and the tool slices it by that stride. See
   code blobs with DXBC chunk sets, ISGN/RDEF, bind channels) under
   `show`/`shader`
 - AnimationClips (74): curves as JSON (bone path, attribute, keyframes
-  with time/value/slopes); humanoid muscle clips add `muscleClipSize`,
-  event counts, and generic bindings
+  with time/value/slopes). A humanoid clip has no curve keys: its motion is in
+  the muscle clip, so the JSON also carries `space: "muscle"`, `start`/`stop`,
+  `dense` (frames, curves, sample rate, begin time and the sample array),
+  `constant` values, the streamed clip's shape, `muscleClipSize`, event counts
+  and generic bindings. The samples are muscle space, not bone rotations; a
+  solver is what turns them into a pose.
 - AnimatorControllers (91), AnimatorOverrideControllers (221),
   Animators (95): JSON summaries with names resolved through TOS hash
   tables and the file's objects
