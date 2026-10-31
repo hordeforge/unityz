@@ -11,6 +11,19 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ## [Unreleased]
 
+### Fixed
+
+- A character GLB's skeleton is on the same side of the body as its vertices. Positions are
+  written X-negated for glTF's right-handed frame, but the joint nodes and `m_BindPose` were
+  written in Unity's own frame, so every vertex was carried by a bone on the opposite side:
+  invisible at bind pose, and a fan of stretched triangles as soon as a clip separated two
+  limbs. The joint worlds and the inverse bind matrices now take the same `S M S` mirror, which
+  keeps `world * inverseBind == I`.
+- `inverseBindMatrices` holds one matrix per joint. It held one per `m_BindPose`, so a skin
+  whose joint list gained the ancestor bones reported a 58-matrix accessor over a 55-matrix
+  buffer view (121 of 1,730 exported skins), and a consumer that indexes by joint read past the
+  end of the view. The added ancestors bind at the inverse of their own world.
+
 ## [0.1.18] - 2026-10-31
 
 ### Fixed
