@@ -4441,6 +4441,20 @@ fn bindPoseRowMajor(v: unityz.value.Value) ?[16]f32 {
     return out;
 }
 
+/// A row-major matrix mirrored across X, the way the vertex stream is written.
+///
+/// Positions are negated in X to turn Unity's left-handed frame into glTF's right-handed one,
+/// and a matrix has to follow the same similarity: `S M S` with `S = diag(-1, 1, 1)`. Negating
+/// the x row and the x column (entries 1, 2, 3, 4, 8 and 12 of a row-major 4x4) leaves the
+/// rotation proper and keeps `world * inverseBind == I`, which a bare negation of the x column
+/// would not. A skeleton written without this sits on the opposite side of the mesh, which is
+/// invisible at bind and tears the skin as soon as a clip separates two limbs.
+fn mirrorXRowMajor(m: [16]f32) [16]f32 {
+    var out = m;
+    for ([_]usize{ 1, 2, 3, 4, 8, 12 }) |i| out[i] = -out[i];
+    return out;
+}
+
 /// Writes a row-major matrix as glTF's column-major 16-float sequence.
 fn writeMatColMajor(w: *unityz.streams.Writer, row_major: [16]f32) !void {
     for (0..4) |c| {
@@ -4935,6 +4949,14 @@ fn writeMeshGlb(
         }
     }
     if (!has_skin) n_bones = 0;
+    // The vertex stream is written X-mirrored and the skeleton's worlds have to follow it, or
+    // every vertex is skinned by a bone on the other side of the body. Copied rather than
+    // negated in place because a caller owns the slice it handed over.
+    if (has_skin and joint_matrices.len != 0) {
+        const mirrored = try arena.alloc([16]f32, joint_matrices.len);
+        for (joint_matrices, 0..) |m, index| mirrored[index] = mirrorXRowMajor(m);
+        joint_matrices = mirrored;
+    }
 
     // -------- BIN chunk: positions, normals, UVs, indices --------
     var bin: unityz.streams.Writer = .init(arena);
@@ -5070,9 +5092,19 @@ fn writeMeshGlb(
     }
     const bp_off: u32 = @intCast(bin.getWritten().len);
     if (has_skin) {
-        for (bind_poses) |bpi| {
-            const rm = bindPoseRowMajor(bpi) orelse return &.{};
-            try writeMatColMajor(&bin, rm);
+        // One matrix per joint, and in joint order. m_BindPose covers the renderer's own bones;
+        // the ancestors added for a transform it omits are appended after them and bind at the
+        // inverse of their own world. Writing only m_BindPose left the accessor claiming 58
+        // matrices over a buffer view holding 55, so a consumer that indexes by joint read past
+        // the end of the view.
+        for (0..n_bones) |bi| {
+            if (bi < bind_poses.len) {
+                const rm = bindPoseRowMajor(bind_poses[bi]) orelse return &.{};
+                try writeMatColMajor(&bin, mirrorXRowMajor(rm));
+            } else {
+                const inverse = mat4Inverse(joint_matrices[bi]) orelse return &.{};
+                try writeMatColMajor(&bin, inverse);
+            }
         }
     }
 
@@ -11796,6 +11828,42 @@ test "a skinned glTF lists every joint as a scene root" {
     var none = std.Io.Writer.Allocating.init(a);
     try writeSceneRootList(&none.writer, true, 0);
     try std.testing.expectEqualStrings("[0]", none.written());
+}
+
+test "the X mirror keeps a bind world and its inverse bind consistent" {
+    // Positions are written X-negated, so the joint worlds and the inverse bind matrices have
+    // to be mirrored by the same similarity, `S M S`. A bare x-column negation (the tempting
+    // shortcut) turns a rotation into a reflection and no longer inverts to the identity. This
+    // is the defect that left Boe's left-hand vertices on the bone of the opposite side: the
+    // mesh was mirrored and the skeleton was not.
+    const world = [16]f32{
+        0.0, -1.0, 0.0, 3.5,
+        1.0, 0.0,  0.0, -2.0,
+        0.0, 0.0,  1.0, 4.25,
+        0.0, 0.0,  0.0, 1.0,
+    };
+    const mirrored = mirrorXRowMajor(world);
+    // the x translation flips, the others do not
+    try std.testing.expectApproxEqAbs(@as(f32, -3.5), mirrored[3], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -2.0), mirrored[7], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.25), mirrored[11], 1e-6);
+    // mirroring twice is the original, because S * S = I
+    const back = mirrorXRowMajor(mirrored);
+    for (world, back) |a, b| try std.testing.expectApproxEqAbs(a, b, 1e-6);
+    // W * W^-1 stays the identity when both are mirrored
+    const inverse = mat4Inverse(mirrored) orelse unreachable;
+    const product = mat4Multiply(mirrored, inverse);
+    for (0..4) |r| {
+        for (0..4) |c| {
+            const want: f32 = if (r == c) 1.0 else 0.0;
+            try std.testing.expectApproxEqAbs(want, product[r * 4 + c], 1e-5);
+        }
+    }
+    // the rotation stays proper: a reflection would flip the determinant
+    const det = mirrored[0] * (mirrored[5] * mirrored[10] - mirrored[6] * mirrored[9]) -
+        mirrored[1] * (mirrored[4] * mirrored[10] - mirrored[6] * mirrored[8]) +
+        mirrored[2] * (mirrored[4] * mirrored[9] - mirrored[5] * mirrored[8]);
+    try std.testing.expect(det > 0.0);
 }
 
 test "wavPcm16 rejects clip headers that cannot make a usable WAV" {
