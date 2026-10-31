@@ -9,7 +9,7 @@ This is a 0.x project: minor bumps (`0.Y.z`) may change CLI behavior or output
 shape, patch bumps are expected not to. Releases are tag-driven; see the
 "Releases" section of the README.
 
-## [Unreleased]
+## [0.1.19] - 2026-10-31
 
 ### Fixed
 
