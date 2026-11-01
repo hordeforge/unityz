@@ -9,6 +9,21 @@ This is a 0.x project: minor bumps (`0.Y.z`) may change CLI behavior or output
 shape, patch bumps are expected not to. Releases are tag-driven; see the
 "Releases" section of the README.
 
+## [Unreleased]
+
+### Fixed
+
+- An AnimatorController lists every state machine's states, not only the first machine's. A
+  weapon controller has a second, empty machine, and the decoder let it replace the first one's
+  list: `AC_WeaponController` reported 96 states as none, so every state name was lost with it.
+- A state names the clip it plays. A build from 2020 on drops `m_Motion` from the state and
+  names the clip through a blend-tree leaf's `m_ClipID`, an index into `m_AnimationClips`, so
+  the state JSON carried a resolved name and no clip. The exporter resolves the index to the
+  clip's path id (`motion`), keeps the index (`motionIndex`) and says whether the state is a
+  blend tree (`blendTree`); an older controller's `m_Motion` reads the same way. That is what
+  maps `M60Reload` to the clip it actually plays, without matching a model name against a clip
+  name.
+
 ## [0.1.19] - 2026-10-31
 
 ### Fixed

@@ -35,6 +35,12 @@ targets `zig build -Dtarget=...` accepts should work. CI cross-compiles
 beyond CI's two runner targets is known to *pass tests*, because nothing
 runs the suite on them.
 
+`zig build` links the vendored C++ archives with Zig's own linker. On some
+hosts that link fails with `unhandled relocation type R_X86_64_PC64` while the
+same tree builds and passes its suite for a musl target, so use
+`zig build -Dtarget=x86_64-linux-musl` (one of the cross targets CI compiles)
+for a local build there.
+
 Two families are **not** supported, both because of the vendored LZHAM
 decoder (`src/vendor/lzham`), which UnityFS block compression type 4
 needs. `build.zig` refuses both at configure time, so `-Dtarget=` for

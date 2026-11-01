@@ -166,7 +166,13 @@ layer a full mip chain, and the tool slices it by that stride. See
   humanoid clip sampler reads
 - AnimatorControllers (91), AnimatorOverrideControllers (221),
   Animators (95): JSON summaries with names resolved through TOS hash
-  tables and the file's objects
+  tables and the file's objects. Each state names the clip it plays: a build
+  from 2020 on drops `m_Motion` and names the clip through a blend-tree leaf's
+  `m_ClipID`, an index into `m_AnimationClips`, which the exporter resolves to
+  that clip's path id (`motion`), its index (`motionIndex`) and whether the
+  state is a blend tree (`blendTree`); an older build states `m_Motion`
+  directly and reads the same way. Every state machine's states are kept, not
+  only the first machine's
 - AudioMixers (241/243/245): the resolved group/snapshot graph
 - ParticleSystems (198): timeline, module values, enabled flags
 - MonoScripts (115): consolidated into one `scripts.json` (name, class,
