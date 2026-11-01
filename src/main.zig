@@ -3759,7 +3759,7 @@ fn writeAnimatorFiles(
         try writeJsonString(w, ac.tosPath(st.name_id));
         try w.writeAll(",\"fullPath\":");
         try writeJsonString(w, ac.tosPath(st.full_path_id));
-        try w.print(",\"speed\":{f},\"loop\":{},\"transitions\":{d},\"blendTrees\":{d}}}", .{ jsonFloat(st.speed), st.loop, st.transition_count, st.blend_tree_count });
+        try w.print(",\"speed\":{f},\"loop\":{},\"transitions\":{d},\"blendTrees\":{d},\"motion\":{d},\"motionIndex\":{d},\"blendTree\":{}}}", .{ jsonFloat(st.speed), st.loop, st.transition_count, st.blend_tree_count, st.motion.path_id, st.motion_index, st.blend_tree });
     }
     try w.print("],\"anyStateTransitions\":{d},\"defaultState\":{d},\"parameters\":{d},\"clips\":[", .{ ac.any_state_transitions, ac.default_state, ac.parameters });
     for (ac.clips, 0..) |c, i| {

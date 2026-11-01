@@ -1275,6 +1275,20 @@ pub const AnimatorController = struct {
         loop: bool = false,
         transition_count: usize = 0,
         blend_tree_count: usize = 0,
+        /// The clip this state plays, resolved to the controller's clip list.
+        ///
+        /// The state's name is a hash the TOS table resolves and the clip is the half
+        /// that makes the pair useful: a state named `PistolReload` is only worth
+        /// reading if it says which of the controller's 93 clips that is. A build from
+        /// 2020 on drops `m_Motion` from the state and names the clip through a
+        /// blend-tree leaf's `m_ClipID`, which indexes `m_AnimationClips`; an older
+        /// build states `m_Motion` directly, which is the fallback. Empty for a blend
+        /// tree whose leaves are not a single clip.
+        motion: value.PPtr = .{ .file_id = 0, .path_id = 0 },
+        /// `m_ClipID` as the file states it: an index into `m_AnimationClips`, or -1.
+        motion_index: i32 = -1,
+        /// True when the state is a blend tree rather than one clip.
+        blend_tree: bool = false,
     };
 
     /// Resolves a name hash through the TOS table.
@@ -1327,13 +1341,16 @@ pub const AnimatorController = struct {
         if (fieldOf(controller, "m_StateMachineArray")) |f| {
             if (f == .array) {
                 self.state_machine_count = f.array.len;
+                // Every machine's states belong to the controller: a controller with a
+                // second, empty machine (a layer with no states) used to replace the
+                // first machine's list and report none at all.
+                var states: std.ArrayList(State) = .empty;
                 for (f.array) |item| {
                     const data = fieldOf(item, "data") orelse continue;
                     self.any_state_transitions += if (fieldOf(data, "m_AnyStateTransitionConstantArray")) |a| (if (a == .array) a.array.len else 0) else 0;
                     self.default_state = intField(data, "m_DefaultState") orelse 0;
                     if (fieldOf(data, "m_StateConstantArray")) |sa| {
                         if (sa == .array) {
-                            var states: std.ArrayList(State) = .empty;
                             for (sa.array) |sitem| {
                                 const sdata = fieldOf(sitem, "data") orelse continue;
                                 var st = State{
@@ -1346,14 +1363,41 @@ pub const AnimatorController = struct {
                                     if (ta == .array) st.transition_count = ta.array.len;
                                 }
                                 if (fieldOf(sdata, "m_BlendTreeConstantArray")) |ba| {
-                                    if (ba == .array) st.blend_tree_count = ba.array.len;
+                                    if (ba == .array) {
+                                        st.blend_tree_count = ba.array.len;
+                                        // The clip is a leaf node's `m_ClipID`, an index into
+                                        // `m_AnimationClips`. A tree node states -1 there and
+                                        // points at its children by index, so a tree without a
+                                        // single leaf clip leaves `motion` empty rather than
+                                        // naming a clip the state never plays.
+                                        var nodes: usize = 0;
+                                        for (ba.array) |tree| {
+                                            const tdata = fieldOf(tree, "data") orelse continue;
+                                            const na = fieldOf(tdata, "m_NodeArray") orelse continue;
+                                            if (na != .array) continue;
+                                            nodes += na.array.len;
+                                            for (na.array) |node| {
+                                                if (st.motion_index >= 0) break;
+                                                const ndata = fieldOf(node, "data") orelse continue;
+                                                const clip = intField(ndata, "m_ClipID") orelse continue;
+                                                if (clip >= 0) st.motion_index = narrow(i32, clip);
+                                            }
+                                        }
+                                        st.blend_tree = nodes > 1;
+                                    }
+                                }
+                                if (st.motion_index >= 0 and @as(usize, @intCast(st.motion_index)) < self.clips.len) {
+                                    st.motion = self.clips[@intCast(st.motion_index)];
+                                } else {
+                                    // A pre-2020 controller states the clip on the state itself.
+                                    st.motion = pptrField(sdata, "m_Motion") orelse st.motion;
                                 }
                                 try states.append(allocator, st);
                             }
-                            self.states = try states.toOwnedSlice(allocator);
                         }
                     }
                 }
+                self.states = try states.toOwnedSlice(allocator);
             }
         }
         if (fieldOf(controller, "m_Values")) |f| {
@@ -3187,6 +3231,89 @@ test "animatorController fromValue resolves TOS names" {
     try std.testing.expect(ac.states[0].loop);
     try std.testing.expectEqual(@as(usize, 1), ac.any_state_transitions);
     try std.testing.expectEqual(@as(i64, 576), ac.clips[0].path_id);
+}
+
+test "animatorController keeps every state and resolves the clip each plays" {
+    // A weapon controller has two state machines, the second with no states of its own.
+    // The decoder used to overwrite the list per machine, so it reported a controller
+    // with 96 states as having none, and every state's name was lost with it. A build
+    // from 2020 on also drops `m_Motion`: the clip is a blend-tree leaf's `m_ClipID`,
+    // an index into `m_AnimationClips`, and -1 marks a blend tree.
+    var view_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer view_arena.deinit();
+    const allocator = view_arena.allocator();
+    const machine = struct {
+        // `comptime` keeps the arrays these build static: a runtime argument would make
+        // them stack temporaries and the returned value would point at a dead frame.
+        fn leaf(comptime name_id: u32, comptime clip: i64) value.Value {
+            return .{ .obj = &[_]value.Field{
+                .{ .name = "data", .value = .{ .obj = &[_]value.Field{
+                    .{ .name = "m_NameID", .value = .{ .uint = name_id } },
+                    .{ .name = "m_Speed", .value = .{ .float = 1 } },
+                    .{ .name = "m_Loop", .value = .{ .bool = false } },
+                    .{ .name = "m_BlendTreeConstantArray", .value = .{ .array = &[_]value.Value{.{ .obj = &[_]value.Field{
+                        .{ .name = "data", .value = .{ .obj = &[_]value.Field{
+                            .{ .name = "m_NodeArray", .value = .{ .array = &[_]value.Value{.{ .obj = &[_]value.Field{
+                                .{ .name = "data", .value = .{ .obj = &[_]value.Field{
+                                    .{ .name = "m_ClipID", .value = .{ .int = clip } },
+                                } } },
+                            } }} } },
+                        } } },
+                    } }} } },
+                } } },
+            } };
+        }
+
+        fn make(comptime states: []const value.Value) value.Value {
+            return .{ .obj = &[_]value.Field{
+                .{ .name = "data", .value = .{ .obj = &[_]value.Field{
+                    .{ .name = "m_DefaultState", .value = .{ .int = 0 } },
+                    .{ .name = "m_StateConstantArray", .value = .{ .array = states } },
+                } } },
+            } };
+        }
+    };
+    const old_form = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "data", .value = .{ .obj = &[_]value.Field{
+            .{ .name = "m_NameID", .value = .{ .uint = 222 } },
+            .{ .name = "m_Speed", .value = .{ .float = 1 } },
+            .{ .name = "m_Loop", .value = .{ .bool = false } },
+            .{ .name = "m_Motion", .value = .{ .pptr = .{ .file_id = 0, .path_id = 902 } } },
+        } } },
+    } };
+    const machines = [_]value.Value{
+        machine.make(&[_]value.Value{machine.leaf(111, 1)}),
+        machine.make(&[_]value.Value{old_form}),
+    };
+    const v = value.Value{ .obj = &[_]value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "WeaponController" } },
+        .{ .name = "m_TOS", .value = .{ .array = &[_]value.Value{
+            .{ .array = &[_]value.Value{ .{ .uint = 111 }, .{ .string = "PistolReload" } } },
+            .{ .array = &[_]value.Value{ .{ .uint = 222 }, .{ .string = "SniperRifleReload" } } },
+        } } },
+        .{ .name = "m_AnimationClips", .value = .{ .array = &[_]value.Value{
+            .{ .pptr = .{ .file_id = 0, .path_id = 900 } },
+            .{ .pptr = .{ .file_id = 0, .path_id = 901 } },
+        } } },
+        .{ .name = "m_Controller", .value = .{ .obj = &[_]value.Field{
+            .{ .name = "m_StateMachineArray", .value = .{ .array = &machines } },
+        } } },
+    } };
+    const ac = try AnimatorController.fromValue(allocator, v);
+    try std.testing.expectEqual(@as(usize, 2), ac.state_machine_count);
+    try std.testing.expectEqual(@as(usize, 2), ac.states.len);
+    try std.testing.expectEqualStrings("PistolReload", ac.tosPath(ac.states[0].name_id));
+    try std.testing.expectEqualStrings("SniperRifleReload", ac.tosPath(ac.states[1].name_id));
+    // The state's name is a hash; the clip is what makes it useful. A controller that
+    // dropped the clip left a caller with 96 names and no way to tell which clip any of
+    // them played.
+    try std.testing.expectEqual(@as(i32, 1), ac.states[0].motion_index);
+    try std.testing.expectEqual(@as(i64, 901), ac.states[0].motion.path_id);
+    try std.testing.expect(!ac.states[0].blend_tree);
+    // An older controller states the clip on the state itself, and still resolves.
+    try std.testing.expectEqual(@as(i32, -1), ac.states[1].motion_index);
+    try std.testing.expectEqual(@as(i64, 902), ac.states[1].motion.path_id);
+    try std.testing.expectEqual(@as(usize, 0), @as(usize, @intCast(ac.states[0].motion.file_id)));
 }
 
 test "animatorOverrideController fromValue reads the override pairs" {
