@@ -5823,22 +5823,39 @@ fn cmdInfo(path: []const u8, rest: []const []const u8, bytes: []const u8, stdout
     var dump = false;
     var objects = false;
     var json = false;
-    for (rest) |arg| {
+    var trees_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const arg = rest[i];
         if (std.mem.eql(u8, arg, "--dump")) {
             dump = true;
         } else if (std.mem.eql(u8, arg, "--objects")) {
             objects = true;
         } else if (std.mem.eql(u8, arg, "--json")) {
             json = true;
+        } else if (std.mem.eql(u8, arg, "--trees")) {
+            i += 1;
+            if (i >= rest.len) return usageError("unityz: --trees needs a file\n", .{});
+            trees_path = rest[i];
         } else {
             return usageError("unityz: unknown info option '{s}'\n", .{arg});
         }
     }
+    // A tree names an object: a typeless file's table is `path_id`/`class`/`offset`/`size`
+    // and nothing else unless the class tree is supplied, which is what `--builtin` (or a
+    // `--trees` table) provides. Callers that plan imports by name need it here.
+    var trees_arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer trees_arena_state.deinit();
+    const trees_arena = trees_arena_state.allocator();
+    const injected: ?*const InjectedTrees = if (dump or objects)
+        try loadTrees(trees_arena, trees_path, stdout)
+    else
+        null;
     const sniff = unityz.container.sniff(bytes);
     switch (sniff.container) {
-        .webfile => return printWebFile(bytes, dump, objects, json, stdout),
-        .bundle => return printBundle(bytes, dump, objects, json, stdout),
-        .serialized => return printSerialized(bytes, dump, objects, json, stdout),
+        .webfile => return printWebFile(bytes, dump, objects, json, injected, stdout),
+        .bundle => return printBundle(bytes, dump, objects, json, injected, stdout),
+        .serialized => return printSerialized(bytes, dump, objects, json, injected, stdout),
         .archive => return error.UnsupportedArchive,
         .unknown => return error.UnknownFormat,
     }
@@ -5895,7 +5912,7 @@ fn writeContainerEntryJson(arena: std.mem.Allocator, path: []const u8, bytes: []
     try stdout.writeByte('}');
 }
 
-fn printWebFile(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
+fn printWebFile(bytes: []const u8, dump: bool, objects: bool, json: bool, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -5913,7 +5930,7 @@ fn printWebFile(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout
             var first = true;
             for (wf.entries) |e| {
                 if (unityz.container.sniff(e.data).container != .serialized) continue;
-                try dumpObjectTableJson(arena, e.data, e.path, &first, stdout);
+                try dumpObjectTableJson(arena, e.data, e.path, injected, &first, stdout);
             }
             try stdout.print("]", .{});
         }
@@ -5926,8 +5943,8 @@ fn printWebFile(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout
     for (wf.entries) |e| {
         try stdout.print("  {s}  ({d} bytes)\n", .{ e.path, e.data.len });
     }
-    if (objects) try dumpContainerEntries(arena, wf.entries, "entry", false, stdout);
-    if (dump) try dumpContainerEntries(arena, wf.entries, "entry", true, stdout);
+    if (objects) try dumpContainerEntries(arena, wf.entries, "entry", false, injected, stdout);
+    if (dump) try dumpContainerEntries(arena, wf.entries, "entry", true, injected, stdout);
 }
 
 /// A Shader's display name: `m_ParsedForm.m_Name` (its authored name),
@@ -6003,7 +6020,7 @@ fn emitShadersJson(arena: std.mem.Allocator, nodes: anytype, stdout: *Io.Writer)
     try stdout.print("]", .{});
 }
 
-fn printBundle(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
+fn printBundle(bytes: []const u8, dump: bool, objects: bool, json: bool, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -6027,7 +6044,7 @@ fn printBundle(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout:
             var first = true;
             for (b.nodes) |n| {
                 if (unityz.container.sniff(n.data).container != .serialized) continue;
-                try dumpObjectTableJson(arena, n.data, n.path, &first, stdout);
+                try dumpObjectTableJson(arena, n.data, n.path, injected, &first, stdout);
             }
             try stdout.print("]", .{});
         }
@@ -6051,11 +6068,11 @@ fn printBundle(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout:
     for (b.nodes) |n| {
         try stdout.print("  {s}  ({d} bytes)\n", .{ n.path, n.size });
     }
-    if (objects) try dumpContainerEntries(arena, b.nodes, "node", false, stdout);
-    if (dump) try dumpContainerEntries(arena, b.nodes, "node", true, stdout);
+    if (objects) try dumpContainerEntries(arena, b.nodes, "node", false, injected, stdout);
+    if (dump) try dumpContainerEntries(arena, b.nodes, "node", true, injected, stdout);
 }
 
-fn printSerialized(bytes: []const u8, dump: bool, objects: bool, json: bool, stdout: *Io.Writer) !void {
+fn printSerialized(bytes: []const u8, dump: bool, objects: bool, json: bool, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -6070,7 +6087,7 @@ fn printSerialized(bytes: []const u8, dump: bool, objects: bool, json: bool, std
         if (objects) {
             try stdout.print(",\"object_list\":[", .{});
             var first = true;
-            try dumpObjectTableJson(arena, bytes, null, &first, stdout);
+            try dumpObjectTableJson(arena, bytes, null, injected, &first, stdout);
             try stdout.print("]", .{});
         }
         try stdout.print(",\"externals_list\":[", .{});
@@ -6136,18 +6153,30 @@ fn printSerialized(bytes: []const u8, dump: bool, objects: bool, json: bool, std
         try stdout.print("  {d}  {s} (class {d})\n", .{ c.count, name, c.class_id });
     }
 
-    if (objects) try dumpObjectTable(arena, bytes, stdout);
+    if (objects) try dumpObjectTable(arena, bytes, injected, stdout);
     if (dump) try dumpObjects(&sf, stdout);
 }
 
 /// Best-effort `m_Name` of an object, read through its type tree. Empty
 /// when the object has no usable tree, no name, or fails to read.
-fn objectName(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, o: *const unityz.serialized.ObjectInfo) []const u8 {
-    const type_index = o.type_index orelse return "";
-    if (type_index >= sf.types.len) return "";
-    const tree = sf.types[type_index].type_tree;
-    if (tree.roots.len == 0) return "";
+fn objectName(arena: std.mem.Allocator, sf: *const unityz.serialized.SerializedFile, o: *const unityz.serialized.ObjectInfo, injected: ?*const InjectedTrees, own_basename: []const u8) []const u8 {
     const data = sf.objectData(o) orelse return "";
+    // A typeless file carries no tree of its own, so the name is read through the tree
+    // the caller supplied (`--builtin`, or a `--trees` script table). Without one the
+    // table still lists the object, only unnamed.
+    var tree: *const unityz.typetree.TypeTree = undefined;
+    const own_tree = if (o.type_index) |type_index|
+        (if (type_index < sf.types.len) &sf.types[type_index].type_tree else null)
+    else
+        null;
+    if (own_tree != null and own_tree.?.roots.len != 0) {
+        tree = own_tree.?;
+    } else if (injected) |inj| {
+        tree = injectedTreeFor(arena, inj, sf, own_basename, o.class_id, data) orelse return "";
+    } else {
+        return "";
+    }
+    if (tree.roots.len == 0) return "";
     var r = unityz.streams.Reader.init(data);
     r.endian = sf.endian;
     // A record's fields are read in tree order from byte 0, so when m_Name
@@ -6176,6 +6205,7 @@ fn dumpContainerEntries(
     entries: anytype,
     entry_label: []const u8,
     full_dump: bool,
+    injected: ?*const InjectedTrees,
     stdout: *Io.Writer,
 ) !void {
     for (entries) |e| {
@@ -6184,14 +6214,14 @@ fn dumpContainerEntries(
         if (full_dump) {
             try dumpSerializedBytes(arena, e.data, stdout);
         } else {
-            try dumpObjectTable(arena, e.data, stdout);
+            try dumpObjectTable(arena, e.data, injected, stdout);
         }
     }
 }
 
 /// Prints the object table (path id, class, byte start, size, and `m_Name`
 /// when one can be read) of a serialized file.
-fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writer) !void {
+fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, injected: ?*const InjectedTrees, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         failure("  serialized parse failed: {s}\n", .{@errorName(err)});
         return;
@@ -6210,7 +6240,7 @@ fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writ
         defer _ = name_arena_state.reset(.retain_capacity);
         const name = className(o.class_id) orelse "Class";
         try stdout.print("  {d}  {s} (class {d})  start {d}  size {d}", .{ o.path_id, name, o.class_id, o.byte_start, o.byte_size });
-        const nm = objectName(name_arena, &sf, o);
+        const nm = objectName(name_arena, &sf, o, injected, "");
         if (nm.len != 0) try stdout.print("  \"{s}\"", .{nm});
         try stdout.writeByte('\n');
     }
@@ -6221,7 +6251,7 @@ fn dumpObjectTable(arena: std.mem.Allocator, bytes: []const u8, stdout: *Io.Writ
 /// `first` is the caller's separator state, shared across every node of a
 /// container: a node that emits nothing (parse failure, or no objects) must
 /// not leave a dangling comma behind, which is what a per-call index does.
-fn dumpObjectTableJson(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, first: *bool, stdout: *Io.Writer) !void {
+fn dumpObjectTableJson(arena: std.mem.Allocator, bytes: []const u8, node: ?[]const u8, injected: ?*const InjectedTrees, first: *bool, stdout: *Io.Writer) !void {
     const sf = unityz.serialized.parse(arena, bytes) catch |err| {
         // The caller already sniffed these bytes as a serialized file, so a
         // parse failure here drops objects from the listing; reporting it
@@ -6244,7 +6274,7 @@ fn dumpObjectTableJson(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
             try stdout.writeByte(',');
         }
         try stdout.print("\"path_id\":{d},\"class\":{d},\"offset\":{d},\"size\":{d}", .{ o.path_id, o.class_id, o.byte_start, o.byte_size });
-        const nm = objectName(name_arena, &sf, o);
+        const nm = objectName(name_arena, &sf, o, injected, node orelse "");
         if (nm.len != 0) {
             try stdout.writeAll(",\"name\":");
             try writeJsonString(stdout, unityz.streams.trimNul(nm));
@@ -7409,7 +7439,7 @@ fn hashSerializedBytes(arena: std.mem.Allocator, bytes: []const u8, node: ?[]con
                 .hash = h,
                 .size = @intCast(data.len),
                 .node = node,
-                .name = objectName(name_arena, &sf, o),
+                .name = objectName(name_arena, &sf, o, null, ""),
             });
         } else {
             try stdout.print("{d}\t{x:0>16}\t{s} (class {d})\t{d} bytes\n", .{

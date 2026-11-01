@@ -9,6 +9,16 @@ This is a 0.x project: minor bumps (`0.Y.z`) may change CLI behavior or output
 shape, patch bumps are expected not to. Releases are tag-driven; see the
 "Releases" section of the README.
 
+## [Unreleased]
+
+### Fixed
+
+- `info --objects` names the objects of a typeless file when a class tree is supplied
+  (`--builtin`, or `--trees`). The table read `m_Name` only through a tree the file carries,
+  and a player's own build strips them, so a `.unity3d` node listed 169 objects and named
+  none while `extract --json --builtin` decoded every name. A caller that plans imports from
+  the table had nothing to plan with.
+
 ## [0.2.0] - 2026-11-01
 
 ### Fixed
