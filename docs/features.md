@@ -166,7 +166,10 @@ layer a full mip chain, and the tool slices it by that stride. See
   humanoid clip sampler reads
 - AnimatorControllers (91), AnimatorOverrideControllers (221),
   Animators (95): JSON summaries with names resolved through TOS hash
-  tables and the file's objects. Each state names the clip it plays: a build
+  tables and the file's objects. `info --objects` names every object it can read
+  through a class tree - the file's own, or the one `--builtin`/`--trees`
+  supplies - so a typeless player build's table reads `ui_game_symbol_block_upgrade`
+  rather than a bare path id. Each state names the clip it plays: a build
   from 2020 on drops `m_Motion` and names the clip through a blend-tree leaf's
   `m_ClipID`, an index into `m_AnimationClips`, which the exporter resolves to
   that clip's path id (`motion`), its index (`motionIndex`) and whether the
