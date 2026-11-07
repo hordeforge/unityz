@@ -116,6 +116,12 @@ layer a full mip chain, and the tool slices it by that stride. See
     into its top nibble (Float16 normals, byte 0x34) decodes to the stride the
     buffer actually has; see
     [ADR 0001](adrs/0001-mesh-channel-dimension-nibbles.md).
+  - A mesh with more than one submesh keeps the split beside the geometry: the
+    primitive's `extras.submeshes` lists each submesh's `index`, `first` and
+    `count` in the written index buffer (quads already expanded, winding already
+    reversed), because one primitive draws every submesh and a consumer that
+    draws a sign's frame and its panel with two materials needs to know which
+    indices are which. A single-submesh mesh writes no extras.
   - Skinned meshes export the rig too: JOINTS_0/WEIGHTS_0 accessors plus a
     glTF skin whose joints sit at their bind world transforms and whose
     inverseBindMatrices are the raw Unity bind poses, so the rest pose

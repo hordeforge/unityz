@@ -9,6 +9,16 @@ This is a 0.x project: minor bumps (`0.Y.z`) may change CLI behavior or output
 shape, patch bumps are expected not to. Releases are tag-driven; see the
 "Releases" section of the README.
 
+## [Unreleased]
+
+### Added
+
+- A multi-submesh mesh's glTF primitive carries `extras.submeshes`, one
+  `{index, first, count}` run per submesh in the written index buffer. The split
+  was lost on export: 73 of the meshes in one container have two or more
+  submeshes (a sign's canvas and its panel among them), and a consumer that draws
+  them with two materials had no way to slice the single primitive's indices.
+
 ## [0.3.0] - 2026-11-01
 
 ### Fixed

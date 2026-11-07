@@ -5006,9 +5006,16 @@ fn writeMeshGlb(
     // Walk submeshes: triangles (topology 0) and quads (topology 2, each
     // quad becomes two triangles). Winding reversed for the X mirror.
     var index_cursor: usize = 0;
+    // One primitive covers every submesh, so the split has to travel beside the geometry: a
+    // consumer that draws a mesh with two materials (a sign's frame and its panel) needs to
+    // know which written indices belong to which submesh, and the primitive alone says nothing.
+    // Each run is in written-index units, after quads became two triangles and the winding was
+    // reversed, so a splitter can slice the accessor without re-reading the index buffer.
+    var submesh_runs: std.ArrayList([3]u32) = .empty; // {index, first, count}
     if (unityz.classes.fieldOf(v, "m_SubMeshes")) |subs| {
         if (subs == .array) {
-            for (subs.array) |sub| {
+            try submesh_runs.ensureTotalCapacity(arena, subs.array.len);
+            for (subs.array, 0..) |sub, submesh_index| {
                 const topology = unityz.classes.intField(sub, "topology") orelse 0;
                 const per_face: usize = switch (topology) {
                     0 => 3,
@@ -5023,6 +5030,7 @@ fn writeMeshGlb(
                 const end = start + @min(want, index_slots - start);
                 index_cursor = end;
                 const faces = (end - start) / per_face;
+                const written_before = bin.getWritten().len;
                 for (0..faces) |f| {
                     const face_start = start + f * per_face;
                     if (per_face == 4) {
@@ -5048,6 +5056,11 @@ fn writeMeshGlb(
                         try writeIndex(&bin, use_u16, ia);
                     }
                 }
+                const elem_size: usize = if (use_u16) 2 else 4;
+                const written = (bin.getWritten().len - written_before) / elem_size;
+                if (written == 0) continue;
+                const first: u32 = @intCast((written_before - idx_off) / elem_size);
+                try submesh_runs.append(arena, .{ @intCast(submesh_index), first, @intCast(written) });
             }
         }
     }
@@ -5230,6 +5243,14 @@ fn writeMeshGlb(
         try js.print(",\"JOINTS_0\":{d},\"WEIGHTS_0\":{d}", .{ jnt_acc, wgt_acc });
     }
     try js.print("}},\"indices\":{d},\"mode\":4", .{idx_acc});
+    if (submesh_runs.items.len > 1) {
+        try js.writeAll(",\"extras\":{\"submeshes\":[");
+        for (submesh_runs.items, 0..) |run, i| {
+            if (i != 0) try js.writeByte(',');
+            try js.print("{{\"index\":{d},\"first\":{d},\"count\":{d}}}", .{ run[0], run[1], run[2] });
+        }
+        try js.writeAll("]}");
+    }
     try js.writeAll("}]}],\"accessors\":[");
     // POSITION
     try js.print("{{\"bufferView\":0,\"componentType\":5126,\"count\":{d},\"type\":\"VEC3\",\"min\":[{d},{d},{d}],\"max\":[{d},{d},{d}]}}", .{ vcount, pos_min[0], pos_min[1], pos_min[2], pos_max[0], pos_max[1], pos_max[2] });
@@ -11619,6 +11640,90 @@ test "writeObjFloat matches Python's %.9g" {
     try std.testing.expectError(error.NonFinite, writeObjFloat(&w, std.math.nan(f64)));
     // Nothing was emitted for a rejected value.
     try std.testing.expectEqual(@as(usize, 0), w.getWritten().len);
+}
+
+test "a two-submesh mesh keeps its runs beside the primitive" {
+    // One primitive covers every submesh, so the split has to travel with it: a sign's canvas
+    // and its panel are two submeshes and two materials, and a consumer that draws them needs
+    // the written index ranges. `first` and `count` are in written indices, after a quad would
+    // have become two triangles.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var data: [3 * 20]u8 = undefined;
+    const positions = [_][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 } };
+    for (0..3) |i| {
+        const base = i * 20;
+        for (0..3) |c| {
+            std.mem.writeInt(u32, data[base + c * 4 ..][0..4], @bitCast(positions[i][c]), .little);
+        }
+        std.mem.writeInt(u32, data[base + 12 ..][0..4], @bitCast(positions[i][0]), .little);
+        std.mem.writeInt(u32, data[base + 16 ..][0..4], @bitCast(positions[i][1]), .little);
+    }
+    const indices = [_]u8{ 0, 0, 1, 0, 2, 0, 1, 0, 2, 0, 0, 0 }; // 6 x u16
+    const chan = struct {
+        fn make(comptime offset: i64, comptime format: i64, comptime dimension: i64) unityz.value.Value {
+            const fields = [_]unityz.value.Field{
+                .{ .name = "stream", .value = .{ .int = 0 } },
+                .{ .name = "offset", .value = .{ .int = offset } },
+                .{ .name = "format", .value = .{ .int = format } },
+                .{ .name = "dimension", .value = .{ .int = dimension } },
+            };
+            return .{ .obj = &fields };
+        }
+    };
+    const v = unityz.value.Value{ .obj = &[_]unityz.value.Field{
+        .{ .name = "m_Name", .value = .{ .string = "twosubs" } },
+        .{ .name = "m_MeshCompression", .value = .{ .int = 0 } },
+        .{ .name = "m_IndexFormat", .value = .{ .int = 0 } },
+        .{ .name = "m_IndexBuffer", .value = .{ .bytes = &indices } },
+        .{ .name = "m_SubMeshes", .value = .{ .array = &[_]unityz.value.Value{
+            .{ .obj = &[_]unityz.value.Field{
+                .{ .name = "topology", .value = .{ .int = 0 } },
+                .{ .name = "indexCount", .value = .{ .int = 3 } },
+            } },
+            .{ .obj = &[_]unityz.value.Field{
+                .{ .name = "topology", .value = .{ .int = 0 } },
+                .{ .name = "indexCount", .value = .{ .int = 3 } },
+            } },
+        } } },
+        .{ .name = "m_VertexData", .value = .{ .obj = &[_]unityz.value.Field{
+            .{ .name = "m_VertexCount", .value = .{ .int = 3 } },
+            .{ .name = "m_Channels", .value = .{ .array = &[_]unityz.value.Value{
+                chan.make(0, 0, 3),
+                chan.make(0, 0, 0),
+                chan.make(0, 0, 0),
+                chan.make(0, 0, 0),
+                chan.make(12, 0, 2),
+            } } },
+            .{ .name = "m_DataSize", .value = .{ .bytes = &data } },
+        } } },
+    } };
+    var mesh = unityz.classes.Mesh.fromValue(v);
+    mesh.formats = .modern;
+    const sf = unityz.serialized.SerializedFile{
+        .version = 22,
+        .file_size = 0,
+        .data_offset = 0,
+        .metadata_size = 0,
+        .endian = .little,
+        .unity_version = "2022.3.62f2",
+        .types = &.{},
+        .objects = &.{},
+        .script_types = &.{},
+        .externals = &.{},
+        .ref_types = &.{},
+        .source = "",
+    };
+    const glb = try writeMeshGlb(a, &sf, v, &mesh, null, null, null);
+    const json_len = std.mem.readInt(u32, glb[12..16], .little);
+    const json = glb[20 .. 20 + json_len];
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        json,
+        "\"extras\":{\"submeshes\":[{\"index\":0,\"first\":0,\"count\":3},{\"index\":1,\"first\":3,\"count\":3}]}",
+    ) != null);
 }
 
 test "a packed Float16 channel table exports geometry instead of being refused" {
