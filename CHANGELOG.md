@@ -13,11 +13,12 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ### Added
 
-- A multi-submesh mesh's glTF primitive carries `extras.submeshes`, one
-  `{index, first, count}` run per submesh in the written index buffer. The split
+- A multi-submesh mesh exports one glTF primitive per submesh, each with its own
+  indices accessor and `extras.submesh`, and the mesh carries `extras.submeshes`
+  with each run's `{index, first, count}` in the written index buffer. The split
   was lost on export: 73 of the meshes in one container have two or more
-  submeshes (a sign's canvas and its panel among them), and a consumer that draws
-  them with two materials had no way to slice the single primitive's indices.
+  submeshes (a sign's canvas and its panel among them), and an importer that turns
+  primitives into material slots drew one material over both.
 
 ## [0.3.0] - 2026-11-01
 

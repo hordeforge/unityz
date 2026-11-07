@@ -5125,10 +5125,19 @@ fn writeMeshGlb(
     // Accessor / buffer-view ordinals: 0 = POSITION, then NORMAL, TEXCOORD,
     // indices, then (when skinned) WEIGHTS, JOINTS, inverseBindMatrices.
     const n_bools: usize = @as(usize, @intFromBool(has_n)) + @as(usize, @intFromBool(has_t));
-    const idx_acc: usize = 1 + n_bools; // indices accessor
-    const wgt_acc = idx_acc + 1;
-    const jnt_acc = idx_acc + 2;
-    const ib_acc = idx_acc + 3;
+    // One primitive per submesh, so there is one indices accessor per run rather than one in
+    // total: an importer turns every primitive into a material slot, which is what a sign's
+    // frame and panel need. A mesh with one submesh keeps the single-primitive shape it had.
+    var prims: []const [3]u32 = submesh_runs.items;
+    if (prims.len == 0) {
+        var single = [_][3]u32{.{ 0, 0, @intCast(idx_count) }};
+        prims = try arena.dupe([3]u32, &single);
+    }
+    const n_prims: usize = prims.len;
+    const idx_acc: usize = 1 + n_bools; // first indices accessor
+    const wgt_acc = idx_acc + n_prims;
+    const jnt_acc = idx_acc + n_prims + 1;
+    const ib_acc = idx_acc + n_prims + 2;
     const name = unityz.streams.trimNul(mesh.name);
     var jaw = std.Io.Writer.Allocating.init(arena);
     const js = &jaw.writer;
@@ -5229,29 +5238,40 @@ fn writeMeshGlb(
     }
     try js.writeAll(",\"meshes\":[{\"name\":");
     try writeJsonString(js, name);
-    try js.writeAll(",\"primitives\":[{\"attributes\":{\"POSITION\":0");
-    var acc_next: usize = 1;
-    if (has_n) {
-        try js.print(",\"NORMAL\":{d}", .{acc_next});
-        acc_next += 1;
+    try js.writeAll(",\"primitives\":[");
+    for (prims, 0..) |run, pi| {
+        if (pi != 0) try js.writeByte(',');
+        try js.writeAll("{\"attributes\":{\"POSITION\":0");
+        var acc_next: usize = 1;
+        if (has_n) {
+            try js.print(",\"NORMAL\":{d}", .{acc_next});
+            acc_next += 1;
+        }
+        if (has_t) {
+            try js.print(",\"TEXCOORD_0\":{d}", .{acc_next});
+            acc_next += 1;
+        }
+        if (has_skin) {
+            try js.print(",\"JOINTS_0\":{d},\"WEIGHTS_0\":{d}", .{ jnt_acc, wgt_acc });
+        }
+        try js.print("}},\"indices\":{d},\"mode\":4", .{idx_acc + pi});
+        // The submesh ordinal is the primitive's own: a consumer that binds one material per
+        // primitive reads the renderer's material list by this index.
+        if (n_prims > 1) try js.print(",\"extras\":{{\"submesh\":{d}}}", .{run[0]});
+        try js.writeByte('}');
     }
-    if (has_t) {
-        try js.print(",\"TEXCOORD_0\":{d}", .{acc_next});
-        acc_next += 1;
-    }
-    if (has_skin) {
-        try js.print(",\"JOINTS_0\":{d},\"WEIGHTS_0\":{d}", .{ jnt_acc, wgt_acc });
-    }
-    try js.print("}},\"indices\":{d},\"mode\":4", .{idx_acc});
-    if (submesh_runs.items.len > 1) {
+    // Close the primitive list; a multi-submesh mesh also keeps the run table beside it, so a
+    // consumer that keeps one section can still slice it.
+    try js.writeByte(']');
+    if (n_prims > 1) {
         try js.writeAll(",\"extras\":{\"submeshes\":[");
-        for (submesh_runs.items, 0..) |run, i| {
+        for (prims, 0..) |run, i| {
             if (i != 0) try js.writeByte(',');
             try js.print("{{\"index\":{d},\"first\":{d},\"count\":{d}}}", .{ run[0], run[1], run[2] });
         }
         try js.writeAll("]}");
     }
-    try js.writeAll("}]}],\"accessors\":[");
+    try js.writeAll("}],\"accessors\":[");
     // POSITION
     try js.print("{{\"bufferView\":0,\"componentType\":5126,\"count\":{d},\"type\":\"VEC3\",\"min\":[{d},{d},{d}],\"max\":[{d},{d},{d}]}}", .{ vcount, pos_min[0], pos_min[1], pos_min[2], pos_max[0], pos_max[1], pos_max[2] });
     if (has_n) {
@@ -5262,7 +5282,13 @@ fn writeMeshGlb(
         try js.print(",{{\"bufferView\":{d},\"componentType\":5126,\"count\":{d},\"type\":\"VEC2\"}}", .{ bv, vcount });
     }
     const idx_component: i32 = if (use_u16) 5123 else 5125;
-    try js.print(",{{\"bufferView\":{d},\"componentType\":{d},\"count\":{d},\"type\":\"SCALAR\"}}", .{ idx_acc, idx_component, idx_count });
+    const idx_bv_base: usize = 1 + @as(usize, @intFromBool(has_n)) + @as(usize, @intFromBool(has_t));
+    for (prims, 0..) |run, pi| {
+        try js.print(
+            ",{{\"bufferView\":{d},\"componentType\":{d},\"count\":{d},\"type\":\"SCALAR\"}}",
+            .{ idx_bv_base + pi, idx_component, run[2] },
+        );
+    }
     if (has_skin) {
         try js.print(",{{\"bufferView\":{d},\"componentType\":5126,\"count\":{d},\"type\":\"VEC4\"}}", .{ wgt_acc, vcount });
         try js.print(",{{\"bufferView\":{d},\"componentType\":5123,\"count\":{d},\"type\":\"VEC4\"}}", .{ jnt_acc, vcount });
@@ -5276,8 +5302,13 @@ fn writeMeshGlb(
     if (has_t) {
         try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34962}}", .{ uv_off, idx_off - uv_off });
     }
-    const idx_view_len = (if (has_skin) wgt_off else @as(u32, @intCast(bin.getWritten().len))) - idx_off;
-    try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34963}}", .{ idx_off, idx_view_len });
+    const idx_elem: u32 = if (use_u16) 2 else 4;
+    for (prims) |run| {
+        try js.print(
+            ",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34963}}",
+            .{ idx_off + run[1] * idx_elem, run[2] * idx_elem },
+        );
+    }
     if (has_skin) {
         try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34962}}", .{ wgt_off, jnt_off - wgt_off });
         try js.print(",{{\"buffer\":0,\"byteOffset\":{d},\"byteLength\":{d},\"target\":34962}}", .{ jnt_off, bp_off - jnt_off });
@@ -11719,6 +11750,9 @@ test "a two-submesh mesh keeps its runs beside the primitive" {
     const glb = try writeMeshGlb(a, &sf, v, &mesh, null, null, null);
     const json_len = std.mem.readInt(u32, glb[12..16], .little);
     const json = glb[20 .. 20 + json_len];
+    // One primitive per submesh, each naming its own submesh, and the run table beside them.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"extras\":{\"submesh\":0}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"extras\":{\"submesh\":1}") != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         json,
