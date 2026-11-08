@@ -13,6 +13,18 @@ shape, patch bumps are expected not to. Releases are tag-driven; see the
 
 ### Added
 
+- A compressed mesh now exports. `Mesh.m_CompressedMesh` stores the geometry as bit-packed
+  vectors (`m_NumItems` values of `m_BitSize` bits, LSB-first and contiguous) instead of a
+  vertex buffer, and both writers refused `m_MeshCompression != 0` outright, so a container
+  could report no skips while its meshes were absent: 7 Days to Die's loot piles and swing set
+  are six block models with no mesh for that reason. `src/compressed.zig` unpacks the vectors
+  (an index is the bits, a float is `m_Start + bits * m_Range / ((1 << m_BitSize) - 1)`) and
+  re-packs them into the interleaved layout the writers already read, so OBJ and glTF both
+  work unchanged. Verified on the real mesh: `medicLootPileA_1` exports 2,651 vertices and
+  9,549 indices, its bounds x -0.1239..0.1481 (X-mirrored), y -0.0005..0.2064,
+  z -0.1020..0.1707 against its `m_LocalAABB` beyond the quantisation, and the glTF accessors
+  carry POSITION, TEXCOORD_0 and u16 indices.
+
 - A multi-submesh mesh exports one glTF primitive per submesh, each with its own
   indices accessor and `extras.submesh`, and the mesh carries `extras.submeshes`
   with each run's `{index, first, count}` in the written index buffer. The split

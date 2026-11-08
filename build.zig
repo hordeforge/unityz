@@ -202,6 +202,7 @@ pub fn build(b: *std.Build) void {
         "src/classes.zig",
         "src/shader.zig",
         "src/texture.zig",
+        "src/compressed.zig",
         "src/png.zig",
         "src/tga.zig",
         "src/bmp.zig",
