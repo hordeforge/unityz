@@ -200,6 +200,8 @@ UnityArchive container is detected but not yet parsed.
 - `src/container.zig` - file type detection by magic/header
 - `src/webfile.zig` - WebFile container parser and rebuilder
 - `src/bundle.zig` - UnityFS bundle parser and writer (with LZ4/LZMA blocks)
+- `src/compressed.zig` - Unity's `m_CompressedMesh` block, decoded into the
+  interleaved vertex layout the exporters read, so a compressed mesh exports
 - `src/lz4.zig` - LZ4 block decompression and compression (bundle
   rebuilds re-encode compressed blocks)
 - `src/serialized.zig` - SerializedFile parser (`.assets` and friends)

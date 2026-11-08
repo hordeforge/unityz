@@ -2845,6 +2845,14 @@ fn extractSerialized(arena: std.mem.Allocator, path: []const u8, bytes: []const 
                 if (mesh.vertex_data.len == 0 and mesh.stream.size > 0) {
                     mesh.vertex_data = resolveSidecar(sidecars, mesh.stream.path, mesh.stream.offset, mesh.stream.size);
                 }
+                // A compressed mesh keeps its geometry in `m_CompressedMesh` and leaves the
+                // vertex buffer empty, so both writers used to refuse it. Decode it into the
+                // channel-packed layout they already read; a mesh that fails to decode keeps
+                // its zero vertex count and the channel check below still refuses it.
+                if (mesh.vertex_count == 0) {
+                    const compressed_uv: usize = if (unityMajor(sf.unity_version) >= 2018) 4 else 3;
+                    if (try unityz.compressed.decode(arena, v, compressed_uv)) |decoded| mesh = decoded;
+                }
                 const obj = writeMeshObj(arena, &sf, v, &mesh) catch |err| {
                     try stdout.print("  mesh {d}: OBJ conversion failed: {s}\n", .{ o.path_id, @errorName(err) });
                     skipped += 1;
@@ -4516,7 +4524,9 @@ fn writeMeshObj(
     v: unityz.value.Value,
     mesh: *const unityz.classes.Mesh,
 ) ![]const u8 {
-    if ((unityz.classes.intField(v, "m_MeshCompression") orelse 0) != 0) return &.{};
+    // A mesh that still has no vertices after the compressed decode has nothing to write; a
+    // decoded one is channel-packed and goes through below.
+    if ((unityz.classes.intField(v, "m_MeshCompression") orelse 0) != 0 and mesh.vertex_count == 0) return &.{};
     const vch = mesh.channel(0) orelse return &.{};
     if (vch.format != 0 or vch.dimension < 3) return &.{};
     const vcount: usize = mesh.vertex_count;
@@ -4851,7 +4861,9 @@ fn writeMeshGlb(
     bone_parents: ?[]const ?u32,
     joint_worlds: ?[]const [16]f32,
 ) ![]const u8 {
-    if ((unityz.classes.intField(v, "m_MeshCompression") orelse 0) != 0) return &.{};
+    // A mesh that still has no vertices after the compressed decode has nothing to write; a
+    // decoded one is channel-packed and goes through below.
+    if ((unityz.classes.intField(v, "m_MeshCompression") orelse 0) != 0 and mesh.vertex_count == 0) return &.{};
     const vch = mesh.channel(0) orelse return &.{};
     if (vch.format != 0 or vch.dimension < 3) return &.{};
     const vcount: usize = mesh.vertex_count;

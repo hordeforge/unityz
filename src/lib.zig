@@ -60,6 +60,7 @@ pub const shader = @import("shader.zig");
 pub const texture = @import("texture.zig");
 
 /// Minimal PNG encoder.
+pub const compressed = @import("compressed.zig");
 pub const png = @import("png.zig");
 
 /// Minimal TGA encoder (uncompressed 32bpp, top-left origin).
